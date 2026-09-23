@@ -4,6 +4,7 @@
 
 - Sessions renamed with `/rename` now show that name as their heading
 - Each row shows one name; the internal agent name moved to the hover tooltip
+- Search results highlight the match in titles the same soft way as in snippets
 
 ## 0.3.2
 
