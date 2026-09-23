@@ -1,8 +1,8 @@
 {
   "name": "session-board",
   "displayName": "Session Board",
-  "description": "Live overview of your Claude Code sessions across VS Code windows: who needs input, who is working, context used, one click to jump, search across all sessions.",
-  "version": "0.3.1",
+  "description": "Your Claude Code sessions at a glance across every VS Code window: who needs input, who is working, context and usage limits, click to jump, ✕ to end, search every session.",
+  "version": "0.3.2",
   "publisher": "nima-ghorbani",
   "license": "MIT",
   "preview": true,

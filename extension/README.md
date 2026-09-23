@@ -1,8 +1,9 @@
 # Session Board
 
-Every live Claude Code session across all your VS Code windows in one sidebar: who is
-waiting for you, who is working, how much context each has used. Click a row to jump to
-that session, ✕ to end it, and search every session on disk by title or content.
+Your Claude Code sessions at a glance, across every VS Code window: who is waiting for you,
+who is working, how much context each has used, and how much of your usage limits is left.
+Click a row to jump to that session, ✕ to end it, and search every session on disk by title
+or content.
 
 Session Board is an independent, unofficial tool. It is not affiliated with or endorsed by
 Anthropic; it reads the local files and CLI output that Claude Code leaves on your machine.
@@ -41,8 +42,8 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   work is lost. The transcript stays and Claude Code's picker still offers "Resume session".
   Archiving is not something the board can do; use Claude Code's picker for that.
 - **Search**: typing narrows the live list. Enter searches every session on disk by title,
-  folder and id; tick **content** to also search transcript text (literal, case-insensitive,
-  raw transcript text including tool output). Results show live or past, the folder, up to
+  folder, id and transcript text (literal, case-insensitive, raw transcript text including
+  tool output); Esc or an emptied box clears. Results show live or past, the folder, up to
   two snippets, and whether the pass was partial. Click a past session to resume it in this
   window when its folder is open here; otherwise the resume command is copied and you can
   open the folder in a new window as the first step. Archived and unarchived past sessions

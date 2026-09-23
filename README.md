@@ -1,7 +1,8 @@
 # Session Board (repository)
 
-VS Code extension showing every live Claude Code session across all windows, with a jump to
-the session, a ✕ to end it, and search over every session on disk. The extension folder is
+VS Code extension showing your Claude Code sessions at a glance across all windows: status,
+context and usage limits, a jump to the session, a ✕ to end it, and search over every session
+on disk. The extension folder is
 the product; the gallery page is [extension/README.md](extension/README.md). This file covers
 development, layout and the optional browser front end.
 

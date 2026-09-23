@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- The search row is just the box. Enter searches every session on disk by title, folder, id
+  and transcript text; the content checkbox and the clear button are gone (Esc or an emptied
+  box clears). The "N sessions · updated" and hint lines under the header are gone too.
+- Description and tagline lead with Claude Code.
+
 ## 0.3.1
 
 - Usage limits at the top of the view: the 5-hour and 7-day windows with their reset times,

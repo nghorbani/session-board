@@ -47,8 +47,6 @@
   h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .2px; }
   .counts { color: var(--dim); font-size: 13px; }
   .counts b { color: var(--text); font-weight: 600; }
-  .spacer { flex: 1; }
-  .meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 
   .searchbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
   .searchbar input[type=text] {
@@ -56,7 +54,6 @@
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
   }
   .searchbar input[type=text]:focus { outline: none; border-color: var(--busy); }
-  .searchbar label { color: var(--dim); font-size: 12px; display: flex; gap: 5px; align-items: center; white-space: nowrap; }
 
   .usage {
     display: none; margin-bottom: 12px; padding: 8px 12px; border-radius: 6px;
@@ -167,17 +164,12 @@
   <header>
     <h1>Session Board</h1>
     <div class="counts" id="counts">loading…</div>
-    <div class="spacer"></div>
-    <div class="meta" id="meta"></div>
-    <div class="meta" id="hint" style="flex-basis:100%;color:var(--faint)"></div>
   </header>
 
   <div class="usage" id="usage"></div>
 
   <div class="searchbar">
-    <input type="text" id="q" placeholder="Search sessions… Enter searches everything" autocomplete="off" spellcheck="false">
-    <label><input type="checkbox" id="content"> content</label>
-    <button id="clear" title="Clear (Esc)">✕</button>
+    <input type="text" id="q" placeholder="Search…" title="Type to narrow the list. Enter searches every session on disk by title and content; Esc clears." autocomplete="off" spellcheck="false">
   </div>
 
   <div class="banner" id="banner"></div>
@@ -497,7 +489,7 @@ function onRowClick(ev) {
 
 function startSearch() {
   var q = document.getElementById('q').value.trim();
-  var content = document.getElementById('content').checked;
+  var content = true;                       // Enter always searches transcript text as well
   if (!q) { clearSearch(); return; }
   var requestId = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
   state.search = { requestId: requestId, query: q, content: content, pending: true, result: null };
@@ -584,7 +576,6 @@ function render() {
   var toggle = document.getElementById('toggleStale');
   if (toggle) toggle.addEventListener('click', function (ev) { ev.stopPropagation(); state.showStale = !state.showStale; render(); });
 
-  document.getElementById('meta').textContent = data ? (all.length + ' sessions · updated ' + new Date(data.at).toLocaleTimeString()) : '';
 }
 
 function onSnapshot(data) {
@@ -613,18 +604,17 @@ function notifyNewlyWaiting(waiting) {
 
 document.addEventListener('click', onRowClick);
 var qEl = document.getElementById('q');
-qEl.addEventListener('input', function () { state.filter = qEl.value.trim(); render(); });
+qEl.addEventListener('input', function () {
+  state.filter = qEl.value.trim();
+  if (!state.filter && state.search) { clearSearch(); return; }   // an emptied box drops the results too
+  render();
+});
 qEl.addEventListener('keydown', function (ev) {
   if (ev.key === 'Enter') { ev.preventDefault(); startSearch(); }
   if (ev.key === 'Escape') { ev.preventDefault(); clearSearch(); }
 });
-document.getElementById('content').addEventListener('change', function () { if (state.search) startSearch(); });
-document.getElementById('clear').addEventListener('click', clearSearch);
 document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && state.search) clearSearch(); });
 
-document.getElementById('hint').textContent = vsapi
-  ? 'Click a row to open that session · ⧉ copies its resume command · ✕ ends it.'
-  : 'Click a row to jump to that session in VS Code · ⧉ copies its claude --resume command · ✕ ends it.';
 
 (function setupNotifications() {
   var notice = document.getElementById('notifyNotice');
