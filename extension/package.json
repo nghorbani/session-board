@@ -1,0 +1,103 @@
+{
+  "name": "session-board",
+  "displayName": "Session Board",
+  "description": "Live overview of your Claude Code sessions across VS Code windows: who needs input, who is working, context used, one click to jump, search across all sessions.",
+  "version": "0.3.0",
+  "publisher": "nima-ghorbani",
+  "license": "MIT",
+  "preview": true,
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nghorbani/session-board.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nghorbani/session-board/issues"
+  },
+  "homepage": "https://github.com/nghorbani/session-board#readme",
+  "keywords": [
+    "claude code",
+    "sessions",
+    "agents",
+    "dashboard",
+    "search"
+  ],
+  "galleryBanner": {
+    "color": "#14161a",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "Lists Claude Code sessions from the user profile; it reads no workspace files."
+    },
+    "virtualWorkspaces": true
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onUri"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sessionBoard",
+          "title": "Session Board",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "sessionBoard": [
+        {
+          "type": "webview",
+          "id": "sessionBoard.view",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "sessionBoard.refresh",
+        "title": "Refresh",
+        "category": "Session Board",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sessionBoard.open",
+        "title": "Open Session…",
+        "category": "Session Board"
+      },
+      {
+        "command": "sessionBoard.search",
+        "title": "Search Sessions…",
+        "category": "Session Board",
+        "icon": "$(search)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sessionBoard.search",
+          "when": "view == sessionBoard.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sessionBoard.refresh",
+          "when": "view == sessionBoard.view",
+          "group": "navigation@2"
+        }
+      ]
+    }
+  }
+}

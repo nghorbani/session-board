@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sessions</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --panel-2: #23272e;
+    --line: #2e333c;
+    --text: #e6e9ef;
+    --dim: #8b93a1;
+    --faint: #626a78;
+    --wait: #f0b429;
+    --busy: #4a9eff;
+    --idle: #6b7280;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --crit: #f85149;
+  }
+  body.vscode {
+    --bg: var(--vscode-sideBar-background, #14161a);
+    --panel: var(--vscode-editorWidget-background, #1c1f25);
+    --panel-2: var(--vscode-list-hoverBackground, #23272e);
+    --line: var(--vscode-widget-border, #2e333c);
+    --text: var(--vscode-foreground, #e6e9ef);
+    --dim: var(--vscode-descriptionForeground, #8b93a1);
+    --faint: var(--vscode-disabledForeground, #626a78);
+    padding: 8px 6px 24px;
+    font-size: 12.5px;
+  }
+  body.vscode h1 { display: none; }
+  body.vscode .row.waiting { background: color-mix(in srgb, var(--wait) 14%, var(--panel)); }
+  body.vscode .row.waiting:hover { background: color-mix(in srgb, var(--wait) 22%, var(--panel)); }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    padding: 20px 16px 48px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .counts { color: var(--dim); font-size: 13px; }
+  .counts b { color: var(--text); font-weight: 600; }
+  .spacer { flex: 1; }
+  .meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+  .searchbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .searchbar input[type=text] {
+    flex: 1; min-width: 160px; font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
+  }
+  .searchbar input[type=text]:focus { outline: none; border-color: var(--busy); }
+  .searchbar label { color: var(--dim); font-size: 12px; display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+
+  .banner {
+    display: none; margin-bottom: 14px; padding: 9px 12px; border-radius: 6px;
+    background: #3a2a12; border: 1px solid #6b4c16; color: #f0c674; font-size: 13px;
+  }
+  .banner.show { display: block; }
+  .notice {
+    margin-bottom: 14px; padding: 9px 12px; border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--dim);
+    font-size: 13px; display: none; align-items: center; gap: 10px;
+  }
+  .notice.show { display: flex; }
+  button {
+    font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; padding: 4px 10px;
+  }
+  button:hover { border-color: #414855; }
+
+  .group { margin-bottom: 22px; }
+  .group h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .9px;
+    color: var(--faint); font-weight: 600; margin: 0 0 8px 2px;
+  }
+  .group.waiting h2 { color: var(--wait); }
+  .group.results h2 { color: var(--busy); }
+
+  .row {
+    display: grid; grid-template-columns: 1fr 128px 150px 96px;
+    gap: 12px; align-items: center; padding: 9px 12px; margin-bottom: 5px;
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--idle);
+    border-radius: 6px; cursor: pointer;
+  }
+  .row:hover { border-color: #414855; background: var(--panel-2); }
+  .row.waiting { border-left-color: var(--wait); background: #221d12; }
+  .row.waiting:hover { background: #2a2417; }
+  .row.busy { border-left-color: var(--busy); }
+  .row.past { border-left-color: var(--faint); opacity: .92; }
+  .row.copied { border-color: var(--ok); }
+  .row.jumped { border-color: var(--busy); }
+  .row.ending { opacity: .55; }
+  .row.error { border-color: var(--crit); }
+
+  .title { font-weight: 600; letter-spacing: .1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title.untitled { color: var(--dim); font-weight: 500; font-style: italic; }
+  .sub { color: var(--faint); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub .nm { color: var(--dim); }
+  .chip { color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-right: 6px; font-size: 10.5px; }
+  .chip.live { color: var(--ok); border-color: var(--ok); }
+  .snips { grid-column: 1 / -1; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  .snips div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .snips mark { background: color-mix(in srgb, var(--wait) 35%, transparent); color: inherit; border-radius: 2px; }
+
+  .actions { text-align: right; white-space: nowrap; }
+  .actions .age { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; margin-right: 4px; }
+  .iconbtn {
+    background: none; border: none; color: var(--faint); font-size: 14px; padding: 2px 5px;
+    margin-left: 2px; line-height: 1; border-radius: 4px;
+  }
+  .iconbtn:hover { color: var(--text); background: var(--panel-2); border: none; }
+  .iconbtn.end:hover { color: var(--crit); }
+  .iconbtn.confirm { color: var(--crit); font-size: 12px; font-weight: 600; background: color-mix(in srgb, var(--crit) 15%, transparent); }
+  .status { font-size: 12px; }
+  .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--idle); }
+  .row.waiting .dot { background: var(--wait); }
+  .row.busy .dot { background: var(--busy); }
+  .waitfor { color: var(--wait); }
+  .row.busy .status span:last-child { color: var(--busy); }
+  .row.idle .status span:last-child { color: var(--dim); }
+  .ctx { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .bar { height: 4px; border-radius: 2px; background: #2a2f38; margin-top: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--ok); }
+  .bar > i.warn { background: var(--warn); }
+  .bar > i.crit { background: var(--crit); }
+  .empty { color: var(--faint); font-size: 13px; padding: 6px 2px; }
+
+  @media (max-width: 720px) {
+    .row { grid-template-columns: 1fr auto; row-gap: 6px; }
+    .ctx, .actions { grid-column: 1 / -1; }
+    .actions { text-align: left; }
+    .bar { max-width: 220px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Session Board</h1>
+    <div class="counts" id="counts">loading…</div>
+    <div class="spacer"></div>
+    <div class="meta" id="meta"></div>
+    <div class="meta" id="hint" style="flex-basis:100%;color:var(--faint)"></div>
+  </header>
+
+  <div class="searchbar">
+    <input type="text" id="q" placeholder="Search sessions… Enter searches everything" autocomplete="off" spellcheck="false">
+    <label><input type="checkbox" id="content"> content</label>
+    <button id="clear" title="Clear (Esc)">✕</button>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="notice" id="notifyNotice">
+    <span>Desktop notifications are off, so you will only see waiting sessions when this tab is visible.</span>
+    <button id="notifyBtn">Enable</button>
+  </div>
+
+  <div class="group results" id="g-results" style="display:none"><h2 id="h-results">Search results</h2><div id="l-results"></div></div>
+  <div class="group waiting" id="g-waiting"><h2>Needs you</h2><div id="l-waiting"></div></div>
+  <div class="group" id="g-busy"><h2>Working</h2><div id="l-busy"></div></div>
+  <div class="group" id="g-idle"><h2>Idle</h2><div id="l-idle"></div></div>
+</div>
+
+<script>
+'use strict';
+
+/*
+ * Two hosts, one page. In a browser the page talks to the local server over fetch with the
+ * token the server embedded; inside a VS Code webview it talks to the extension over
+ * postMessage, which pushes snapshots and performs open/end/search itself.
+ */
+var vsapi = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
+if (vsapi) document.body.classList.add('vscode');
+var tokenMeta = document.querySelector('meta[name="board-token"]');
+var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
+
+var POLL_MS = 4000;
+var IDLE_HIDE_MINUTES = 120;
+var CONFIRM_MS = 3000;
+
+var state = {
+  data: null,
+  showStale: false,
+  filter: '',                               // typed text, re-applied on every render
+  search: null,                             // { requestId, query, content, pending, result }
+  pendingEnd: Object.create(null),          // sessionId -> { kind: 'confirming'|'pending'|'error', until, message }
+  prevWaiting: Object.create(null),
+  firstLoad: true,
+  flashes: Object.create(null),             // sessionId -> { cls, text, until }
+};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+  });
+}
+function fmtTokens(n) {
+  if (n == null) return '—';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'k';
+  return String(n);
+}
+function fmtAge(min) {
+  if (min == null) return '';
+  if (min < 1) return 'now';
+  if (min < 60) return min + 'm';
+  var h = Math.floor(min / 60);
+  if (h < 24) return h + 'h';
+  var d = Math.floor(h / 24);
+  return d < 60 ? d + 'd' : Math.floor(d / 30) + 'mo';
+}
+function shortCwd(p) {
+  if (!p) return '';
+  var parts = String(p).split(/[\\/]/).filter(Boolean);
+  return parts.length <= 2 ? p : parts.slice(-2).join('/');
+}
+function heading(s) {
+  if (s.title) return { text: s.title, cls: 'title' };
+  if (s.lastPrompt) return { text: s.lastPrompt.length > 70 ? s.lastPrompt.slice(0, 70) + '…' : s.lastPrompt, cls: 'title untitled' };
+  return { text: s.name || s.sessionId, cls: 'title untitled' };
+}
+function markQuery(text, q) {
+  var e = esc(text);
+  if (!q) return e;
+  var i = e.toLowerCase().indexOf(esc(q).toLowerCase());
+  if (i === -1) return e;
+  return e.slice(0, i) + '<mark>' + e.slice(i, i + esc(q).length) + '</mark>' + e.slice(i + esc(q).length);
+}
+
+// -- transport ------------------------------------------------------------------------
+
+function send(msg) { if (vsapi) vsapi.postMessage(msg); }
+function api(method, url, body) {
+  return fetch(url, { method: method, cache: 'no-store', headers: { 'X-Board-Token': TOKEN, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); });
+}
+
+// -- rows --------------------------------------------------------------------------------
+
+function actionsHtml(s, opts) {
+  var pe = state.pendingEnd[s.sessionId];
+  var flash = state.flashes[s.sessionId];
+  var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
+  var html = '<span class="age">' + esc(age) + '</span>';
+  html += '<button class="iconbtn copy" title="copy: claude --resume …" data-act="copy">⧉</button>';
+  if (opts.endable) {
+    if (pe && pe.kind === 'pending') html += '<button class="iconbtn end" disabled title="ending">…</button>';
+    else if (pe && pe.kind === 'confirming' && pe.until > Date.now()) html += '<button class="iconbtn confirm" data-act="end" title="click again to end this session and everything it started">End?</button>';
+    else html += '<button class="iconbtn end" data-act="end" title="End this session and everything it started">✕</button>';
+  }
+  return html;
+}
+
+function rowHtml(s, limits, opts) {
+  opts = opts || {};
+  var isLive = opts.past ? s.live : true;
+  var cls = !isLive ? 'past' : s.status === 'waiting' ? 'waiting' : (s.status === 'busy' ? 'busy' : 'idle');
+  var pe = state.pendingEnd[s.sessionId];
+  if (pe && pe.kind === 'pending') cls += ' ending';
+  if (pe && pe.kind === 'error') cls += ' error';
+  var flash = state.flashes[s.sessionId];
+  if (flash && flash.until > Date.now()) cls += ' ' + flash.cls;
+
+  var statusText = !isLive ? '<span>past</span>'
+    : s.status === 'waiting' ? '<span class="waitfor">' + esc(s.waitingFor || 'waiting') + '</span>'
+    : '<span>' + esc(s.status) + '</span>';
+
+  var ctx = '';
+  if (!opts.past) {
+    ctx = '<div class="ctx">' + fmtTokens(s.contextTokens);
+    if (s.contextTokens != null && limits.compact) {
+      var lvl = '';
+      if (s.contextTokens >= limits.compact) lvl = 'crit';
+      else if (limits.save && s.contextTokens >= limits.save) lvl = 'warn';
+      ctx += ' <span style="color:var(--faint)">/ ' + fmtTokens(limits.compact) + '</span></div>'
+        + '<div class="bar"><i class="' + lvl + '" style="width:' + (s.pct || 0) + '%"></i></div>';
+    } else ctx += '</div>';
+  } else {
+    ctx = '<div class="ctx">' + (s.folder ? esc(s.folder) : '') + '</div>';
+  }
+
+  var h = heading(s);
+  var chips = '';
+  if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : 'past') + '</span>';
+  if (s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';
+  var sub = chips + (s.name ? '<span class="nm">' + esc(s.name) + '</span> · ' : '') + esc(shortCwd(s.cwd));
+  if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
+
+  var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
+    : s.window ? 'click: open this session in VS Code' : 'no VS Code window found; click copies: claude --resume ' + s.sessionId;
+
+  var snips = '';
+  if (opts.past && s.snippets && s.snippets.length) {
+    snips = '<div class="snips">' + s.snippets.map(function (t) { return '<div>' + markQuery(t, opts.query) + '</div>'; }).join('') + '</div>';
+  }
+
+  return '<div class="row ' + cls + '" data-session="' + esc(s.sessionId) + '" data-live="' + (isLive ? '1' : '0') + '"'
+    + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
+    + ' title="' + esc(s.cwd) + '\n' + esc(hint) + '">'
+    + '<div><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div></div>'
+    + '<div class="status"><span class="dot"></span>' + statusText + '</div>'
+    + '<div>' + ctx + '</div>'
+    + '<div class="actions">' + actionsHtml(s, { endable: isLive && !opts.past }) + '</div>'
+    + snips
+    + '</div>';
+}
+
+function flash(sessionId, text, cls) {
+  state.flashes[sessionId] = { text: text, cls: cls, until: Date.now() + 1600 };
+  render();
+  setTimeout(render, 1700);
+}
+
+// -- actions -------------------------------------------------------------------------------
+
+function copyResume(sid, note) {
+  var cmd = 'claude --resume ' + sid;
+  if (vsapi) { send({ type: 'copy', sessionId: sid }); flash(sid, note || 'copied', 'copied'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(function () { flash(sid, note || 'copied', 'copied'); }, function () { window.prompt('Copy:', cmd); });
+  } else window.prompt('Copy:', cmd);
+}
+
+function openLive(el, sid) {
+  if (el.getAttribute('data-haswindow') !== '1') { copyResume(sid, 'copied · no window'); return; }
+  flash(sid, 'opening…', 'jumped');
+  if (vsapi) { send({ type: 'open', sessionId: sid }); return; }
+  api('POST', '/api/focus/' + encodeURIComponent(sid)).then(function (res) {
+    if (res.ok) flash(sid, '→ VS Code', 'jumped'); else copyResume(sid, 'copied · no jump');
+  }).catch(function () { copyResume(sid, 'copied · server?'); });
+}
+
+function openPast(el, sid) {
+  if (vsapi) { flash(sid, 'resuming…', 'jumped'); send({ type: 'openPast', sessionId: sid, path: el.getAttribute('data-path'), cwd: el.getAttribute('data-cwd') }); return; }
+  copyResume(sid, 'copied · resume in a terminal');
+}
+
+function requestEnd(sid, force) {
+  state.pendingEnd[sid] = { kind: 'pending' };
+  render();
+  if (vsapi) { send({ type: 'end', sessionId: sid, force: Boolean(force) }); return; }
+  api('POST', '/api/end/' + encodeURIComponent(sid) + (force ? '?force=1' : '')).then(function (res) {
+    var b = res.body || {};
+    if (res.ok && b.ok) { onEndResult({ sessionId: sid, ok: true, code: b.code }); return; }
+    if (b.code === 'needs-force') {
+      var name = (rowById(sid) || {}).title || sid.slice(0, 8);
+      if (window.confirm(name + ' is ' + (b.status || 'busy') + '. End it and everything it started? In-flight work is lost.')) { requestEnd(sid, true); return; }
+      onEndResult({ sessionId: sid, ok: false, code: 'cancelled', message: 'cancelled' });
+      return;
+    }
+    onEndResult({ sessionId: sid, ok: false, code: b.code || ('http ' + res.status), message: b.message || b.error || '' });
+  }).catch(function () { onEndResult({ sessionId: sid, ok: false, code: 'server', message: 'server not reachable' }); });
+}
+
+function onEndResult(r) {
+  if (r.ok) { state.pendingEnd[r.sessionId] = { kind: 'ended' }; flash(r.sessionId, 'ended', 'copied'); }
+  else if (r.code === 'cancelled') { delete state.pendingEnd[r.sessionId]; render(); }
+  else { state.pendingEnd[r.sessionId] = { kind: 'error', message: r.message || r.code }; render(); setTimeout(function () { if (state.pendingEnd[r.sessionId] && state.pendingEnd[r.sessionId].kind === 'error') { delete state.pendingEnd[r.sessionId]; render(); } }, 6000); }
+}
+
+function rowById(sid) {
+  var all = (state.data && state.data.sessions) || [];
+  for (var i = 0; i < all.length; i++) if (all[i].sessionId === sid) return all[i];
+  return null;
+}
+
+function onRowClick(ev) {
+  var el = ev.target.closest ? ev.target.closest('.row[data-session]') : null;
+  if (!el) return;
+  var sid = el.getAttribute('data-session');
+  var btn = ev.target.closest ? ev.target.closest('button[data-act]') : null;
+  if (btn) {
+    ev.stopPropagation();
+    var act = btn.getAttribute('data-act');
+    if (act === 'copy') { copyResume(sid); return; }
+    if (act === 'end') {
+      var pe = state.pendingEnd[sid];
+      if (pe && pe.kind === 'confirming' && pe.until > Date.now()) { requestEnd(sid, false); return; }
+      state.pendingEnd[sid] = { kind: 'confirming', until: Date.now() + CONFIRM_MS };
+      render();
+      setTimeout(function () { var p = state.pendingEnd[sid]; if (p && p.kind === 'confirming' && p.until <= Date.now()) { delete state.pendingEnd[sid]; render(); } }, CONFIRM_MS + 50);
+      return;
+    }
+    return;
+  }
+  if (el.getAttribute('data-live') === '1') openLive(el, sid); else openPast(el, sid);
+}
+
+// -- search -------------------------------------------------------------------------------
+
+function startSearch() {
+  var q = document.getElementById('q').value.trim();
+  var content = document.getElementById('content').checked;
+  if (!q) { clearSearch(); return; }
+  var requestId = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
+  state.search = { requestId: requestId, query: q, content: content, pending: true, result: null };
+  render();
+  if (vsapi) { send({ type: 'search', query: q, content: content, requestId: requestId }); return; }
+  api('GET', '/api/search?q=' + encodeURIComponent(q) + '&content=' + (content ? '1' : '0') + '&requestId=' + encodeURIComponent(requestId))
+    .then(function (res) { onSearchResult(res.ok ? res.body : { requestId: requestId, query: q, content: content, total: 0, shown: 0, partial: true, partialReason: (res.body && (res.body.error || res.body.message)) || ('http ' + res.status), rows: [] }); })
+    .catch(function () { onSearchResult({ requestId: requestId, query: q, content: content, total: 0, shown: 0, partial: true, partialReason: 'server not reachable', rows: [] }); });
+}
+function onSearchResult(r) {
+  if (!state.search || !r || r.requestId !== state.search.requestId) return;   // superseded or cleared
+  state.search.pending = false;
+  state.search.result = r;
+  render();
+}
+function clearSearch() {
+  if (state.search && state.search.pending) send({ type: 'cancelSearch', requestId: state.search.requestId });
+  state.search = null;
+  state.filter = '';
+  document.getElementById('q').value = '';
+  render();
+}
+
+// -- render -------------------------------------------------------------------------------
+
+function matchesFilter(s) {
+  if (!state.filter) return true;
+  var f = state.filter.toLowerCase();
+  return [s.title, s.lastPrompt, s.name, s.cwd, s.sessionId].some(function (v) { return typeof v === 'string' && v.toLowerCase().indexOf(f) !== -1; });
+}
+
+function render() {
+  var data = state.data;
+  var limits = (data && data.limits) || { compact: null, save: null };
+  var all = (data && data.sessions) || [];
+
+  // search results block
+  var gr = document.getElementById('g-results');
+  if (state.search) {
+    gr.style.display = '';
+    var r = state.search.result;
+    var head = 'Search results';
+    if (state.search.pending) head += ' · searching…';
+    else if (r) head += ' (' + r.shown + (r.total !== r.shown ? ' of ' + r.total : '') + ')';
+    document.getElementById('h-results').textContent = head;
+    var html = '';
+    if (r) {
+      if (r.partial) html += '<div class="empty" style="color:var(--warn)">Partial results: ' + esc(r.partialReason || 'some transcripts could not be searched') + (r.skipped ? ' · ' + r.skipped + ' unmatched files skipped' : '') + '</div>';
+      if (r.content && r.rgAvailable === false) html += '<div class="empty" style="color:var(--warn)">ripgrep (rg) not found; title search only.</div>';
+      html += r.rows.length ? r.rows.map(function (s) { return rowHtml(s, limits, { past: true, query: r.query }); }).join('') : '<div class="empty">No session matches “' + esc(r.query) + '”.</div>';
+    }
+    document.getElementById('l-results').innerHTML = html;
+  } else gr.style.display = 'none';
+
+  var waiting = [], busy = [], idle = [];
+  all.forEach(function (s) {
+    if (!matchesFilter(s)) return;
+    if (state.pendingEnd[s.sessionId] && state.pendingEnd[s.sessionId].kind === 'ended') return;
+    if (s.status === 'waiting') waiting.push(s); else if (s.status === 'busy') busy.push(s); else idle.push(s);
+  });
+  var byAge = function (a, b) { return (a.ageMinutes == null ? 1e9 : a.ageMinutes) - (b.ageMinutes == null ? 1e9 : b.ageMinutes); };
+  waiting.sort(byAge); busy.sort(byAge); idle.sort(byAge);
+  var freshIdle = idle.filter(function (s) { return s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES; });
+  var staleIdle = idle.filter(function (s) { return !(s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES); });
+  var shownIdle = state.showStale || state.filter ? idle : freshIdle;
+
+  var allWaiting = all.filter(function (s) { return s.status === 'waiting'; });
+  document.getElementById('counts').innerHTML = '<b>' + allWaiting.length + '</b> need you · <b>' + all.filter(function (s) { return s.status === 'busy'; }).length + '</b> working · <b>' + all.filter(function (s) { return s.status !== 'waiting' && s.status !== 'busy'; }).length + '</b> idle';
+  document.title = (allWaiting.length ? '(' + allWaiting.length + ') ' : '') + 'Sessions';
+
+  var banner = document.getElementById('banner');
+  if (data && data.stale) { banner.className = 'banner show'; banner.textContent = 'Showing last known data: ' + (data.error || 'could not reach the claude CLI'); }
+  else banner.className = 'banner';
+
+  document.getElementById('l-waiting').innerHTML = waiting.length ? waiting.map(function (s) { return rowHtml(s, limits); }).join('') : '<div class="empty">' + (state.filter ? 'No waiting session matches.' : 'Nothing is waiting on you.') + '</div>';
+  document.getElementById('g-busy').style.display = busy.length ? '' : 'none';
+  document.getElementById('l-busy').innerHTML = busy.map(function (s) { return rowHtml(s, limits); }).join('');
+  var idleHtml = shownIdle.map(function (s) { return rowHtml(s, limits); }).join('');
+  if (staleIdle.length && !state.filter) idleHtml += '<div class="empty"><button id="toggleStale">' + (state.showStale ? 'Hide' : 'Show') + ' ' + staleIdle.length + ' idle over 2h</button></div>';
+  document.getElementById('g-idle').style.display = idle.length ? '' : 'none';
+  document.getElementById('l-idle').innerHTML = idleHtml;
+  var toggle = document.getElementById('toggleStale');
+  if (toggle) toggle.addEventListener('click', function (ev) { ev.stopPropagation(); state.showStale = !state.showStale; render(); });
+
+  document.getElementById('meta').textContent = data ? (all.length + ' sessions · updated ' + new Date(data.at).toLocaleTimeString()) : '';
+}
+
+function onSnapshot(data) {
+  state.data = data;
+  // ended rows drop out once the snapshot no longer lists them
+  Object.keys(state.pendingEnd).forEach(function (sid) {
+    if (state.pendingEnd[sid].kind === 'ended' && !(data.sessions || []).some(function (s) { return s.sessionId === sid; })) delete state.pendingEnd[sid];
+  });
+  render();
+  notifyNewlyWaiting((data.sessions || []).filter(function (s) { return s.status === 'waiting'; }));
+}
+
+function notifyNewlyWaiting(waiting) {
+  var now = Object.create(null), fresh = [];
+  waiting.forEach(function (s) { now[s.sessionId] = true; if (!state.prevWaiting[s.sessionId]) fresh.push(s); });
+  if (!vsapi && !state.firstLoad && fresh.length && window.Notification && Notification.permission === 'granted') {
+    fresh.forEach(function (f) {
+      try { new Notification((f.title || f.name) + ' needs you', { body: (f.waitingFor || 'waiting') + ' · ' + shortCwd(f.cwd), tag: 'cc-' + f.sessionId }); } catch (e) { /* unavailable */ }
+    });
+  }
+  state.prevWaiting = now;
+  state.firstLoad = false;
+}
+
+// -- wiring ------------------------------------------------------------------------------
+
+document.addEventListener('click', onRowClick);
+var qEl = document.getElementById('q');
+qEl.addEventListener('input', function () { state.filter = qEl.value.trim(); render(); });
+qEl.addEventListener('keydown', function (ev) {
+  if (ev.key === 'Enter') { ev.preventDefault(); startSearch(); }
+  if (ev.key === 'Escape') { ev.preventDefault(); clearSearch(); }
+});
+document.getElementById('content').addEventListener('change', function () { if (state.search) startSearch(); });
+document.getElementById('clear').addEventListener('click', clearSearch);
+document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && state.search) clearSearch(); });
+
+document.getElementById('hint').textContent = vsapi
+  ? 'Click a row to open that session · ⧉ copies its resume command · ✕ ends it.'
+  : 'Click a row to jump to that session in VS Code · ⧉ copies its claude --resume command · ✕ ends it.';
+
+(function setupNotifications() {
+  var notice = document.getElementById('notifyNotice');
+  var btn = document.getElementById('notifyBtn');
+  if (vsapi || !window.Notification) return;
+  if (Notification.permission === 'default') notice.className = 'notice show';
+  btn.addEventListener('click', function () {
+    Notification.requestPermission().then(function () { notice.className = Notification.permission === 'granted' ? 'notice' : 'notice show'; });
+  });
+})();
+
+if (vsapi) {
+  window.addEventListener('message', function (ev) {
+    var m = ev.data || {};
+    if (m.type === 'snapshot' && m.data) onSnapshot(m.data);
+    else if (m.type === 'endResult') onEndResult(m);
+    else if (m.type === 'searchResult') onSearchResult(m.data);
+    else if (m.type === 'openResult') { if (m.ok) flash(m.sessionId, 'resumed', 'jumped'); else flash(m.sessionId, m.message || 'copied', 'copied'); }
+    else if (m.type === 'focusSearch') qEl.focus();
+  });
+  send({ type: 'refresh' });
+} else {
+  (function poll() {
+    api('GET', '/api/sessions').then(function (res) {
+      if (res.ok) onSnapshot(res.body);
+      else { var b = document.getElementById('banner'); b.className = 'banner show'; b.textContent = (res.body && res.body.error) || ('server error ' + res.status); }
+    }).catch(function () { var b = document.getElementById('banner'); b.className = 'banner show'; b.textContent = 'Dashboard server is not responding. Is server.cjs still running?'; })
+      .then(function () { setTimeout(poll, POLL_MS); });
+  })();
+}
+</script>
+</body>
+</html>
