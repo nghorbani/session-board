@@ -395,6 +395,129 @@ function boardAlive(exthostPid) {
   return best ? best.id : null;
 }
 
+// ---------------------------------------------------------------------------------------
+// Usage limits, via Claude Code's status line
+// ---------------------------------------------------------------------------------------
+//
+// Claude Code reports the subscription usage windows (`rate_limits`: five_hour, seven_day,
+// spend_limit; each `used_percentage` and `resets_at`) only to the configured status line
+// command, on stdin, after every reply. Session Board ships a small status line script that
+// prints a one-line footer for the session and writes the latest limits to USAGE_FILE; the
+// board reads that file. The user adds the status line to ~/.claude/settings.json themselves
+// (Connect copies the snippet and opens the file); the board never edits settings.json. No
+// credentials are read and nothing leaves the machine.
+
+const DATA_DIR = IS_WINDOWS
+  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'SessionBoard')
+  : path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'session-board');
+const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
+const STATUSLINE_NAME = IS_WINDOWS ? 'statusline.ps1' : 'statusline.sh';
+const STATUSLINE_SCRIPT = path.join(DATA_DIR, STATUSLINE_NAME);
+const STATUSLINE_SOURCE = path.join(__dirname, 'statusline', STATUSLINE_NAME);
+const SETTINGS_FILE = path.join(CLAUDE_DIR, 'settings.json');
+
+/** The settings.json command line; forward slashes because Claude Code may run it via Git Bash. */
+function statusLineCommand() {
+  const p = STATUSLINE_SCRIPT.replace(/\\/g, '/');
+  return IS_WINDOWS ? 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + p + '"' : 'bash "' + p + '"';
+}
+
+/** The `statusLine` entry as text to paste inside the top-level object of settings.json. */
+function statusLineSnippet() {
+  return '"statusLine": ' + JSON.stringify({ type: 'command', command: statusLineCommand() }, null, 2);
+}
+
+/** Read-only look at the user settings: is a status line set, and is it ours? */
+function statusLineState(settingsPath) {
+  let raw;
+  try { raw = fs.readFileSync(settingsPath || SETTINGS_FILE, 'utf8'); } catch (e) {
+    if (e && e.code === 'ENOENT') return { installed: false, ours: false, command: null, error: null };
+    return { installed: null, ours: false, command: null, error: String(e.message || e) };
+  }
+  let settings;
+  try { settings = JSON.parse(raw); } catch (e) {
+    return { installed: null, ours: false, command: null, error: 'settings.json is not plain JSON (' + String(e.message || e) + ')' };
+  }
+  const sl = settings && typeof settings === 'object' ? settings.statusLine : null;
+  const cmd = sl && typeof sl === 'object' ? String(sl.command || '') : '';
+  const mine = STATUSLINE_SCRIPT.replace(/\\/g, '/').toLowerCase();
+  const ours = Boolean(cmd) && cmd.replace(/\\/g, '/').toLowerCase().includes(mine);
+  return { installed: Boolean(sl), ours, command: cmd || null, error: null };
+}
+
+/** Copy the packaged script to its stable path when it is missing or outdated. */
+function refreshStatusLineScript() {
+  try {
+    const src = fs.readFileSync(STATUSLINE_SOURCE);
+    let cur = null;
+    try { cur = fs.readFileSync(STATUSLINE_SCRIPT); } catch (_) { /* not copied yet */ }
+    if (cur && cur.equals(src)) return { updated: false, path: STATUSLINE_SCRIPT };
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.copyFileSync(STATUSLINE_SOURCE, STATUSLINE_SCRIPT);
+    return { updated: true, path: STATUSLINE_SCRIPT };
+  } catch (e) {
+    return { updated: false, path: STATUSLINE_SCRIPT, error: String(e.message || e) };
+  }
+}
+
+/** Everything Connect needs: the script in place and the snippet the user pastes. */
+function statusLineSetup() {
+  const copied = refreshStatusLineScript();
+  return {
+    ok: !copied.error,
+    code: copied.error ? 'script-copy-failed' : 'ready',
+    message: copied.error || null,
+    script: STATUSLINE_SCRIPT,
+    command: statusLineCommand(),
+    snippet: statusLineSnippet(),
+    settingsPath: SETTINGS_FILE,
+    state: statusLineState(),
+  };
+}
+
+/**
+ * What the board shows at the top. `state`: not-connected (no status line), other-statusline
+ * (a foreign one), settings-unreadable, waiting (ours, never ran), no-limits (ran, Claude
+ * Code reported none), ok (windows present). `windows.*.resetsAt` is epoch ms.
+ */
+function usageState(settingsPath) {
+  const sl = statusLineState(settingsPath);
+  let file = null;
+  try { file = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8')); } catch (_) { file = null; }
+  const out = { statusLine: sl, at: null, ageSeconds: null, model: null, sessionId: null, windows: null, file: USAGE_FILE, dataDir: DATA_DIR };
+  if (file && typeof file === 'object') {
+    const at = Number(file.at) || null;
+    out.at = at;
+    out.ageSeconds = at ? Math.max(0, Math.round((Date.now() - at) / 1000)) : null;
+    out.model = file.model ? String(file.model) : null;
+    out.sessionId = file.session_id ? String(file.session_id) : null;
+    const rl = file.rate_limits;
+    if (rl && typeof rl === 'object') {
+      out.windows = {};
+      for (const k of ['five_hour', 'seven_day', 'spend_limit']) {
+        const w = rl[k];
+        if (!w || typeof w !== 'object') continue;
+        const pct = Number(w.used_percentage);
+        const resets = Number(w.resets_at);
+        const resetsAt = Number.isFinite(resets) && resets > 0 ? resets * 1000 : null;
+        out.windows[k] = { usedPct: Number.isFinite(pct) ? pct : null, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
+      }
+      if (!Object.keys(out.windows).length) out.windows = null;
+    }
+  }
+  out.state = sl.error ? 'settings-unreadable'
+    : !sl.installed ? 'not-connected'
+    : !sl.ours ? 'other-statusline'
+    : !file ? 'waiting'
+    : !out.windows ? 'no-limits'
+    : 'ok';
+  return out;
+}
+
+function safeUsage() {
+  try { return usageState(); } catch (_) { return null; }
+}
+
 /** Bring the session's VS Code window forward on that session. */
 function focusSession(sessionId, windowId, opts) {
   return new Promise((resolve, reject) => {
@@ -458,7 +581,7 @@ async function snapshot() {
     rows = await fetchAgents();
   } catch (e) {
     if (!lastGood) {
-      return { at: Date.now(), stale: true, error: String(e.message || e), limits, platform: process.platform, sessions: [] };
+      return { at: Date.now(), stale: true, error: String(e.message || e), limits, platform: process.platform, sessions: [], usage: safeUsage() };
     }
     rows = lastGood.rows;
     stale = true;
@@ -517,7 +640,7 @@ async function snapshot() {
   });
 
   if (!stale) lastGood = { rows, at: now };
-  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions };
+  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, usage: safeUsage() };
   return lastSnapshot;
 }
 
@@ -900,4 +1023,10 @@ module.exports = {
   searchSessions,
   cancelSearch,
   isInside,
+  DATA_DIR,
+  USAGE_FILE,
+  statusLineState,
+  refreshStatusLineScript,
+  statusLineSetup,
+  usageState,
 };

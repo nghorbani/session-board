@@ -48,13 +48,31 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   open the folder in a new window as the first step. Archived and unarchived past sessions
   look the same: the archive flag is private to Claude Code.
 - Command palette: **Session Board: Open Session…**, **Session Board: Search Sessions…**,
-  **Session Board: Refresh**. Output panel channel **Session Board** logs each decision.
+  **Session Board: Show Usage Limits**, **Session Board: Refresh**. Output panel channel
+  **Session Board** logs each decision.
 
 ## Context marks
 
 The bar appears when `autoCompactWindow` is set in `~/.claude/settings.json`; it turns amber
 at the save mark (`CONTEXT_GUARD_THRESHOLD_TOKENS`, default 92 % of the window) and red at
 the window. Without the setting the row shows the token count only.
+
+## Usage limits
+
+The strip at the top shows how much of your 5-hour and 7-day usage windows is used and when
+each resets, plus a spend limit when your organization sets one. Claude Code reports these
+numbers only to a configured [status line](https://code.claude.com/docs/en/statusline), so
+**Connect** copies a `statusLine` entry for `~/.claude/settings.json` and opens the file; you
+paste it inside the top-level braces, followed by a comma. The entry runs a small script
+shipped with the board (copied to `%LOCALAPPDATA%\SessionBoard\statusline.ps1`), which prints
+a footer like `[Opus] 5h 42% | 7d 18% | ctx 45%` in every session and saves the latest limits
+next to it in `usage.json`, the file this view reads. The board never edits settings.json,
+reads no credentials, and sends nothing anywhere.
+
+The numbers update after each Claude reply, so an idle machine shows the last known values
+with their age. Subscription plans only: with API-key billing Claude Code reports no limits.
+Claude Code hides most footer keyboard hints while a status line is set; if you already have
+a status line you want to keep, skip this.
 
 ## Limits
 

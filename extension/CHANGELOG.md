@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Usage limits at the top of the view: the 5-hour and 7-day windows with their reset times,
+  plus a spend limit when one applies. Claude Code hands these numbers only to a status
+  line, so **Connect** copies a `statusLine` snippet for `~/.claude/settings.json` that runs
+  a small Session Board script; the script prints the limits in every session's footer and
+  saves them for this view. You paste the snippet yourself; the board never edits
+  settings.json. No credentials are read; the data stays on this machine.
+- Status chips ("input needed", "busy") no longer wrap or overflow in a narrow sidebar; long
+  titles ellipsize instead.
+
 ## 0.3.0
 
 First public build.

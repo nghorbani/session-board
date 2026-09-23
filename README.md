@@ -21,6 +21,8 @@ session-dashboard/
     LICENSE
     media/icon.svg      activity-bar icon (mask)
     media/icon.png      gallery icon, 128x128
+    statusline/         Claude Code status line scripts (statusline.ps1 for Windows,
+                        statusline.sh for macOS/Linux) that record the usage limits
   server.cjs            optional browser front end over the same core.cjs + index.html
   start.ps1             runs server.cjs and opens the browser (optional)
   build.ps1             packages the .vsix with vsce 4 and installs it
@@ -74,6 +76,15 @@ it, so do not reload a window whose sessions you still need.
   conversation text. Results merge the live snapshot (union, so a live session without a
   transcript still appears), cap at 50, report `total`, `shown`, `partial`, `skipped`. All
   children are tracked per request and killed on cancel or supersede.
+
+- **Usage limits**: Claude Code passes `rate_limits` (five_hour, seven_day, spend_limit;
+  `used_percentage` and `resets_at`) to the status line command on stdin after every reply,
+  and to nothing else. Connect copies `extension/statusline/statusline.ps1` to
+  `%LOCALAPPDATA%\SessionBoard\` (a version-independent path) and puts the matching
+  `statusLine` entry on the clipboard; the user pastes it into `~/.claude/settings.json`.
+  The script writes `usage.json` next to itself; `usageState()` in core.cjs reads it on every
+  poll and the page renders the strip. The board never writes settings.json. On activation
+  the copied script is refreshed when the packaged one changed.
 
 ## Optional browser page
 

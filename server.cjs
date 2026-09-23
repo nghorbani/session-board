@@ -82,6 +82,13 @@ async function handle(req, res) {
     return sendJson(res, codes[result.code] || 500, result);
   }
 
+  if (route === '/api/usage/connect' && req.method === 'POST') {
+    // Copies the status line script into place and returns the settings.json snippet; the
+    // user pastes it. settings.json itself is never written.
+    const result = core.statusLineSetup();
+    return sendJson(res, result.ok ? 200 : 500, result);
+  }
+
   if (route === '/api/search' && req.method === 'GET') {
     const q = String(parsed.searchParams.get('q') || '').slice(0, 200);
     const content = parsed.searchParams.get('content') === '1';
