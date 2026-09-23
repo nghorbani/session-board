@@ -125,12 +125,17 @@ function contextTokens(transcriptPath) {
   return null;
 }
 
-/** Claude Code's generated title (`ai-title` lines) and the last prompt, newest wins. */
+/**
+ * Claude Code's generated title (`ai-title` lines), the name set with /rename
+ * (`custom-title` lines, re-emitted per turn like the generated one) and the last prompt;
+ * newest of each wins.
+ */
 function titleFromTranscript(transcriptPath) {
   const text = readTail(transcriptPath, TITLE_TAIL_BYTES);
-  if (text == null) return { title: null, lastPrompt: null };
+  if (text == null) return { title: null, customTitle: null, lastPrompt: null };
   const lines = text.split('\n');
   let title = null;
+  let customTitle = null;
   let lastPrompt = null;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
@@ -138,15 +143,18 @@ function titleFromTranscript(transcriptPath) {
     if (!title && line.indexOf('"ai-title"') !== -1) {
       try { const o = JSON.parse(line); if (o && o.aiTitle) title = String(o.aiTitle); } catch (_) { /* skip */ }
     }
+    if (!customTitle && line.indexOf('"custom-title"') !== -1) {
+      try { const o = JSON.parse(line); if (o && o.customTitle) customTitle = String(o.customTitle); } catch (_) { /* skip */ }
+    }
     if (!lastPrompt && line.indexOf('"last-prompt"') !== -1) {
       try {
         const o = JSON.parse(line);
         if (o && o.lastPrompt) lastPrompt = String(o.lastPrompt).replace(/\s+/g, ' ').trim();
       } catch (_) { /* skip */ }
     }
-    if (title && lastPrompt) break;
+    if (title && customTitle && lastPrompt) break;
   }
-  return { title, lastPrompt };
+  return { title, customTitle, lastPrompt };
 }
 
 /**
@@ -193,7 +201,7 @@ function listTranscripts() {
 const factsCache = new Map(); // sessionId -> { key, tokens, title, lastPrompt }
 
 function transcriptFacts(sessionId, file) {
-  const empty = { tokens: null, title: null, lastPrompt: null };
+  const empty = { tokens: null, title: null, customTitle: null, lastPrompt: null };
   if (!file) return empty;
   let stat;
   try { stat = fs.statSync(file); } catch (_) { return empty; }
@@ -201,8 +209,8 @@ function transcriptFacts(sessionId, file) {
   const hit = factsCache.get(sessionId);
   if (hit && hit.key === key) return hit;
   const tokens = contextTokens(file);
-  const { title, lastPrompt } = titleFromTranscript(file);
-  const facts = { key, tokens, title, lastPrompt };
+  const { title, customTitle, lastPrompt } = titleFromTranscript(file);
+  const facts = { key, tokens, title, customTitle, lastPrompt };
   factsCache.set(sessionId, facts);
   return facts;
 }
@@ -243,7 +251,11 @@ function registryTimes() {
     try {
       const rec = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, name), 'utf8'));
       if (rec && rec.sessionId) {
-        byId.set(rec.sessionId, { statusUpdatedAt: Number(rec.statusUpdatedAt) || Number(rec.updatedAt) || null });
+        byId.set(rec.sessionId, {
+          statusUpdatedAt: Number(rec.statusUpdatedAt) || Number(rec.updatedAt) || null,
+          name: rec.name ? String(rec.name) : null,
+          nameSource: rec.nameSource ? String(rec.nameSource) : null,   // "user" after /rename, else "derived"
+        });
       }
     } catch (_) { /* skip unreadable record */ }
   }
@@ -622,7 +634,10 @@ async function snapshot() {
       pid: Number(r.pid),
       window: w ? { id: w.windowId, exthostPid: w.exthostPid, label: windowLabel.get(w.windowId) || null } : null,
       name: r.name || String(r.sessionId).slice(0, 8),
-      title: facts.title,
+      nameSource: t.nameSource || null,
+      // a /rename (custom-title line, or the registry's user-set name) beats the generated title
+      title: facts.customTitle || (t.nameSource === 'user' && r.name ? String(r.name) : null) || facts.title,
+      generatedTitle: facts.title,
       lastPrompt: facts.lastPrompt,
       cwd: r.cwd || '',
       transcriptPath: file,
@@ -799,8 +814,9 @@ function splitPathMatch(line, marker) {
 const searchIndex = { rows: new Map(), signature: '' }; // path -> { sessionId, cwd, title, mtime, size }
 
 /**
- * Index of every top-level transcript: file sweep for existence and freshness, then two
- * ripgrep passes over whole files for the newest `aiTitle` and the first `cwd`. No head
+ * Index of every top-level transcript: file sweep for existence and freshness, then three
+ * ripgrep passes over whole files for the newest `aiTitle`, the newest `customTitle` and
+ * the first `cwd`. No head
  * or tail reads, nothing synchronous beyond readdir/stat; skipped when nothing changed.
  */
 async function sessionIndex(ctx) {
@@ -829,6 +845,17 @@ async function sessionIndex(ctx) {
       const row = rows.get(path.normalize(pm.file));
       if (!row) continue;
       try { row.title = JSON.parse('{' + pm.match + '}').aiTitle || row.title; } catch (_) { /* keep previous */ }
+    }
+    // /rename names (custom-title lines) win over generated titles; newest per file wins.
+    const customs = await run(rg.path, [...RG_BASE, '-H', '-N', '-o', '--no-heading',
+      '-e', '"customTitle":"(?:[^"\\\\]|\\\\.)*"', PROJECTS_DIR],
+    { timeout: 30000, maxBuffer: 64 * 1024 * 1024, signal: ctx && ctx.signal, onChild: ctx && ctx.track });
+    for (const line of customs.stdout.split('\n')) {
+      const pm = splitPathMatch(line, '"customTitle":"');
+      if (!pm) continue;
+      const row = rows.get(path.normalize(pm.file));
+      if (!row) continue;
+      try { row.title = JSON.parse('{' + pm.match + '}').customTitle || row.title; } catch (_) { /* keep previous */ }
     }
     const cwds = await run(rg.path, [...RG_BASE, '-H', '-N', '-o', '--no-heading', '-m', '1',
       '-e', '"cwd":"(?:[^"\\\\]|\\\\.)*"', PROJECTS_DIR],

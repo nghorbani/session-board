@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3
+
+- A session renamed with `/rename` shows that name as its heading (the transcript's
+  `custom-title` line, or the registry's user-set name); the generated title no longer
+  sticks. The line under the heading shows window and folder only; the internal agent name
+  moved to the tooltip. Search results prefer the custom title as well.
+
 ## 0.3.2
 
 - The search row is just the box. Enter searches every session on disk by title, folder, id

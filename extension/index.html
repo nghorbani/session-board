@@ -382,7 +382,7 @@ function rowHtml(s, limits, opts) {
   var chips = '';
   if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : 'past') + '</span>';
   if (s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';
-  var sub = chips + (s.name ? '<span class="nm">' + esc(s.name) + '</span> · ' : '') + esc(shortCwd(s.cwd));
+  var sub = chips + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
   var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
@@ -395,7 +395,7 @@ function rowHtml(s, limits, opts) {
 
   return '<div class="row ' + cls + '" data-session="' + esc(s.sessionId) + '" data-live="' + (isLive ? '1' : '0') + '"'
     + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
-    + ' title="' + esc(s.cwd) + '\n' + esc(hint) + '">'
+    + ' title="' + esc(s.cwd) + (s.name ? '\n' + esc(s.name) : '') + '\n' + esc(hint) + '">'
     + '<div><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div></div>'
     + '<div class="status"><span class="dot"></span>' + statusText + '</div>'
     + '<div>' + ctx + '</div>'

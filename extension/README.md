@@ -26,8 +26,9 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 - **Needs you** on top with what each session is blocked on (`permission prompt`,
   `input needed`, `dialog open`), then **Working**, then **Idle**; idle rows over 2 h fold
   behind a toggle.
-- Each row: the session's own title (falling back to its last prompt, then its name), the
-  VS Code window it lives in, its folder, status, a context bar, and time in that state.
+- Each row: the session's name (`/rename` wins over the generated title; a session with
+  neither shows its last prompt), the VS Code window it lives in, its folder, status, a
+  context bar, and time in that state. Hover for the folder and the internal agent name.
 - The badge on the activity-bar icon is the number of sessions waiting on you. When a
   session newly starts waiting, the focused window shows a toast with an Open button.
 
