@@ -429,7 +429,11 @@ const PROBE_SETTINGS = '{"disableAllHooks":true}\n';
 const PROBE_MCP = '{"mcpServers":{}}\n';
 const USAGE_TIMEOUT_MS = 30000;
 const USAGE_MIN_INTERVAL_MS = 15000;
-const USAGE_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'];
+// Older reply shape: one named object per window. Newer replies also carry a `limits` list,
+// which is what Claude Code's own usage panel renders (session, weekly_all, weekly_scoped per
+// model); that list wins when present because the named keys stopped covering per-model rows.
+const USAGE_WINDOWS = { five_hour: '5h', seven_day: '7d', seven_day_opus: '7d Opus', seven_day_sonnet: '7d Sonnet' };
+const LIMIT_KINDS = { session: ['five_hour', '5h'], weekly_all: ['seven_day', '7d'] };
 const SHAPE_CHANGED = "Claude Code's usage reply changed; update Session Board";
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
@@ -450,10 +454,56 @@ function toEpochMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
+function slug(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); }
+
+function usageWindow(label, pct, resetsAt) {
+  return { label, usedPct: pct, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
+}
+
+/** Windows from the `limits` list: key, label and order follow the list. Empty when unusable. */
+function windowsFromLimits(limits) {
+  const windows = {};
+  if (!Array.isArray(limits)) return windows;
+  for (const l of limits) {
+    if (!l || typeof l !== 'object') continue;
+    const pct = Number(l.percent != null ? l.percent : l.utilization);
+    if (!Number.isFinite(pct)) continue;
+    const kind = String(l.kind || '');
+    let key, label;
+    if (LIMIT_KINDS[kind]) {
+      [key, label] = LIMIT_KINDS[kind];
+    } else {
+      const scope = l.scope && typeof l.scope === 'object' ? l.scope : null;
+      const name = scope && ((scope.model && scope.model.display_name) || scope.surface);
+      const weekly = kind.indexOf('weekly') === 0 || String(l.group || '') === 'weekly';
+      if (name) { key = (weekly ? 'seven_day_' : kind + '_') + slug(name); label = (weekly ? '7d ' : kind.replace(/_/g, ' ') + ' ') + String(name); }
+      else if (kind) { key = slug(kind); label = kind.replace(/_/g, ' '); }
+      else continue;
+    }
+    if (windows[key]) continue;
+    windows[key] = usageWindow(label, pct, toEpochMs(l.resets_at));
+  }
+  return windows;
+}
+
+/** Windows from the named objects of the older reply shape (`utilization` or `used_percentage`). */
+function windowsFromNamed(rl) {
+  const windows = {};
+  for (const k of Object.keys(USAGE_WINDOWS)) {
+    const w = rl[k];
+    if (!w || typeof w !== 'object') continue;
+    const pct = Number(w.utilization != null ? w.utilization : w.used_percentage);
+    if (!Number.isFinite(pct)) continue;
+    windows[k] = usageWindow(USAGE_WINDOWS[k], pct, toEpochMs(w.resets_at));
+  }
+  return windows;
+}
+
 /**
- * Map the CLI's get_usage reply to the board's shape. Tolerant: `utilization` or
- * `used_percentage`, `resets_at` as ISO text or epoch seconds, unknown windows ignored.
- * `available` false means the CLI reports no plan limits (API key, not logged in, no plan).
+ * Map the CLI's get_usage reply to the board's shape. Tolerant: the `limits` list when it
+ * parses, else the named windows; `resets_at` as ISO text or epoch seconds; anything else in
+ * `rate_limits` ignored. `available` false means the CLI reports no plan limits (API key, not
+ * logged in, no plan). Each window carries its display `label`.
  */
 function parseUsageResponse(res) {
   if (!res || typeof res !== 'object') return { error: 'empty usage reply' };
@@ -466,15 +516,8 @@ function parseUsageResponse(res) {
   if (!out.available) return out;
   const rl = res.rate_limits;
   if (!rl || typeof rl !== 'object') return Object.assign(out, { error: SHAPE_CHANGED });
-  const windows = {};
-  for (const k of USAGE_WINDOWS) {
-    const w = rl[k];
-    if (!w || typeof w !== 'object') continue;
-    const pct = Number(w.utilization != null ? w.utilization : w.used_percentage);
-    if (!Number.isFinite(pct)) continue;
-    const resetsAt = toEpochMs(w.resets_at);
-    windows[k] = { usedPct: pct, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
-  }
+  let windows = windowsFromLimits(rl.limits);
+  if (!Object.keys(windows).length) windows = windowsFromNamed(rl);
   if (!Object.keys(windows).length) return Object.assign(out, { error: SHAPE_CHANGED });
   out.windows = windows;
   const x = rl.extra_usage;
@@ -616,7 +659,12 @@ function usageState() {
     const w = rec.windows[k];
     if (!w || typeof w !== 'object') continue;
     const resetsAt = Number(w.resetsAt) || null;
-    windows[k] = { usedPct: Number.isFinite(Number(w.usedPct)) ? Number(w.usedPct) : null, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
+    windows[k] = {
+      label: w.label ? String(w.label) : (USAGE_WINDOWS[k] || k),
+      usedPct: Number.isFinite(Number(w.usedPct)) ? Number(w.usedPct) : null,
+      resetsAt,
+      expired: Boolean(resetsAt && resetsAt <= Date.now()),
+    };
   }
   if (Object.keys(windows).length) {
     out.windows = windows;

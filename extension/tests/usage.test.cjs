@@ -67,6 +67,44 @@ test('parseUsageResponse: per-model row and enabled extra usage', () => {
   assert.deepEqual(u.extraUsage, { usedPct: 12.5, usedCredits: 3, monthlyLimit: 24, currency: 'USD' });
 });
 
+test('parseUsageResponse: the limits list wins, per-model rows are labelled, noise is ignored', () => {
+  // Shape seen on 2026-09-24 (CLI 2.1.281): named keys plus a `limits` list plus many
+  // experimental windows at 0%. Only the list's three rows are meaningful.
+  const u = core.parseUsageResponse(sample({ rate_limits: {
+    five_hour: { utilization: 100, resets_at: '2026-09-24T20:09:59+00:00' },
+    seven_day: { utilization: 50, resets_at: '2026-09-27T03:59:59+00:00' },
+    seven_day_opus: null,
+    seven_day_sonnet: null,
+    nimbus_quill: { utilization: 0, resets_at: null },
+    limits: [
+      { kind: 'session', group: 'session', percent: 100, resets_at: '2026-09-24T20:09:59+00:00', scope: null, is_active: true },
+      { kind: 'weekly_all', group: 'weekly', percent: 50, resets_at: '2026-09-27T03:59:59+00:00', scope: null },
+      { kind: 'weekly_scoped', group: 'weekly', percent: 96, resets_at: '2026-09-27T03:59:59+00:00', scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+      { kind: 'weekly_scoped', group: 'weekly', percent: 3, resets_at: null, scope: { model: null, surface: 'Cowork' } },
+      { kind: 'monthly_total', group: 'monthly', percent: 8, resets_at: null, scope: null },
+      { kind: 'broken', percent: 'n/a' },
+    ],
+    extra_usage: { is_enabled: false },
+  } }));
+  assert.equal(u.error, undefined);
+  assert.deepEqual(Object.keys(u.windows), ['five_hour', 'seven_day', 'seven_day_fable', 'seven_day_cowork', 'monthly_total']);
+  assert.equal(u.windows.five_hour.label, '5h');
+  assert.equal(u.windows.seven_day.label, '7d');
+  assert.equal(u.windows.seven_day_fable.label, '7d Fable');
+  assert.equal(u.windows.seven_day_fable.usedPct, 96);
+  assert.equal(u.windows.seven_day_fable.resetsAt, Date.parse('2026-09-27T03:59:59+00:00'));
+  assert.equal(u.windows.seven_day_cowork.label, '7d Cowork');
+  assert.equal(u.windows.monthly_total.label, 'monthly total');
+  assert.equal(u.windows.nimbus_quill, undefined);
+});
+
+test('parseUsageResponse: an unusable limits list falls back to the named windows', () => {
+  const u = core.parseUsageResponse(sample({ rate_limits: { five_hour: { utilization: 9 }, limits: [{ kind: 'session' }, 'junk', null] } }));
+  assert.deepEqual(Object.keys(u.windows), ['five_hour']);
+  assert.equal(u.windows.five_hour.usedPct, 9);
+  assert.equal(u.windows.five_hour.label, '5h');
+});
+
 test('parseUsageResponse: available false is not an error', () => {
   const u = core.parseUsageResponse({ subscription_type: null, rate_limits_available: false, rate_limits: null });
   assert.equal(u.available, false);
@@ -91,6 +129,9 @@ test('usageState: loading with nothing cached, then each cached state', () => {
   assert.ok(u.ageSeconds >= 4 && u.ageSeconds <= 7);
   assert.equal(u.windows.five_hour.expired, false);
   assert.equal(u.windows.seven_day.expired, true);
+  assert.equal(u.windows.five_hour.label, '5h', 'records without a label fall back to the known name');
+  writeCache({ at: now, available: true, windows: { seven_day_fable: { label: '7d Fable', usedPct: 88, resetsAt: now + 1000 } } });
+  assert.equal(core.usageState().windows.seven_day_fable.label, '7d Fable');
   writeCache({ at: now, available: false, windows: null });
   assert.equal(core.usageState().state, 'no-limits');
   writeCache({ at: now, available: true, windows: null, error: 'claude did not answer within 30 s', errorAt: now });

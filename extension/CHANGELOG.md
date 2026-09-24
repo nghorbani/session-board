@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- Per-model weekly windows (for example "7d Fable") now show up; the strip reads the same limits list as Claude Code's own usage screen
+- New publisher id: the extension is now `nghorbani.session-board`. If you installed an earlier build from source, uninstall the old Session Board entry in the Extensions view
+
 ## 0.4.0
 
 - Usage limits now come straight from the Claude Code CLI, refreshed every 5 minutes and on ↻; no status line setup any more. If you pasted the `statusLine` entry for 0.3.1, remove it from `~/.claude/settings.json`

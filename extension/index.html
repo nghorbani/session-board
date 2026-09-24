@@ -63,9 +63,10 @@
   .usage .u-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 22px; }
   .usage .u-head b { color: var(--text); font-weight: 600; }
   .usage .u-note { color: var(--faint); font-size: 11px; margin-left: auto; white-space: nowrap; }
-  .usage .u-win { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; margin-top: 5px; }
-  .usage .u-win .lbl { min-width: 28px; white-space: nowrap; }
-  .usage .u-win .lbl { color: var(--dim); font-variant-numeric: tabular-nums; }
+  /* one grid for all rows so the bars line up whatever the label widths */
+  .usage .u-rows { display: grid; grid-template-columns: auto 1fr auto; column-gap: 8px; row-gap: 5px; align-items: center; margin-top: 5px; }
+  .usage .u-win { display: contents; }
+  .usage .u-win .lbl { min-width: 28px; white-space: nowrap; color: var(--dim); font-variant-numeric: tabular-nums; }
   .usage .u-win .bar { margin-top: 0; }
   .usage .u-win .val { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .usage .u-win .val .rs { color: var(--faint); }
@@ -272,6 +273,7 @@ function fmtAgo(sec) {
   return Math.floor(h / 24) + 'd ago';
 }
 
+// Labels for records written before windows carried their own label.
 var USAGE_LABELS = { five_hour: '5h', seven_day: '7d', seven_day_opus: '7d Opus', seven_day_sonnet: '7d Sonnet' };
 
 function usageRow(label, pct, val, lvl) {
@@ -294,20 +296,22 @@ function renderUsage(u) {
   } else {
     var note = esc(fmtAgo(u.ageSeconds)) + (u.subscriptionType ? ' · ' + esc(u.subscriptionType) : '');
     html = head + '<span class="u-note" title="' + esc(u.at ? new Date(u.at).toLocaleString() : '') + '">' + note + ' ' + refreshBtn + '</span></div>';
-    Object.keys(USAGE_LABELS).forEach(function (k) {
-      var w = u.windows && u.windows[k];
+    var rows = '';
+    Object.keys(u.windows || {}).forEach(function (k) {   // in the order the CLI listed them
+      var w = u.windows[k];
       if (!w) return;
       var expired = Boolean(w.expired || (w.resetsAt && w.resetsAt <= Date.now()));
       var pct = expired || w.usedPct == null ? 0 : Math.max(0, Math.min(100, w.usedPct));
       var lvl = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : '';
       var val = expired ? 'window reset' : (w.usedPct == null ? '—' : Math.round(w.usedPct) + '% used');
       if (w.resetsAt && !expired) val += ' <span class="rs">· ' + esc(fmtReset(w.resetsAt)) + '</span>';
-      html += usageRow(USAGE_LABELS[k], pct, val, lvl);
+      rows += usageRow(w.label || USAGE_LABELS[k] || k, pct, val, lvl);
     });
     if (u.extraUsage && u.extraUsage.usedPct != null) {
       var xp = Math.max(0, Math.min(100, u.extraUsage.usedPct));
-      html += usageRow('extra', xp, Math.round(u.extraUsage.usedPct) + '% of extra usage', xp >= 90 ? 'crit' : xp >= 70 ? 'warn' : '');
+      rows += usageRow('extra', xp, Math.round(u.extraUsage.usedPct) + '% of extra usage', xp >= 90 ? 'crit' : xp >= 70 ? 'warn' : '');
     }
+    if (rows) html += '<div class="u-rows">' + rows + '</div>';
     if (u.error) html += '<div class="u-stale">last refresh failed: ' + esc(u.error) + '</div>';
     else if (u.cacheError) html += '<div class="u-stale">numbers not cached: ' + esc(u.cacheError) + '</div>';
   }

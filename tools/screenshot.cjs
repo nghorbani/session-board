@@ -61,8 +61,9 @@ const snapshot = {
   usage: {
     state: 'ok', at: now - 2 * 60000, ageSeconds: 120, subscriptionType: 'max', available: true,
     windows: {
-      five_hour: { usedPct: 42, resetsAt: now + 2 * HOUR + 10 * 60000, expired: false },
-      seven_day: { usedPct: 18, resetsAt: now + 3 * 24 * HOUR, expired: false },
+      five_hour: { label: '5h', usedPct: 42, resetsAt: now + 2 * HOUR + 10 * 60000, expired: false },
+      seven_day: { label: '7d', usedPct: 18, resetsAt: now + 3 * 24 * HOUR, expired: false },
+      seven_day_opus: { label: '7d Opus', usedPct: 61, resetsAt: now + 3 * 24 * HOUR, expired: false },
     },
     extraUsage: null, error: null, cacheError: null,
   },

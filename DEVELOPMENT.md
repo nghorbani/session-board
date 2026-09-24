@@ -88,11 +88,15 @@ installed version and shows every session anyway.
   files, not inline JSON, because the spawn goes through `cmd.exe` and Node does not quote
   arguments in shell mode) and writes one line on stdin:
   `{"type":"control_request","request_id":"…","request":{"subtype":"get_usage","skip_behaviors":true}}`.
-  The CLI answers with a `control_response` carrying `rate_limits` (five_hour, seven_day,
-  per-model windows, extra_usage; `utilization` 0–100 and `resets_at`) and exits; no model
-  call, no hooks, no MCP servers, no transcript. This is the request the VS Code extension
-  itself sends for its usage panel; the CLI's schema marks it experimental, so
-  `parseUsageResponse()` is tolerant and reports a shape change explicitly. The result is
+  The CLI answers with a `control_response` carrying `rate_limits` and exits; no model
+  call, no hooks, no MCP servers, no transcript. `rate_limits.limits` is the list Claude
+  Code's own usage panel renders (`kind` session / weekly_all / weekly_scoped with
+  `scope.model.display_name`, `percent`, `resets_at`); the board reads that list first and
+  falls back to the named objects (`five_hour`, `seven_day`, `seven_day_opus`, …) of the
+  older shape. Everything else in `rate_limits` (experimental windows at 0%, `spend`,
+  `seven_day_breakdown`) is ignored. This is the request the VS Code extension itself sends
+  for its usage panel; the CLI's schema marks it experimental, so `parseUsageResponse()` is
+  tolerant and reports a shape change explicitly. The result is
   cached in `usage-cli.json` (a failed probe keeps the last good windows and carries the
   error); `refreshUsageIfStale()` runs from the extension's poll (5 min visible, 15 hidden)
   and from the browser server's sessions route; probes are throttled to one per 15 s and a
@@ -115,7 +119,7 @@ token embedded in the page (`X-Board-Token`) and a matching Host/Origin; JSON re
 1. Create a publisher at <https://marketplace.visualstudio.com/manage> with the
    authentication the current publishing documentation prescribes (global Personal Access
    Tokens are announced to retire on 2026-12-01).
-2. If the publisher id differs from `nima-ghorbani`, change `publisher` in
+2. If the publisher id differs from `nghorbani`, change `publisher` in
    `extension/package.json`; the extension id used for URIs and heartbeats follows it.
 3. From `extension/`: `npx @vscode/vsce@4.0.0 login <publisher>` then
    `npx @vscode/vsce@4.0.0 publish`, or upload the `.vsix` on the manage page. The
