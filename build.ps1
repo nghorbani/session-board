@@ -24,6 +24,14 @@ foreach ($f in 'core.cjs', 'extension.js') {
 node --check (Join-Path $here 'server.cjs')
 if ($LASTEXITCODE -ne 0) { throw 'syntax error in server.cjs' }
 
+Push-Location $ext
+try {
+    node --test "tests/*.test.cjs"
+    if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+} finally {
+    Pop-Location
+}
+
 # Only bypass vsce's checks for what is really missing; a published build should pass them.
 $flags = @()
 if (-not (Test-Path (Join-Path $ext 'LICENSE'))) { $flags += '--skip-license' }

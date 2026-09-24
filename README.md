@@ -46,11 +46,12 @@ Session Board appears as a new icon in the activity bar.
 
 ## Usage limits
 
-Claude Code shares your usage limits only with a status line, so the strip at the top starts
-out as **Connect**. Connect copies a small `statusLine` entry to your clipboard and opens
-`~/.claude/settings.json`; paste it once. From the next reply on, every session shows a
-footer like `[Opus] 5h 42% | 7d 18% | ctx 45%` and the board shows the bars. Subscription
-plans only; API-key billing has no limits to report.
+The strip at the top shows your 5-hour and 7-day usage windows with the time each resets,
+plus per-model weekly windows and extra usage when your plan has them. Session Board asks
+the Claude Code command line for these numbers the same way Claude Code's own usage screen
+does: a short, hook-free run that makes no model call and uses the CLI's own login. It
+refreshes every 5 minutes while the view is visible, and on ↻. Subscription plans only;
+API-key billing has no limits to report.
 
 ## Privacy
 

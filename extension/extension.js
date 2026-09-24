@@ -17,6 +17,8 @@ const core = require('./core.cjs');
 const VIEW_ID = 'sessionBoard.view';
 const POLL_VISIBLE_MS = 5000;
 const POLL_HIDDEN_MS = 15000;
+const USAGE_VISIBLE_MS = 5 * 60 * 1000;
+const USAGE_HIDDEN_MS = 15 * 60 * 1000;
 
 class BoardProvider {
   constructor(context, log) {
@@ -82,7 +84,7 @@ class BoardProvider {
         case 'search': return this.search(String(m.query || ''), Boolean(m.content), String(m.requestId || ''));
         case 'cancelSearch': return this.cancelSearch();
         case 'openPast': if (core.UUID_RE.test(sid)) return this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
-        case 'connectUsage': return this.connectUsage();
+        case 'refreshUsage': return this.refreshUsage();
         default: return;
       }
     } catch (e) {
@@ -97,40 +99,24 @@ class BoardProvider {
 
   // -- usage limits ----------------------------------------------------------------------
 
-  /**
-   * Put the status line script in place and hand the user the settings.json snippet. The
-   * user pastes it; the board never edits settings.json.
-   */
-  async connectUsage() {
-    const setup = core.statusLineSetup();
-    if (!setup.ok) {
-      this.log.warn('status line script not copied: ' + setup.message);
-      vscode.window.showWarningMessage('Session Board could not copy its status line script: ' + setup.message);
-      return;
+  /** Put the freshest usage state into the last snapshot and push it (never resend a stale one). */
+  mergeUsage() {
+    if (!this.last) return;
+    this.last.usage = core.usageState();
+    this.push();
+  }
+
+  /** Forced probe from ↻ or the command; the 15 s throttle in core still applies. */
+  async refreshUsage() {
+    try {
+      const u = await core.fetchUsage();
+      this.mergeUsage();
+      if (u && u.throttled) vscode.window.setStatusBarMessage('Session Board: usage limits were refreshed a moment ago.', 3000);
+      else if (u && u.error) this.log.warn('usage probe: ' + u.error);
+      else this.log.info('usage probe ok' + (u && u.subscriptionType ? ' (' + u.subscriptionType + ')' : ''));
+    } catch (e) {
+      this.log.error('usage refresh failed: ' + String((e && e.message) || e));
     }
-    if (setup.state.error) {
-      vscode.window.showWarningMessage('Session Board cannot read ~/.claude/settings.json: ' + setup.state.error);
-      return;
-    }
-    if (setup.state.ours) {
-      vscode.window.setStatusBarMessage('Session Board: the status line is set; limits update after the next Claude reply.', 6000);
-      return this.refresh();
-    }
-    await vscode.env.clipboard.writeText(setup.snippet);
-    const intro = setup.state.installed
-      ? 'Claude Code already has a status line (' + (setup.state.command || 'unknown command') + '). To see usage limits here, replace its "command" with the Session Board one; the full "statusLine" entry is on your clipboard.'
-      : 'Claude Code hands usage limits only to a status line. The "statusLine" entry is on your clipboard: paste it inside the top-level braces of ~/.claude/settings.json, followed by a comma. Every session then shows a footer like "[Opus] 5h 42% | 7d 18% | ctx 45%" and this view picks the numbers up after the next reply. Claude Code hides most footer keyboard hints while a status line is set.';
-    const pick = await vscode.window.showInformationMessage(intro, 'Open settings.json', 'Copy again');
-    if (pick === 'Copy again') await vscode.env.clipboard.writeText(setup.snippet);
-    if (pick === 'Open settings.json') {
-      try {
-        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(setup.settingsPath));
-        await vscode.window.showTextDocument(doc, { preview: false });
-      } catch (e) {
-        vscode.window.showWarningMessage('Could not open ' + setup.settingsPath + ': ' + String((e && e.message) || e));
-      }
-    }
-    this.log.info('status line snippet handed out: ' + setup.command);
   }
 
   // -- polling ---------------------------------------------------------------------------
@@ -161,6 +147,14 @@ class BoardProvider {
       this.inFlight = false;
     }
     const visible = Boolean(this.view && this.view.visible);
+    // Usage limits refresh on their own clock and never hold the session list back.
+    const pending = core.refreshUsageIfStale(visible ? USAGE_VISIBLE_MS : USAGE_HIDDEN_MS);
+    if (pending) {
+      pending.then((u) => {
+        this.mergeUsage();
+        if (u && u.error) this.log.warn('usage probe: ' + u.error);
+      }, (e) => this.log.warn('usage probe failed: ' + String((e && e.message) || e)));
+    }
     if (this.queued) { this.queued = false; this.schedule(200); } else this.schedule(visible ? POLL_VISIBLE_MS : POLL_HIDDEN_MS);
   }
 
@@ -377,19 +371,11 @@ function activate(context) {
       await vscode.commands.executeCommand(VIEW_ID + '.focus');
       provider.post({ type: 'focusSearch' });
     }),
-    vscode.commands.registerCommand('sessionBoard.connectUsage', () => provider.connectUsage()),
+    vscode.commands.registerCommand('sessionBoard.refreshUsage', () => provider.refreshUsage()),
     vscode.window.registerUriHandler({ handleUri: (uri) => provider.handleUri(uri) }),
     { dispose: () => provider.stop() },
   );
   log.info('activated in extension host ' + process.pid + ' as ' + ((context.extension && context.extension.id) || core.EXTENSION_ID));
-  // A status line the user pointed at our script follows the packaged script across updates.
-  try {
-    if (core.statusLineState().ours) {
-      const r = core.refreshStatusLineScript();
-      if (r.updated) log.info('status line script updated: ' + r.path);
-      if (r.error) log.warn('status line script not updated: ' + r.error);
-    }
-  } catch (e) { log.warn('status line check failed: ' + String((e && e.message) || e)); }
   if (!core.IS_WINDOWS && !context.globalState.get('platformNoticeShown')) {
     context.globalState.update('platformNoticeShown', true);
     vscode.window.showInformationMessage(

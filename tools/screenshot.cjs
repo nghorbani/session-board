@@ -59,11 +59,12 @@ const sessions = [
 const snapshot = {
   at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions,
   usage: {
-    state: 'ok', at: now - 2 * 60000, ageSeconds: 120, model: 'Opus',
+    state: 'ok', at: now - 2 * 60000, ageSeconds: 120, subscriptionType: 'max', available: true,
     windows: {
       five_hour: { usedPct: 42, resetsAt: now + 2 * HOUR + 10 * 60000, expired: false },
       seven_day: { usedPct: 18, resetsAt: now + 3 * 24 * HOUR, expired: false },
     },
+    extraUsage: null, error: null, cacheError: null,
   },
 };
 

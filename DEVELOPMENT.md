@@ -20,8 +20,8 @@ session-dashboard/
     media/icon.png      gallery icon, 128x128
     media/board.png     README screenshots, rendered by tools/screenshot.cjs
     media/search.png
-    statusline/         Claude Code status line scripts (statusline.ps1 for Windows,
-                        statusline.sh for macOS/Linux) that record the usage limits
+    tests/              node --test suite for the usage path; tests/shim/ stands in for the CLI
+    .vscodeignore       keeps tests/ out of the package
   server.cjs            optional browser front end over the same core.cjs + index.html
   start.ps1             runs server.cjs and opens the browser (optional)
   build.ps1             packages the .vsix with vsce 4 and installs it
@@ -32,8 +32,9 @@ session-dashboard/
 ## Build and install
 
 ```powershell
-pwsh -File build.ps1            # package + install
-pwsh -File build.ps1 -NoInstall # package only
+pwsh -File build.ps1            # tests + package + install
+pwsh -File build.ps1 -NoInstall # tests + package only
+cd extension; npm test          # node --test tests/ (the build runs this too)
 node tools/screenshot.cjs       # refresh extension/media/board.png and search.png
 ```
 
@@ -80,14 +81,23 @@ installed version and shows every session anyway.
   snapshot (union, so a live session without a transcript still appears), cap at 50, report
   `total`, `shown`, `partial`, `skipped`. All children are tracked per request and killed on
   cancel or supersede.
-- **Usage limits**: Claude Code passes `rate_limits` (five_hour, seven_day, spend_limit;
-  `used_percentage` and `resets_at`) to the status line command on stdin after every reply,
-  and to nothing else. Connect copies `extension/statusline/statusline.ps1` to
-  `%LOCALAPPDATA%\SessionBoard\` (a version-independent path) and puts the matching
-  `statusLine` entry on the clipboard; the user pastes it into `~/.claude/settings.json`.
-  The script writes `usage.json` next to itself; `usageState()` in core.cjs reads it on every
-  poll and the page renders the strip. The board never writes settings.json. On activation
-  the copied script is refreshed when the packaged one changed.
+- **Usage limits**: `fetchUsage()` in core.cjs runs `claude -p --input-format stream-json
+  --output-format stream-json --verbose --no-session-persistence --settings <file>
+  --disable-slash-commands --strict-mcp-config --mcp-config <file>` (both files live in
+  `%LOCALAPPDATA%\SessionBoard`, holding `{"disableAllHooks":true}` and `{"mcpServers":{}}`;
+  files, not inline JSON, because the spawn goes through `cmd.exe` and Node does not quote
+  arguments in shell mode) and writes one line on stdin:
+  `{"type":"control_request","request_id":"…","request":{"subtype":"get_usage","skip_behaviors":true}}`.
+  The CLI answers with a `control_response` carrying `rate_limits` (five_hour, seven_day,
+  per-model windows, extra_usage; `utilization` 0–100 and `resets_at`) and exits; no model
+  call, no hooks, no MCP servers, no transcript. This is the request the VS Code extension
+  itself sends for its usage panel; the CLI's schema marks it experimental, so
+  `parseUsageResponse()` is tolerant and reports a shape change explicitly. The result is
+  cached in `usage-cli.json` (a failed probe keeps the last good windows and carries the
+  error); `refreshUsageIfStale()` runs from the extension's poll (5 min visible, 15 hidden)
+  and from the browser server's sessions route; probes are throttled to one per 15 s and a
+  timeout kills the process tree. The status line route of 0.3.1 never ran for sessions
+  started by the VS Code extension (no terminal UI there) and was removed.
 
 ## Optional browser page
 
@@ -98,7 +108,7 @@ pwsh -File start.ps1
 Serves the same page at <http://127.0.0.1:4317>. Every `/api/*` route requires the per-run
 token embedded in the page (`X-Board-Token`) and a matching Host/Origin; JSON responses are
 `no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`, `POST /api/end/<id>[?force=1]`,
-`GET /api/search?q=&content=0|1`, `POST /api/usage/connect`.
+`GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`.
 
 ## Publishing (as of 2026-09)
 

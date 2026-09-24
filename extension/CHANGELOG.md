@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Usage limits now come straight from the Claude Code CLI, refreshed every 5 minutes and on ↻; no status line setup any more. If you pasted the `statusLine` entry for 0.3.1, remove it from `~/.claude/settings.json`
+- The strip shows per-model weekly windows and extra usage when your plan has them, and keeps the last numbers with a warning when a refresh fails
+- Fixed: the strip stayed on "waiting for the first Claude reply" for sessions run inside VS Code
+
 ## 0.3.3
 
 - Sessions renamed with `/rename` now show that name as their heading

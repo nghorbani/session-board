@@ -5,8 +5,8 @@
  * data layer run inside VS Code via the extension.
  *
  * Every /api route requires the per-run token the server embeds into the page, and a Host
- * of 127.0.0.1:<port> (Origin, when sent, must match too): the end route is destructive and
- * the search route returns private transcript text.
+ * of 127.0.0.1:<port> (Origin, when sent, must match too): the end route is destructive, the
+ * usage route starts a CLI process, and the search route returns private transcript text.
  */
 
 const fs = require('fs');
@@ -55,6 +55,8 @@ async function handle(req, res) {
   if (!authorized(req)) return sendJson(res, 403, { error: 'forbidden: token or origin' });
 
   if (route === '/api/sessions' && req.method === 'GET') {
+    const pending = core.refreshUsageIfStale(5 * 60 * 1000);   // keeps the strip fresh with no VS Code window open
+    if (pending) pending.catch(() => { /* reported through usageState */ });
     return sendJson(res, 200, await core.snapshot());
   }
 
@@ -82,11 +84,10 @@ async function handle(req, res) {
     return sendJson(res, codes[result.code] || 500, result);
   }
 
-  if (route === '/api/usage/connect' && req.method === 'POST') {
-    // Copies the status line script into place and returns the settings.json snippet; the
-    // user pastes it. settings.json itself is never written.
-    const result = core.statusLineSetup();
-    return sendJson(res, result.ok ? 200 : 500, result);
+  if (route === '/api/usage/refresh' && req.method === 'POST') {
+    // Runs the CLI usage probe now (core throttles to one per 15 s); the reply is usageState().
+    const u = await core.fetchUsage();
+    return sendJson(res, u.state === 'error' ? 502 : 200, u);
   }
 
   if (route === '/api/search' && req.method === 'GET') {

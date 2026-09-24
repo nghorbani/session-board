@@ -408,122 +408,235 @@ function boardAlive(exthostPid) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Usage limits, via Claude Code's status line
+// Usage limits, from the Claude Code CLI
 // ---------------------------------------------------------------------------------------
 //
-// Claude Code reports the subscription usage windows (`rate_limits`: five_hour, seven_day,
-// spend_limit; each `used_percentage` and `resets_at`) only to the configured status line
-// command, on stdin, after every reply. Session Board ships a small status line script that
-// prints a one-line footer for the session and writes the latest limits to USAGE_FILE; the
-// board reads that file. The user adds the status line to ~/.claude/settings.json themselves
-// (Connect copies the snippet and opens the file); the board never edits settings.json. No
-// credentials are read and nothing leaves the machine.
+// Claude Code answers a `get_usage` control request on its stream-json protocol with the
+// windows its own usage screen shows (five_hour, seven_day, per-model weekly windows, extra
+// usage). The board runs a short-lived headless CLI for that one request: no model call, no
+// hooks, no MCP servers, no transcript, no registry record. The CLI uses its own login; the
+// board never reads credentials. The CLI marks the reply as experimental, so parsing is
+// tolerant and a changed shape produces a clear message. Results are cached in DATA_DIR so
+// both hosts and every window share one probe.
 
 const DATA_DIR = IS_WINDOWS
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'SessionBoard')
   : path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'session-board');
-const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
-const STATUSLINE_NAME = IS_WINDOWS ? 'statusline.ps1' : 'statusline.sh';
-const STATUSLINE_SCRIPT = path.join(DATA_DIR, STATUSLINE_NAME);
-const STATUSLINE_SOURCE = path.join(__dirname, 'statusline', STATUSLINE_NAME);
-const SETTINGS_FILE = path.join(CLAUDE_DIR, 'settings.json');
+const USAGE_FILE = path.join(DATA_DIR, 'usage-cli.json');   // usage.json belonged to the retired status line
+const PROBE_SETTINGS_FILE = path.join(DATA_DIR, 'probe-settings.json');
+const PROBE_MCP_FILE = path.join(DATA_DIR, 'probe-mcp.json');
+const PROBE_SETTINGS = '{"disableAllHooks":true}\n';
+const PROBE_MCP = '{"mcpServers":{}}\n';
+const USAGE_TIMEOUT_MS = 30000;
+const USAGE_MIN_INTERVAL_MS = 15000;
+const USAGE_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'];
+const SHAPE_CHANGED = "Claude Code's usage reply changed; update Session Board";
 
-/** The settings.json command line; forward slashes because Claude Code may run it via Git Bash. */
-function statusLineCommand() {
-  const p = STATUSLINE_SCRIPT.replace(/\\/g, '/');
-  return IS_WINDOWS ? 'powershell -NoProfile -ExecutionPolicy Bypass -File "' + p + '"' : 'bash "' + p + '"';
+function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
+
+/** Write a probe config file when missing or different. */
+function ensureFile(file, content) {
+  let cur = null;
+  try { cur = fs.readFileSync(file, 'utf8'); } catch (_) { /* missing */ }
+  if (cur !== content) fs.writeFileSync(file, content);
 }
 
-/** The `statusLine` entry as text to paste inside the top-level object of settings.json. */
-function statusLineSnippet() {
-  return '"statusLine": ' + JSON.stringify({ type: 'command', command: statusLineCommand() }, null, 2);
-}
+function firstLine(s) { return String(s || '').trim().split('\n')[0].trim(); }
 
-/** Read-only look at the user settings: is a status line set, and is it ours? */
-function statusLineState(settingsPath) {
-  let raw;
-  try { raw = fs.readFileSync(settingsPath || SETTINGS_FILE, 'utf8'); } catch (e) {
-    if (e && e.code === 'ENOENT') return { installed: false, ours: false, command: null, error: null };
-    return { installed: null, ours: false, command: null, error: String(e.message || e) };
-  }
-  let settings;
-  try { settings = JSON.parse(raw); } catch (e) {
-    return { installed: null, ours: false, command: null, error: 'settings.json is not plain JSON (' + String(e.message || e) + ')' };
-  }
-  const sl = settings && typeof settings === 'object' ? settings.statusLine : null;
-  const cmd = sl && typeof sl === 'object' ? String(sl.command || '') : '';
-  const mine = STATUSLINE_SCRIPT.replace(/\\/g, '/').toLowerCase();
-  const ours = Boolean(cmd) && cmd.replace(/\\/g, '/').toLowerCase().includes(mine);
-  return { installed: Boolean(sl), ours, command: cmd || null, error: null };
-}
-
-/** Copy the packaged script to its stable path when it is missing or outdated. */
-function refreshStatusLineScript() {
-  try {
-    const src = fs.readFileSync(STATUSLINE_SOURCE);
-    let cur = null;
-    try { cur = fs.readFileSync(STATUSLINE_SCRIPT); } catch (_) { /* not copied yet */ }
-    if (cur && cur.equals(src)) return { updated: false, path: STATUSLINE_SCRIPT };
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.copyFileSync(STATUSLINE_SOURCE, STATUSLINE_SCRIPT);
-    return { updated: true, path: STATUSLINE_SCRIPT };
-  } catch (e) {
-    return { updated: false, path: STATUSLINE_SCRIPT, error: String(e.message || e) };
-  }
-}
-
-/** Everything Connect needs: the script in place and the snippet the user pastes. */
-function statusLineSetup() {
-  const copied = refreshStatusLineScript();
-  return {
-    ok: !copied.error,
-    code: copied.error ? 'script-copy-failed' : 'ready',
-    message: copied.error || null,
-    script: STATUSLINE_SCRIPT,
-    command: statusLineCommand(),
-    snippet: statusLineSnippet(),
-    settingsPath: SETTINGS_FILE,
-    state: statusLineState(),
-  };
+function toEpochMs(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? (v > 1e12 ? v : v * 1000) : null;
+  const t = Date.parse(String(v));
+  return Number.isFinite(t) ? t : null;
 }
 
 /**
- * What the board shows at the top. `state`: not-connected (no status line), other-statusline
- * (a foreign one), settings-unreadable, waiting (ours, never ran), no-limits (ran, Claude
- * Code reported none), ok (windows present). `windows.*.resetsAt` is epoch ms.
+ * Map the CLI's get_usage reply to the board's shape. Tolerant: `utilization` or
+ * `used_percentage`, `resets_at` as ISO text or epoch seconds, unknown windows ignored.
+ * `available` false means the CLI reports no plan limits (API key, not logged in, no plan).
  */
-function usageState(settingsPath) {
-  const sl = statusLineState(settingsPath);
-  let file = null;
-  try { file = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8')); } catch (_) { file = null; }
-  const out = { statusLine: sl, at: null, ageSeconds: null, model: null, sessionId: null, windows: null, file: USAGE_FILE, dataDir: DATA_DIR };
-  if (file && typeof file === 'object') {
-    const at = Number(file.at) || null;
-    out.at = at;
-    out.ageSeconds = at ? Math.max(0, Math.round((Date.now() - at) / 1000)) : null;
-    out.model = file.model ? String(file.model) : null;
-    out.sessionId = file.session_id ? String(file.session_id) : null;
-    const rl = file.rate_limits;
-    if (rl && typeof rl === 'object') {
-      out.windows = {};
-      for (const k of ['five_hour', 'seven_day', 'spend_limit']) {
-        const w = rl[k];
-        if (!w || typeof w !== 'object') continue;
-        const pct = Number(w.used_percentage);
-        const resets = Number(w.resets_at);
-        const resetsAt = Number.isFinite(resets) && resets > 0 ? resets * 1000 : null;
-        out.windows[k] = { usedPct: Number.isFinite(pct) ? pct : null, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
-      }
-      if (!Object.keys(out.windows).length) out.windows = null;
-    }
+function parseUsageResponse(res) {
+  if (!res || typeof res !== 'object') return { error: 'empty usage reply' };
+  const out = {
+    subscriptionType: res.subscription_type == null ? null : String(res.subscription_type),
+    available: res.rate_limits_available === true,
+    windows: null,
+    extraUsage: null,
+  };
+  if (!out.available) return out;
+  const rl = res.rate_limits;
+  if (!rl || typeof rl !== 'object') return Object.assign(out, { error: SHAPE_CHANGED });
+  const windows = {};
+  for (const k of USAGE_WINDOWS) {
+    const w = rl[k];
+    if (!w || typeof w !== 'object') continue;
+    const pct = Number(w.utilization != null ? w.utilization : w.used_percentage);
+    if (!Number.isFinite(pct)) continue;
+    const resetsAt = toEpochMs(w.resets_at);
+    windows[k] = { usedPct: pct, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
   }
-  out.state = sl.error ? 'settings-unreadable'
-    : !sl.installed ? 'not-connected'
-    : !sl.ours ? 'other-statusline'
-    : !file ? 'waiting'
-    : !out.windows ? 'no-limits'
-    : 'ok';
+  if (!Object.keys(windows).length) return Object.assign(out, { error: SHAPE_CHANGED });
+  out.windows = windows;
+  const x = rl.extra_usage;
+  if (x && typeof x === 'object' && x.is_enabled === true) {
+    const pct = Number(x.utilization);
+    out.extraUsage = {
+      usedPct: Number.isFinite(pct) ? pct : null,
+      usedCredits: x.used_credits == null ? null : Number(x.used_credits),
+      monthlyLimit: x.monthly_limit == null ? null : Number(x.monthly_limit),
+      currency: x.currency == null ? null : String(x.currency),
+    };
+  }
   return out;
+}
+
+/** The control_response for our request id among the CLI's stdout lines, or null. */
+function findControlResponse(stdout, requestId) {
+  for (const line of String(stdout || '').split('\n')) {
+    if (line.indexOf('"control_response"') === -1) continue;
+    try {
+      const o = JSON.parse(line);
+      if (o && o.type === 'control_response' && o.response && o.response.request_id === requestId) return o.response;
+    } catch (_) { /* not our line */ }
+  }
+  return null;
+}
+
+/** Kill a process and everything under it (with `shell` the direct child is cmd.exe). */
+function killTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve();
+  if (IS_WINDOWS) return run('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 10000 }).then(() => undefined);
+  try { process.kill(pid, 'SIGKILL'); } catch (_) { /* gone */ }
+  return Promise.resolve();
+}
+
+function readUsageFile() {
+  try {
+    const j = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8'));
+    return j && typeof j === 'object' ? j : null;
+  } catch (_) { return null; }
+}
+
+let usageMemory = null;    // this process's last record; newer than the file after a cache failure
+let usageInFlight = null;
+let usageLastDone = 0;
+
+function lastUsageRecord() {
+  const file = readUsageFile();
+  if (usageMemory && (!file || Number(usageMemory.at || 0) >= Number(file.at || 0))) return usageMemory;
+  return file;
+}
+
+async function probeUsage(opts) {
+  ensureDataDir();
+  ensureFile(PROBE_SETTINGS_FILE, PROBE_SETTINGS);
+  ensureFile(PROBE_MCP_FILE, PROBE_MCP);
+  const requestId = 'sb-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  const request = JSON.stringify({ type: 'control_request', request_id: requestId, request: { subtype: 'get_usage', skip_behaviors: true } });
+  const q = (p) => (IS_WINDOWS ? '"' + p + '"' : p);   // shell mode passes arguments unquoted
+  const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+    '--no-session-persistence', '--settings', q(PROBE_SETTINGS_FILE), '--disable-slash-commands',
+    '--strict-mcp-config', '--mcp-config', q(PROBE_MCP_FILE)];
+  const timeoutMs = opts.timeoutMs || USAGE_TIMEOUT_MS;
+  let timer = null;
+  let timedOut = false;
+  const r = await run(opts.command || 'claude', args, {
+    cwd: DATA_DIR, shell: IS_WINDOWS, maxBuffer: 4 * 1024 * 1024,
+    onChild: (child) => {
+      try { child.stdin.end(request + '\n'); } catch (_) { /* child gone */ }
+      timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
+    },
+  });
+  clearTimeout(timer);
+  if (timedOut) return { error: 'claude did not answer within ' + Math.round(timeoutMs / 1000) + ' s' };
+  const reply = findControlResponse(r.stdout, requestId);
+  if (reply && reply.subtype === 'success') return parseUsageResponse(reply.response);
+  if (reply) return { error: String(reply.error || 'get_usage rejected') };
+  if (r.code !== 0) return { error: firstLine(r.stderr) || ('claude exited with ' + r.code) };
+  return { error: 'no usage reply from claude' };
+}
+
+/**
+ * Ask the CLI for the usage windows and cache the result. At most one probe per process
+ * at a time, and none within `minIntervalMs` of the previous completion (the cached state
+ * comes back with `throttled: true`). A failed probe keeps the last good windows and
+ * carries the failure as `error`, so the strip shows numbers with a warning, not nothing.
+ * Options: `timeoutMs`, `minIntervalMs`, `command` (tests point it at a shim).
+ */
+function fetchUsage(opts) {
+  opts = opts || {};
+  if (usageInFlight) return usageInFlight;
+  const minInterval = opts.minIntervalMs != null ? opts.minIntervalMs : USAGE_MIN_INTERVAL_MS;
+  if (usageLastDone && Date.now() - usageLastDone < minInterval) {
+    return Promise.resolve(Object.assign({ throttled: true }, usageState()));
+  }
+  usageInFlight = (async () => {
+    const at = Date.now();
+    let result;
+    try { result = await probeUsage(opts); } catch (e) { result = { error: String((e && e.message) || e) }; }
+    const prev = lastUsageRecord();
+    let rec;
+    if (result.error && prev && prev.windows) {
+      rec = { at: prev.at, subscriptionType: prev.subscriptionType, available: true, windows: prev.windows, extraUsage: prev.extraUsage || null, error: result.error, errorAt: at };
+    } else {
+      rec = { at, subscriptionType: result.subscriptionType || null, available: result.available === true, windows: result.windows || null, extraUsage: result.extraUsage || null, error: result.error || null, errorAt: result.error ? at : null };
+    }
+    try {
+      ensureDataDir();
+      const tmp = USAGE_FILE + '.tmp.' + process.pid;
+      fs.writeFileSync(tmp, JSON.stringify(rec));
+      fs.renameSync(tmp, USAGE_FILE);
+    } catch (e) {
+      rec.cacheError = String((e && e.message) || e);
+    }
+    usageMemory = rec;
+    return usageState();
+  })().finally(() => { usageInFlight = null; usageLastDone = Date.now(); });
+  return usageInFlight;
+}
+
+/**
+ * What the board shows. `state`: loading (no probe yet), ok (windows; `error` set when the
+ * latest probe failed and these are the last good numbers), no-limits (the CLI reports no
+ * plan limits), error (no numbers at all). `windows.*.resetsAt` is epoch ms.
+ */
+function usageState() {
+  const rec = lastUsageRecord();
+  const out = { state: 'loading', at: null, ageSeconds: null, subscriptionType: null, available: null, windows: null, extraUsage: null, error: null, errorAt: null, cacheError: null, file: USAGE_FILE, dataDir: DATA_DIR };
+  if (!rec) return out;
+  out.at = Number(rec.at) || null;
+  out.ageSeconds = out.at ? Math.max(0, Math.round((Date.now() - out.at) / 1000)) : null;
+  out.subscriptionType = rec.subscriptionType || null;
+  out.available = rec.available === true;
+  out.error = rec.error ? String(rec.error) : null;
+  out.errorAt = Number(rec.errorAt) || null;
+  out.cacheError = rec.cacheError ? String(rec.cacheError) : null;
+  const windows = {};
+  for (const k of Object.keys(rec.windows || {})) {
+    const w = rec.windows[k];
+    if (!w || typeof w !== 'object') continue;
+    const resetsAt = Number(w.resetsAt) || null;
+    windows[k] = { usedPct: Number.isFinite(Number(w.usedPct)) ? Number(w.usedPct) : null, resetsAt, expired: Boolean(resetsAt && resetsAt <= Date.now()) };
+  }
+  if (Object.keys(windows).length) {
+    out.windows = windows;
+    out.extraUsage = rec.extraUsage || null;
+    out.state = 'ok';
+  } else if (out.error) {
+    out.state = 'error';
+  } else {
+    out.state = out.available ? 'error' : 'no-limits';
+    if (out.state === 'error') out.error = SHAPE_CHANGED;
+  }
+  return out;
+}
+
+/** Probe when nothing is cached or the newest record is older than `maxAgeMs`; else null. */
+function refreshUsageIfStale(maxAgeMs) {
+  const rec = lastUsageRecord();
+  const last = rec ? Math.max(Number(rec.at) || 0, Number(rec.errorAt) || 0) : 0;
+  if (last && Date.now() - last < (maxAgeMs || 300000)) return null;
+  return fetchUsage();
 }
 
 function safeUsage() {
@@ -1052,8 +1165,9 @@ module.exports = {
   isInside,
   DATA_DIR,
   USAGE_FILE,
-  statusLineState,
-  refreshStatusLineScript,
-  statusLineSetup,
+  parseUsageResponse,
+  fetchUsage,
   usageState,
+  refreshUsageIfStale,
+  killTree,
 };

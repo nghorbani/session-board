@@ -2,7 +2,7 @@
   "name": "session-board",
   "displayName": "Session Board",
   "description": "Your Claude Code sessions at a glance across every VS Code window: who needs input, who is working, context and usage limits, click to jump, ✕ to end, search every session.",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "publisher": "nima-ghorbani",
   "license": "MIT",
   "preview": true,
@@ -47,6 +47,9 @@
     "onUri"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node --test \"tests/*.test.cjs\""
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -85,8 +88,8 @@
         "icon": "$(search)"
       },
       {
-        "command": "sessionBoard.connectUsage",
-        "title": "Show Usage Limits (set up the Claude Code status line)",
+        "command": "sessionBoard.refreshUsage",
+        "title": "Refresh Usage Limits",
         "category": "Session Board"
       }
     ],
