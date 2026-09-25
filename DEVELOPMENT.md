@@ -20,7 +20,8 @@ session-dashboard/
     media/icon.png      gallery icon, 128x128
     media/board.png     README screenshots, rendered by tools/screenshot.cjs
     media/search.png
-    tests/              node --test suite: usage path (tests/shim/ stands in for the CLI) and manifest identity
+    tests/              node --test suite: usage path (tests/shim/claude.cmd stands in for the CLI),
+                        manifest identity, the host's ↻ reply (tests/shim/vscode.js stands in for the API)
     .vscodeignore       keeps tests/ out of the package
   server.cjs            optional browser front end over the same core.cjs + index.html
   start.ps1             runs server.cjs and opens the browser (optional)
@@ -43,7 +44,9 @@ running window within seconds; an **update to an extension already activated** i
 waits for that window to reload, and VS Code refuses to replace a running extension. Reload
 restarts the window's extension host, which is the parent process of every `claude.exe` in
 it, so do not reload a window whose sessions you still need. A new window runs the newest
-installed version and shows every session anyway.
+installed version and shows every session anyway. Installing several extension ids into one
+running window stacks their title-bar actions (one search and one ↻ icon per copy) and only
+the first copy's view activates; the duplicates go when the window reloads.
 
 ## How it works
 
@@ -100,8 +103,11 @@ installed version and shows every session anyway.
   cached in `usage-cli.json` (a failed probe keeps the last good windows and carries the
   error); `refreshUsageIfStale()` runs from the extension's poll (5 min visible, 15 hidden)
   and from the browser server's sessions route; probes are throttled to one per 15 s and a
-  timeout kills the process tree. The status line route of 0.3.1 never ran for sessions
-  started by the VS Code extension (no terminal UI there) and was removed.
+  timeout kills the process tree. ↻ on the page sends `refreshUsage` with a request id and
+  the host answers `usageResult` with the same id (throttled or error flags included); the
+  page keeps the button spinning and disabled until that reply or a 45 s watchdog, and only
+  a reply carrying its own id ends the busy state. The status line route of 0.3.1 never ran
+  for sessions started by the VS Code extension (no terminal UI there) and was removed.
 
 ## Optional browser page
 

@@ -1,9 +1,18 @@
 // Stand-in for the Claude Code CLI in the usage tests. Reads the control request from stdin
-// and answers according to SB_SHIM_MODE: ok (default), hang, garbage, exit2, error.
+// and answers according to SB_SHIM_MODE: ok (default), hang, garbage, exit2, error. When
+// SB_SHIM_MODE_FILE names a file, its content is the mode, read at every spawn, so a running
+// server can be switched between modes (the browser-page checks of the ↻ busy state).
+// `claude agents --json` answers with an empty list so a page served against the shim keeps
+// polling normally.
 'use strict';
 const fs = require('fs');
 
-const mode = process.env.SB_SHIM_MODE || 'ok';
+if (process.argv.includes('agents')) { process.stdout.write('[]\n'); process.exit(0); }
+
+const modeFile = process.env.SB_SHIM_MODE_FILE;
+let fileMode = '';
+if (modeFile) { try { fileMode = fs.readFileSync(modeFile, 'utf8').trim(); } catch (_) { fileMode = ''; } }
+const mode = fileMode || process.env.SB_SHIM_MODE || 'ok';
 if (process.env.SB_SHIM_PIDFILE) fs.writeFileSync(process.env.SB_SHIM_PIDFILE, String(process.pid));
 
 let input = '';

@@ -84,7 +84,7 @@ class BoardProvider {
         case 'search': return this.search(String(m.query || ''), Boolean(m.content), String(m.requestId || ''));
         case 'cancelSearch': return this.cancelSearch();
         case 'openPast': if (core.UUID_RE.test(sid)) return this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
-        case 'refreshUsage': return this.refreshUsage();
+        case 'refreshUsage': return this.refreshUsage(String(m.requestId || ''));
         default: return;
       }
     } catch (e) {
@@ -106,16 +106,25 @@ class BoardProvider {
     this.push();
   }
 
-  /** Forced probe from ↻ or the command; the 15 s throttle in core still applies. */
-  async refreshUsage() {
+  /**
+   * Forced probe from ↻ or the command; the 15 s throttle in core still applies. The page
+   * matches the `usageResult` reply to its click by `requestId` (the command passes none) and
+   * ends the button's busy state on it, so the reply is posted on every outcome, after the
+   * merged snapshot when one exists and even before the first snapshot.
+   */
+  async refreshUsage(requestId) {
+    const id = requestId || '';
     try {
       const u = await core.fetchUsage();
       this.mergeUsage();
       if (u && u.throttled) vscode.window.setStatusBarMessage('Session Board: usage limits were refreshed a moment ago.', 3000);
       else if (u && u.error) this.log.warn('usage probe: ' + u.error);
       else this.log.info('usage probe ok' + (u && u.subscriptionType ? ' (' + u.subscriptionType + ')' : ''));
+      this.post({ type: 'usageResult', requestId: id, throttled: Boolean(u && u.throttled), error: (u && u.error) || null });
     } catch (e) {
-      this.log.error('usage refresh failed: ' + String((e && e.message) || e));
+      const message = String((e && e.message) || e);
+      this.log.error('usage refresh failed: ' + message);
+      this.post({ type: 'usageResult', requestId: id, throttled: false, error: message });
     }
   }
 

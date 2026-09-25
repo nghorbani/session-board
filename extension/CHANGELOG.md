@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- ↻ in the usage strip now spins and stays disabled until the refresh has finished; a click within 15 s of the last refresh says "refreshed a moment ago" in the strip, and a failed refresh says why there too
+
 ## 0.4.2
 
 - The extension id is now `nima-ghorbani.session-board-vscode` and the Marketplace display name "Session Board for VS Code"; the previous listing was removed by mistake and the Marketplace never releases a removed name or display name. The sidebar still says Session Board. If you installed an earlier build from source, uninstall the old Session Board entry in the Extensions view

@@ -73,6 +73,12 @@
   .usage .u-win .val.warn { color: var(--warn); }
   .usage .u-win .val.crit { color: var(--crit); }
   .usage button { padding: 0 6px; font-size: 12px; line-height: 1.4; }
+  .usage button:disabled { opacity: .6; cursor: default; }
+  .usage button:disabled:hover { border-color: var(--line); }
+  .usage button.spin { animation: u-spin .9s linear infinite; }
+  .usage .u-note .u-msg.warn { color: var(--warn); }
+  @keyframes u-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .usage button.spin { animation: none; } }
   .usage .u-stale { margin-top: 5px; color: var(--warn); font-size: 11px; }
 
   .banner {
@@ -211,6 +217,8 @@ var state = {
   prevWaiting: Object.create(null),
   firstLoad: true,
   flashes: Object.create(null),             // sessionId -> { cls, text, until }
+  usageBusy: null,                          // { id, since, timer } while a ↻ refresh is in flight
+  usageNote: null,                          // { text, until, warn } shown in the strip after a refresh
 };
 
 function esc(s) {
@@ -280,22 +288,33 @@ function usageRow(label, pct, val, lvl) {
   return '<div class="u-win"><span class="lbl">' + esc(label) + '</span><div class="bar"><i class="' + lvl + '" style="width:' + pct + '%"></i></div><span class="val ' + lvl + '">' + val + '</span></div>';
 }
 
+/** The strip's note: a transient result message (throttled, failed) while it lasts, else the age. */
+function usageNoteHtml(fallback) {
+  var n = state.usageNote;
+  if (n && n.until > Date.now()) return '<span class="u-msg' + (n.warn ? ' warn' : '') + '">' + esc(n.text) + '</span>';
+  return '<span class="u-msg">' + esc(fallback) + '</span>';
+}
+
 function renderUsage(u) {
   var el = document.getElementById('usage');
   if (!u) { el.className = 'usage'; el.innerHTML = ''; return; }
-  var refreshBtn = '<button id="usageRefresh" title="Refresh usage limits now">↻</button>';
+  // The busy state lives in `state` (like pendingEnd), so the snapshot rerender every few
+  // seconds cannot bring the button back while its refresh is still running.
+  var refreshBtn = state.usageBusy
+    ? '<button id="usageRefresh" class="spin" disabled title="refreshing…">↻</button>'
+    : '<button id="usageRefresh" title="Refresh usage limits now">↻</button>';
   var head = '<div class="u-head"><b>Usage limits</b>';
   var html;
   if (u.state === 'loading') {
     html = head + '<span>checking usage…</span></div>';
   } else if (u.state === 'no-limits') {
     html = head + '<span>no limits reported: not logged in, API key billing, or a plan without limits</span>'
-      + '<span class="u-note">' + esc(fmtAgo(u.ageSeconds)) + ' ' + refreshBtn + '</span></div>';
+      + '<span class="u-note">' + usageNoteHtml(fmtAgo(u.ageSeconds)) + ' ' + refreshBtn + '</span></div>';
   } else if (u.state === 'error') {
-    html = head + '<span style="color:var(--warn)">' + esc(u.error || 'unavailable') + '</span><span class="u-note">' + refreshBtn + '</span></div>';
+    html = head + '<span style="color:var(--warn)">' + esc(u.error || 'unavailable') + '</span><span class="u-note">' + usageNoteHtml('') + ' ' + refreshBtn + '</span></div>';
   } else {
-    var note = esc(fmtAgo(u.ageSeconds)) + (u.subscriptionType ? ' · ' + esc(u.subscriptionType) : '');
-    html = head + '<span class="u-note" title="' + esc(u.at ? new Date(u.at).toLocaleString() : '') + '">' + note + ' ' + refreshBtn + '</span></div>';
+    var note = fmtAgo(u.ageSeconds) + (u.subscriptionType ? ' · ' + u.subscriptionType : '');
+    html = head + '<span class="u-note" title="' + esc(u.at ? new Date(u.at).toLocaleString() : '') + '">' + usageNoteHtml(note) + ' ' + refreshBtn + '</span></div>';
     var rows = '';
     Object.keys(u.windows || {}).forEach(function (k) {   // in the order the CLI listed them
       var w = u.windows[k];
@@ -318,15 +337,53 @@ function renderUsage(u) {
   el.innerHTML = html;
   el.className = 'usage show';
   var btn = document.getElementById('usageRefresh');
-  if (btn) btn.addEventListener('click', function (ev) { ev.stopPropagation(); btn.disabled = true; refreshUsage(); });
+  if (btn) btn.addEventListener('click', function (ev) { ev.stopPropagation(); startUsageRefresh(); });
 }
 
-function refreshUsage() {
-  if (vsapi) { send({ type: 'refreshUsage' }); return; }
+var USAGE_WATCHDOG_MS = 45000;   // the probe times out at 30 s in core; this frees the button if no result ever arrives
+
+function newRequestId() { return String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8); }
+
+/*
+ * ↻ lifecycle (both hosts):
+ *   click → state.usageBusy = { id, since, timer } → render (spinning, disabled) → refreshUsage(id)
+ *        ↘ watchdog(45 s): frees the button only if state.usageBusy still carries this id
+ *   result { requestId, throttled, error } → onUsageResult: matches the id, clears the timer,
+ *        sets a short note ("refreshed a moment ago" / "refresh failed: …"), rerenders.
+ * A result for another id (a late answer, the command palette) never touches the busy state.
+ */
+function startUsageRefresh() {
+  if (state.usageBusy) return;                        // one refresh at a time; extra clicks are ignored
+  var id = newRequestId();
+  var busy = { id: id, since: Date.now(), timer: null };
+  busy.timer = setTimeout(function () {
+    if (state.usageBusy && state.usageBusy.id === id) { state.usageBusy = null; render(); }
+  }, USAGE_WATCHDOG_MS);
+  state.usageBusy = busy;
+  render();
+  refreshUsage(id);
+}
+
+function refreshUsage(id) {
+  if (vsapi) { send({ type: 'refreshUsage', requestId: id }); return; }
   api('POST', '/api/usage/refresh').then(function (res) {
-    if (res.body && res.body.state) { if (state.data) { state.data.usage = res.body; } render(); }
-    else { var b = document.getElementById('banner'); b.className = 'banner show'; b.textContent = 'Usage refresh failed: ' + ((res.body && res.body.error) || ('server error ' + res.status)); render(); }
-  }).catch(function () { render(); });
+    var b = res.body || {};
+    if (b.state && state.data) state.data.usage = b;
+    onUsageResult({ requestId: id, throttled: Boolean(b.throttled), error: b.error || (b.state ? null : ('server error ' + res.status)) });
+  }).catch(function () { onUsageResult({ requestId: id, error: 'server not reachable' }); });
+}
+
+function onUsageResult(r) {
+  var busy = state.usageBusy;
+  if (!busy || !r || r.requestId !== busy.id) return;
+  clearTimeout(busy.timer);
+  state.usageBusy = null;
+  var now = Date.now();
+  if (r.error) state.usageNote = { text: 'refresh failed: ' + r.error, until: now + 6000, warn: true };
+  else if (r.throttled) state.usageNote = { text: 'refreshed a moment ago', until: now + 3000 };
+  else state.usageNote = null;
+  if (state.usageNote) setTimeout(render, state.usageNote.until - now + 100);
+  render();
 }
 
 // -- transport ------------------------------------------------------------------------
@@ -494,7 +551,7 @@ function startSearch() {
   var q = document.getElementById('q').value.trim();
   var content = true;                       // Enter always searches transcript text as well
   if (!q) { clearSearch(); return; }
-  var requestId = String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8);
+  var requestId = newRequestId();
   state.search = { requestId: requestId, query: q, content: content, pending: true, result: null };
   render();
   if (vsapi) { send({ type: 'search', query: q, content: content, requestId: requestId }); return; }
@@ -636,6 +693,7 @@ if (vsapi) {
     else if (m.type === 'endResult') onEndResult(m);
     else if (m.type === 'searchResult') onSearchResult(m.data);
     else if (m.type === 'openResult') { if (m.ok) flash(m.sessionId, 'resumed', 'jumped'); else flash(m.sessionId, m.message || 'copied', 'copied'); }
+    else if (m.type === 'usageResult') onUsageResult(m);
     else if (m.type === 'focusSearch') qEl.focus();
   });
   send({ type: 'refresh' });
