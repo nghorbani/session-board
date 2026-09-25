@@ -20,7 +20,7 @@ session-dashboard/
     media/icon.png      gallery icon, 128x128
     media/board.png     README screenshots, rendered by tools/screenshot.cjs
     media/search.png
-    tests/              node --test suite for the usage path; tests/shim/ stands in for the CLI
+    tests/              node --test suite: usage path (tests/shim/ stands in for the CLI) and manifest identity
     .vscodeignore       keeps tests/ out of the package
   server.cjs            optional browser front end over the same core.cjs + index.html
   start.ps1             runs server.cjs and opens the browser (optional)
@@ -34,7 +34,7 @@ session-dashboard/
 ```powershell
 pwsh -File build.ps1            # tests + package + install
 pwsh -File build.ps1 -NoInstall # tests + package only
-cd extension; npm test          # node --test tests/ (the build runs this too)
+cd extension; npm test          # node --test "tests/*.test.cjs" (the build runs this too)
 node tools/screenshot.cjs       # refresh extension/media/board.png and search.png
 ```
 
@@ -119,8 +119,13 @@ token embedded in the page (`X-Board-Token`) and a matching Host/Origin; JSON re
 1. Create a publisher at <https://marketplace.visualstudio.com/manage> with the
    authentication the current publishing documentation prescribes (global Personal Access
    Tokens are announced to retire on 2026-12-01).
-2. If the publisher id differs from `nghorbani`, change `publisher` in
-   `extension/package.json`; the extension id used for URIs and heartbeats follows it.
+2. The Marketplace listing `nima-ghorbani.session-board-vscode` owns the name; publish every
+   update to that listing under that publisher. Never change `publisher` or `name` of a
+   published extension: names are unique across all publishers and a removed name is reserved
+   forever, so Unpublish a listing, never Remove it. Display names are reserved the same way.
+   The original name `session-board` and display name "Session Board" were removed on
+   2026-09-24 and cannot come back (release requests go to VSMarketplace@microsoft.com).
+   `tests/manifest.test.cjs` fails the build on a rename.
 3. From `extension/`: `npx @vscode/vsce@4.0.0 login <publisher>` then
    `npx @vscode/vsce@4.0.0 publish`, or upload the `.vsix` on the manage page. The
    Marketplace runs automated security checks before and after listing.

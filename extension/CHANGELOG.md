@@ -1,9 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- The extension id is now `nima-ghorbani.session-board-vscode` and the Marketplace display name "Session Board for VS Code"; the previous listing was removed by mistake and the Marketplace never releases a removed name or display name. The sidebar still says Session Board. If you installed an earlier build from source, uninstall the old Session Board entry in the Extensions view
+
 ## 0.4.1
 
 - Per-model weekly windows (for example "7d Fable") now show up; the strip reads the same limits list as Claude Code's own usage screen
-- New publisher id: the extension is now `nghorbani.session-board`. If you installed an earlier build from source, uninstall the old Session Board entry in the Extensions view
 
 ## 0.4.0
 

@@ -1,9 +1,9 @@
 {
-  "name": "session-board",
-  "displayName": "Session Board",
+  "name": "session-board-vscode",
+  "displayName": "Session Board for VS Code",
   "description": "Your Claude Code sessions at a glance across every VS Code window: who needs input, who is working, context and usage limits, click to jump, ✕ to end, search every session.",
-  "version": "0.4.1",
-  "publisher": "nghorbani",
+  "version": "0.4.2",
+  "publisher": "nima-ghorbani",
   "license": "MIT",
   "preview": true,
   "icon": "media/icon.png",
