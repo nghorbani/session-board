@@ -5,8 +5,9 @@
  * data layer run inside VS Code via the extension.
  *
  * Every /api route requires the per-run token the server embeds into the page, and a Host
- * of 127.0.0.1:<port> (Origin, when sent, must match too): the end route is destructive, the
- * usage route starts a CLI process, and the search route returns private transcript text.
+ * of 127.0.0.1:<port> (Origin, when sent, must match too): the end and unarchive routes
+ * change state, the usage route starts a CLI process, and the search route returns private
+ * transcript text.
  */
 
 const fs = require('fs');
@@ -79,9 +80,17 @@ async function handle(req, res) {
   if (route.startsWith('/api/end/') && req.method === 'POST') {
     const sessionId = safeDecode(route.slice('/api/end/'.length));
     if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, code: 'invalid', error: 'not a session id' });
-    const result = await core.endSession(sessionId, { force: parsed.searchParams.get('force') === '1' });
+    // ?archive=1 ends the session and keeps it off the board; an archived `gone` or `unknown` is a success (ok decides).
+    const result = await core.endSession(sessionId, { force: parsed.searchParams.get('force') === '1', archive: parsed.searchParams.get('archive') === '1' });
     const codes = { ended: 200, invalid: 400, unknown: 404, gone: 404, mismatch: 409, 'needs-force': 409, pending: 409, partial: 409, denied: 403, timeout: 500, failed: 500, unsupported: 501 };
-    return sendJson(res, codes[result.code] || 500, result);
+    return sendJson(res, result.ok ? 200 : (codes[result.code] || 500), result);
+  }
+
+  if (route.startsWith('/api/unarchive/') && req.method === 'POST') {
+    const sessionId = safeDecode(route.slice('/api/unarchive/'.length));
+    if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
+    try { core.unarchiveSession(sessionId); return sendJson(res, 200, { ok: true }); }
+    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
   }
 
   if (route === '/api/usage/refresh' && req.method === 'POST') {

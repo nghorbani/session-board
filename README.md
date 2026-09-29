@@ -27,6 +27,9 @@ shows background agents only, not the sessions you talk to.
 - **Your usage limits.** The 5-hour and 7-day windows sit at the top of the view with the time
   each one resets.
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
+- **Archive a session.** ⤓ ends it the same way and keeps it off the board. It comes back on
+  its own only when it needs you; "Show N archived" lists the rest, and ⤒ or a click brings
+  one back. The board's archive is its own; Claude Code's picker keeps its own flag.
 - **Find any session, ever.** Type to narrow the list. Press Enter to search every session on
   this machine, current or past, by title or by what was said, and resume a past one in
   place.

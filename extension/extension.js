@@ -76,15 +76,17 @@ class BoardProvider {
     if (!m || typeof m !== 'object') return;
     const sid = String(m.sessionId || '');
     try {
+      // Every handler is awaited so a rejection lands in the catch below instead of escaping.
       switch (m.type) {
-        case 'refresh': return this.refresh();
-        case 'open': if (core.UUID_RE.test(sid)) return this.openSession(sid); return;
-        case 'copy': if (core.UUID_RE.test(sid)) return this.copyResume(sid); return;
-        case 'end': if (core.UUID_RE.test(sid)) return this.endSession(sid, Boolean(m.force)); return;
-        case 'search': return this.search(String(m.query || ''), Boolean(m.content), String(m.requestId || ''));
+        case 'refresh': return await this.refresh();
+        case 'open': if (core.UUID_RE.test(sid)) return await this.openSession(sid); return;
+        case 'copy': if (core.UUID_RE.test(sid)) return await this.copyResume(sid); return;
+        case 'end': if (core.UUID_RE.test(sid)) return await this.endSession(sid, Boolean(m.force), Boolean(m.archive)); return;
+        case 'unarchive': if (core.UUID_RE.test(sid)) return await this.unarchive(sid); return;
+        case 'search': return await this.search(String(m.query || ''), Boolean(m.content), String(m.requestId || ''));
         case 'cancelSearch': return this.cancelSearch();
-        case 'openPast': if (core.UUID_RE.test(sid)) return this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
-        case 'refreshUsage': return this.refreshUsage(String(m.requestId || ''));
+        case 'openPast': if (core.UUID_RE.test(sid)) return await this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
+        case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
         default: return;
       }
     } catch (e) {
@@ -297,25 +299,45 @@ class BoardProvider {
 
   // -- ending ----------------------------------------------------------------------------
 
-  async endSession(sessionId, force) {
+  /** ✕ (end) and ⤓ (archive: end, then keep the session off the board) share this path. */
+  async endSession(sessionId, force, archive) {
     const row = this.sessionRow(sessionId);
     const label = row ? (row.title || row.name) : sessionId.slice(0, 8);
-    let result = await core.endSession(sessionId, { force });
+    const verb = archive ? 'Archive' : 'End';
+    let result = await core.endSession(sessionId, { force, archive });
     if (result.code === 'needs-force') {
       const choice = await vscode.window.showWarningMessage(
-        label + ' is ' + result.status + '. End it and everything it started? In-flight work is lost.',
-        { modal: true }, 'End session');
-      if (choice !== 'End session') {
+        label + ' is ' + result.status + '. ' + (archive
+          ? 'Archive it? This ends it and everything it started; in-flight work is lost.'
+          : 'End it and everything it started? In-flight work is lost.'),
+        { modal: true }, verb + ' session');
+      if (choice !== verb + ' session') {
         this.post({ type: 'endResult', sessionId, ok: false, code: 'cancelled', message: 'cancelled' });
         return;
       }
-      result = await core.endSession(sessionId, { force: true });
+      result = await core.endSession(sessionId, { force: true, archive });
     }
-    this.log.info('end ' + sessionId + ': ' + result.code + (result.message ? ' (' + result.message + ')' : ''));
-    this.post({ type: 'endResult', sessionId, ok: result.ok, code: result.code, message: result.message || '' });
-    if (result.ok) vscode.window.setStatusBarMessage('Ended: ' + label, 3000);
-    else if (result.code !== 'cancelled') vscode.window.showWarningMessage('Could not end ' + label + ': ' + (result.message || result.code));
+    this.log.info((archive ? 'archive ' : 'end ') + sessionId + ': ' + result.code + (result.archived ? ' +archived' : '')
+      + (result.message ? ' (' + result.message + ')' : '') + (result.archiveError ? '; archive failed: ' + result.archiveError : ''));
+    this.post({ type: 'endResult', sessionId, ok: result.ok, code: result.code, message: result.message || '', archived: Boolean(result.archived), archiveError: result.archiveError || null });
+    if (result.ok && result.archiveError) vscode.window.showWarningMessage('Ended, not archived: ' + label + ' (' + result.archiveError + ')');
+    else if (result.ok) vscode.window.setStatusBarMessage((result.archived ? 'Archived: ' : 'Ended: ') + label, 3000);
+    else if (result.code !== 'cancelled') vscode.window.showWarningMessage('Could not ' + verb.toLowerCase() + ' ' + label + ': ' + (result.message || result.code));
     this.schedule(300);
+  }
+
+  /** ⤒ on a row, or a click on an archived row: the session shows on the board again. */
+  async unarchive(sessionId) {
+    try {
+      core.unarchiveSession(sessionId);
+      this.log.info('unarchive ' + sessionId);
+      this.post({ type: 'unarchiveResult', sessionId, ok: true });
+    } catch (e) {
+      const message = String((e && e.message) || e);
+      this.log.error('unarchive ' + sessionId + ' failed: ' + message);
+      this.post({ type: 'unarchiveResult', sessionId, ok: false, message });
+    }
+    this.schedule(0);
   }
 
   // -- search ----------------------------------------------------------------------------
@@ -350,15 +372,21 @@ class BoardProvider {
     if (!this.last) await this.refresh();
     const rows = ((this.last && this.last.sessions) || []).slice();
     const rank = { waiting: 0, busy: 1, idle: 2 };
-    rows.sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3));
+    const putAway = (s) => Boolean(s.archived) && s.status !== 'waiting';   // archived rows sort last
+    rows.sort((a, b) => (putAway(a) ? 9 : (rank[a.status] ?? 3)) - (putAway(b) ? 9 : (rank[b.status] ?? 3)));
     const items = rows.map((s) => ({
       label: (s.status === 'waiting' ? '$(warning) ' : s.status === 'busy' ? '$(sync~spin) ' : '') + (s.title || s.name),
-      description: s.status === 'waiting' ? (s.waitingFor || 'waiting') : s.status,
+      description: putAway(s) ? 'archived' : (s.status === 'waiting' ? (s.waitingFor || 'waiting') : s.status),
       detail: (s.window && s.window.label ? s.window.label + ' · ' : '') + s.cwd,
       sessionId: s.sessionId,
     }));
     const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Open a Claude Code session', matchOnDetail: true });
-    if (pick) await this.openSession(pick.sessionId);
+    if (!pick) return;
+    if (rows.some((s) => s.sessionId === pick.sessionId && s.archived)) {   // an explicit open brings it back
+      try { core.unarchiveSession(pick.sessionId); this.log.info('unarchive ' + pick.sessionId + ' (picked)'); }
+      catch (e) { this.log.warn('unarchive ' + pick.sessionId + ' failed: ' + String((e && e.message) || e)); }
+    }
+    await this.openSession(pick.sessionId);
   }
 
   stop() {

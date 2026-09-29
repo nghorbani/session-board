@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- ⤓ on a row archives the session: it ends like ✕ does and stays off the board afterwards. An archived session comes back on its own only when it needs you; "Show N archived" lists the rest, and ⤒ or a click on the row brings one back. The board's archive is its own and does not touch Claude Code's
+- A session whose record cannot be read or whose process cannot be inspected is no longer reported as gone while its process still runs; ✕ and ⤓ refuse instead
+- Background sessions (`claude --bg`) are ended through `claude stop`; killing their process only made the CLI's daemon start it again
+
 ## 0.4.3
 
 - ↻ in the usage strip now spins and stays disabled until the refresh has finished; a click within 15 s of the last refresh says "refreshed a moment ago" in the strip, and a failed refresh says why there too

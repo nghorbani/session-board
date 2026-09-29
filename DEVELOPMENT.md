@@ -20,8 +20,11 @@ session-dashboard/
     media/icon.png      gallery icon, 128x128
     media/board.png     README screenshots, rendered by tools/screenshot.cjs
     media/search.png
-    tests/              node --test suite: usage path (tests/shim/claude.cmd stands in for the CLI),
-                        manifest identity, the host's ↻ reply (tests/shim/vscode.js stands in for the API)
+    tests/              node --test suites: usage path (tests/shim/claude.cmd stands in for the CLI),
+                        manifest identity, the archive store and end path, the host's ↻ and
+                        archive replies (tests/shim/vscode.js stands in for the API, tests/shim/host.cjs
+                        boots the host), and the page itself in headless Chrome against a fake API
+                        (tests/page.test.cjs; skipped when no Chromium is found)
     .vscodeignore       keeps tests/ out of the package
   server.cjs            optional browser front end over the same core.cjs + index.html
   start.ps1             runs server.cjs and opens the browser (optional)
@@ -47,6 +50,15 @@ it, so do not reload a window whose sessions you still need. A new window runs t
 installed version and shows every session anyway. Installing several extension ids into one
 running window stacks their title-bar actions (one search and one ↻ icon per copy) and only
 the first copy's view activates; the duplicates go when the window reloads.
+
+If the Session Board icon is missing from the activity bar **of one workspace only**, and
+not in its "..." overflow either, while "View: Show Session Board" still opens the view:
+VS Code keeps a per-workspace visibility list for activity-bar containers
+(`workbench.activity.viewletsWorkspaceState` in that workspace's `state.vscdb`), a stale
+`visible: false` there is re-applied whenever the bar is rebuilt from storage, and the
+rebuild saves it back. Seen after the install and uninstall churn above. Repair: reload
+that window and, as soon as the icon appears, drag it one slot in the activity bar; the
+drag saves the flag back as visible.
 
 ## How it works
 
@@ -75,7 +87,21 @@ the first copy's view activates; the duplicates go when the window reloads.
   is re-read (busy/waiting needs an explicit force), the process must be `claude.exe` with a
   creation time within 5 s of the record (`procStart` FILETIME), then `taskkill /PID /T /F`
   and a wait until the pid is gone. Outcomes: `ended`, `needs-force`, `gone`, `mismatch`,
-  `denied`, `partial`, `timeout`, `pending`, `unsupported`.
+  `denied`, `partial`, `timeout`, `pending`, `unsupported`, `failed`. `gone` is only said
+  about a pid that is not running: a missing record or a failed inspection of a live pid
+  is refused (`mismatch` / `failed`). A row of `kind: background` (`claude --bg`) is not
+  killed: those jobs belong to `claude daemon`, which runs each one under a pty host and
+  respawns a killed process, so the board runs `claude stop <job id>` (the row's 8-character
+  `id`) and waits for the pid to go; the conversation is kept and `claude --bg --resume
+  <session id>` continues it under the same id.
+- **Archive**: ⤓ is `endSession(id, { archive: true })`. `applyArchive()` records the id
+  when the outcome is `ended`, `gone` or `unknown` (all "not running") as one marker file
+  `%LOCALAPPDATA%\SessionBoard\archived\<id>.json` (no shared list, so windows and the
+  browser page never overwrite each other); a marker write that fails after the kill comes
+  back as `ok` with `archived: false` and `archiveError`. `snapshot()` and `searchSessions()`
+  read the markers into `archived` on every row; the page hides archived rows unless they are
+  waiting, and ⤒ or a click on the row (or a pick in the command palette) unlinks the marker.
+  The flag is the board's own; Claude Code's archive is its private extension state.
 - **Search**: ripgrep reads the transcripts, whole files, as a child process: one pass for
   the newest `aiTitle` per file, one for the newest `customTitle`, one for the first `cwd`,
   all with constant patterns; the content pass is `rg -i -l -F` with the query and its
@@ -117,7 +143,8 @@ pwsh -File start.ps1
 
 Serves the same page at <http://127.0.0.1:4317>. Every `/api/*` route requires the per-run
 token embedded in the page (`X-Board-Token`) and a matching Host/Origin; JSON responses are
-`no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`, `POST /api/end/<id>[?force=1]`,
+`no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`,
+`POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>`,
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`.
 
 ## Publishing (as of 2026-09)

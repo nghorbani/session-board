@@ -2,12 +2,21 @@
 // and answers according to SB_SHIM_MODE: ok (default), hang, garbage, exit2, error. When
 // SB_SHIM_MODE_FILE names a file, its content is the mode, read at every spawn, so a running
 // server can be switched between modes (the browser-page checks of the ↻ busy state).
-// `claude agents --json` answers with an empty list so a page served against the shim keeps
-// polling normally.
+// `claude agents --json` answers with SB_SHIM_AGENTS (a JSON list of rows) or an empty list,
+// so a page served against the shim keeps polling and a test can seed live rows.
 'use strict';
 const fs = require('fs');
 
-if (process.argv.includes('agents')) { process.stdout.write('[]\n'); process.exit(0); }
+if (process.argv.includes('agents')) { process.stdout.write((process.env.SB_SHIM_AGENTS || '[]') + '\n'); process.exit(0); }
+// `claude stop <job>`: the daemon would stop the job; here SB_SHIM_STOP_KILL_PID names the
+// process to end (SB_SHIM_STOP_FAIL makes it answer "No job matching" with exit 1).
+if (process.argv.includes('stop')) {
+  if (process.env.SB_SHIM_STOP_FAIL) { process.stderr.write("No job matching '" + process.argv[process.argv.length - 1] + "'.\n"); process.exit(1); }
+  const victim = Number(process.env.SB_SHIM_STOP_KILL_PID);
+  if (victim) { try { process.kill(victim); } catch (_) { /* already gone */ } }
+  process.stdout.write('Stopped ' + process.argv[process.argv.length - 1] + '\n');
+  process.exit(0);
+}
 
 const modeFile = process.env.SB_SHIM_MODE_FILE;
 let fileMode = '';

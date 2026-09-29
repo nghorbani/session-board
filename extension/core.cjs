@@ -22,8 +22,8 @@ const PKG = require('./package.json');
 const EXTENSION_ID = PKG.publisher + '.' + PKG.name;
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
-const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
-const SESSIONS_DIR = path.join(CLAUDE_DIR, 'sessions');
+const PROJECTS_DIR = process.env.SB_PROJECTS_DIR || path.join(CLAUDE_DIR, 'projects');   // overridable for the tests
+const SESSIONS_DIR = process.env.SB_SESSIONS_DIR || path.join(CLAUDE_DIR, 'sessions');   // overridable for the tests
 const CODE_LOGS_DIR = path.join(
   process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Code', 'logs');
 const VSCODE_EXTENSIONS_JSON = path.join(os.homedir(), '.vscode', 'extensions', 'extensions.json');
@@ -279,7 +279,8 @@ let processTreeAt = 0;
 
 async function runPowerShell(script, timeout) {
   if (!IS_WINDOWS) return { code: -1, stdout: '', stderr: 'PowerShell is Windows-only' };
-  return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: timeout || 20000 });
+  // SB_POWERSHELL lets a test point this at a missing executable to simulate an inspection failure.
+  return run(process.env.SB_POWERSHELL || 'powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: timeout || 20000 });
 }
 
 async function refreshProcessTree() {
@@ -437,6 +438,68 @@ const LIMIT_KINDS = { session: ['five_hour', '5h'], weekly_all: ['seven_day', '7
 const SHAPE_CHANGED = "Claude Code's usage reply changed; update Session Board";
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
+
+// ---------------------------------------------------------------------------------------
+// Archived sessions: the board's own flag (Claude Code's archive is private to it)
+// ---------------------------------------------------------------------------------------
+
+/*
+ * One marker file per archived session id under DATA_DIR/archived/, so windows and the
+ * browser page never rewrite a shared list:
+ *
+ *   ⤓ on a row ──▶ endSession(id, { archive: true }) ──▶ doEndSession ──▶ applyArchive
+ *                                       ended / gone / unknown ──▶ marker written, ok: true, archived: true
+ *                                       marker write fails    ──▶ ok: true, archived: false, archiveError
+ *                                       anything else         ──▶ result untouched, archived: false
+ *   snapshot() and searchSessions() read the markers and set `archived` on every row; the
+ *   page hides archived rows unless they are waiting, and ⤒ or a click on the row unlinks.
+ */
+const ARCHIVE_DIR = path.join(DATA_DIR, 'archived');
+const ARCHIVE_OK = new Set(['ended', 'gone', 'unknown']);   // outcomes that mean "not running"
+
+function archiveMarker(sessionId) { return path.join(ARCHIVE_DIR, sessionId + '.json'); }
+
+/** The archived ids: the UUID-named marker files. Existence is the flag; the content is informational. */
+function readArchived() {
+  let names = [];
+  try { names = fs.readdirSync(ARCHIVE_DIR); } catch (_) { return new Set(); }
+  const ids = new Set();
+  for (const name of names) {
+    const id = name.endsWith('.json') ? name.slice(0, -5) : null;
+    if (id && UUID_RE.test(id)) ids.add(id);
+  }
+  return ids;
+}
+
+function archivedIds() { return [...readArchived()]; }
+
+function archiveSession(sessionId) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
+  fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  fs.writeFileSync(archiveMarker(sessionId), JSON.stringify({ at: Date.now() }));
+}
+
+function unarchiveSession(sessionId) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
+  try { fs.unlinkSync(archiveMarker(sessionId)); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+}
+
+/**
+ * Turn an end result into an archive result. Only outcomes that mean the process is not
+ * running record the id; a marker write that fails after the kill still reports the end.
+ */
+function applyArchive(sessionId, result, archive) {
+  if (!archive) return result;
+  if (!ARCHIVE_OK.has(result.code)) return Object.assign({}, result, { archived: false });
+  try {
+    archiveSession(sessionId);
+    return Object.assign({}, result, { ok: true, archived: true });
+  } catch (e) {
+    return Object.assign({}, result, { ok: true, archived: false, archiveError: String((e && e.message) || e) });
+  }
+}
 
 /** Write a probe config file when missing or different. */
 function ensureFile(file, content) {
@@ -764,6 +827,7 @@ async function snapshot() {
 
   const index = transcriptIndex();
   const times = registryTimes();
+  const archived = readArchived();
   const now = Date.now();
 
   const windows = new Map();
@@ -812,6 +876,7 @@ async function snapshot() {
       pct: tokens == null || !limits.compact ? null : Math.min(100, Math.round((tokens / limits.compact) * 100)),
       hasTranscript: Boolean(file),
       needsAttention: r.status === 'waiting',
+      archived: archived.has(r.sessionId),
     };
   });
 
@@ -859,11 +924,12 @@ const ending = new Map(); // sessionId -> promise, one attempt at a time
 
 async function endSession(sessionId, opts) {
   sessionId = String(sessionId || '');
-  if (!UUID_RE.test(sessionId)) return { ok: false, code: 'invalid', message: 'Not a session id.' };
-  if (ending.has(sessionId)) return { ok: false, code: 'pending', message: 'Already ending this session.' };
+  const archive = Boolean(opts && opts.archive);
+  if (!UUID_RE.test(sessionId)) return applyArchive(sessionId, { ok: false, code: 'invalid', message: 'Not a session id.' }, archive);
+  if (ending.has(sessionId)) return applyArchive(sessionId, { ok: false, code: 'pending', message: 'Already ending this session.' }, archive);
   const p = doEndSession(sessionId, Boolean(opts && opts.force));
   ending.set(sessionId, p);
-  try { return await p; } finally { ending.delete(sessionId); }
+  try { return applyArchive(sessionId, await p, archive); } finally { ending.delete(sessionId); }
 }
 
 async function doEndSession(sessionId, force) {
@@ -873,8 +939,13 @@ async function doEndSession(sessionId, force) {
   const pid = Number(row.pid);
   if (!Number.isInteger(pid) || pid <= 0) return { ok: false, code: 'invalid', message: 'Bad pid.' };
 
+  // `gone` is only ever said about a pid that is not running: a missing record or a failed
+  // inspection of a live pid is refused, so an archive never hides a running session.
   const rec = readRegistry(pid);
-  if (!rec) return { ok: false, code: 'gone', message: 'No registry record; the session has probably ended already.' };
+  if (!rec) {
+    if (pidAlive(pid)) return { ok: false, code: 'mismatch', message: 'No registry record for running pid ' + pid + '; refusing.' };
+    return { ok: false, code: 'gone', message: 'No registry record and pid ' + pid + ' is not running; the session has ended.' };
+  }
   if (rec.sessionId !== sessionId) return { ok: false, code: 'mismatch', message: 'Registry names a different session for this pid; refusing.' };
 
   const status = String(rec.status || '');
@@ -882,8 +953,15 @@ async function doEndSession(sessionId, force) {
     return { ok: false, code: 'needs-force', status, message: 'Session is ' + status + '.' };
   }
 
+  // A background job (`claude --bg`) belongs to `claude daemon`, which runs it under a pty
+  // host and respawns a killed process; it is stopped through the CLI instead.
+  if (row.kind === 'background' && row.id) return stopBackgroundJob(String(row.id), pid);
+
   const ident = await processIdentity(pid);
-  if (!ident) return { ok: false, code: 'gone', message: 'Pid ' + pid + ' no longer exists.' };
+  if (!ident) {
+    if (pidAlive(pid)) return { ok: false, code: 'failed', message: 'Could not inspect pid ' + pid + '; refusing.' };
+    return { ok: false, code: 'gone', message: 'Pid ' + pid + ' no longer exists.' };
+  }
   if (!identityMatches(rec, ident)) {
     return { ok: false, code: 'mismatch', message: 'Pid ' + pid + ' is not the claude.exe this record describes; refusing.' };
   }
@@ -898,6 +976,24 @@ async function doEndSession(sessionId, force) {
   if (pidAlive(pid)) return { ok: false, code: 'partial', message: 'taskkill returned but pid ' + pid + ' is still alive.' };
   parentByPid.delete(pid);
   return { ok: true, code: 'ended', pid };
+}
+
+const JOB_ID_RE = /^[A-Za-z0-9-]{1,64}$/;   // the shell path concatenates arguments unquoted
+
+/** `claude stop <job>` for a background job, then wait for its process to go. */
+async function stopBackgroundJob(jobId, pid) {
+  if (!JOB_ID_RE.test(jobId)) return { ok: false, code: 'invalid', message: 'Bad background job id.' };
+  const r = await run('claude', ['stop', jobId], { timeout: 20000, shell: IS_WINDOWS });
+  if (r.timedOut) return { ok: false, code: 'timeout', message: 'claude stop did not finish in 20 s.' };
+  if (r.code !== 0) {
+    const line = (r.stderr || r.stdout).trim().split('\n')[0];
+    if (/no job matching/i.test(line) && !pidAlive(pid)) return { ok: false, code: 'gone', message: 'The background job is already gone.' };
+    return { ok: false, code: 'failed', message: line || ('claude stop exit ' + r.code) };
+  }
+  for (let i = 0; i < 50 && pidAlive(pid); i++) await new Promise((res) => setTimeout(res, 100));
+  if (pidAlive(pid)) return { ok: false, code: 'partial', message: 'claude stop returned but pid ' + pid + ' is still alive.' };
+  parentByPid.delete(pid);
+  return { ok: true, code: 'ended', pid, via: 'claude stop' };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1139,10 +1235,12 @@ async function searchSessions(query, opts) {
       base.partialReason = 'ripgrep not found; content search unavailable';
     }
 
+    const archivedSet = readArchived();
     const all = [...hits.values()].map((row) => {
       const s = live.get(row.sessionId);
       return Object.assign(row, {
         live: Boolean(s), status: s ? s.status : 'past', pid: s ? s.pid : null, window: s ? s.window : null,
+        archived: archivedSet.has(row.sessionId),
         name: s ? s.name : null, folder: row.cwd ? String(row.cwd).split(/[\\/]/).filter(Boolean).pop() : null,
         ageMinutes: row.mtime ? Math.round((Date.now() - row.mtime) / 60000) : null, snippets: [],
       });
@@ -1206,6 +1304,13 @@ module.exports = {
   pidAlive,
   readRegistry,
   endSession,
+  applyArchive,
+  readArchived,
+  archivedIds,
+  archiveSession,
+  unarchiveSession,
+  ARCHIVE_DIR,
+  SESSIONS_DIR,
   rgProbe,
   sessionIndex,
   searchSessions,

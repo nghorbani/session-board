@@ -43,14 +43,19 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 - **✕ ends the session** and everything it started (its subagents and tool processes).
   Click once, then click `End?` within 3 s. Busy or waiting sessions ask once more; in-flight
   work is lost. The transcript stays and Claude Code's picker still offers "Resume session".
-  Archiving is not something the board can do; use Claude Code's picker for that.
+- **⤓ archives the session**: it ends it exactly like ✕ (same confirmations) and keeps it
+  off the board afterwards. If it runs again later (a resume), it comes back on its own only
+  when it is waiting for you; "Show N archived" lists the others, and ⤒ or a click on the
+  row brings one back. This flag is the board's own, kept in your profile; it does not touch
+  Claude Code's archive, which the board cannot reach.
 - **Search**: typing narrows the live list. Enter searches every session on disk by title,
   folder, id and transcript text (literal, case-insensitive, raw transcript text including
   tool output); Esc or an emptied box clears. Results show live or past, the folder, up to
   two snippets, and whether the pass was partial. Click a past session to resume it in this
   window when its folder is open here; otherwise the resume command is copied and you can
-  open the folder in a new window as the first step. Archived and unarchived past sessions
-  look the same: the archive flag is private to Claude Code.
+  open the folder in a new window as the first step. Claude Code's own archive flag is
+  private to it and not shown; sessions archived from the board carry an `archived` chip,
+  and ⤒ or a click on such a row clears the flag.
 - Command palette: **Session Board: Open Session…**, **Session Board: Search Sessions…**,
   **Session Board: Refresh Usage Limits**, **Session Board: Refresh**. Output panel channel
   **Session Board** logs each decision.
