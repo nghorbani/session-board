@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+
+- The usage strip now names the account the `claude` command is signed in with: the email, with organisation and plan on hover. It comes from `claude auth status --json`, run beside the usage probe. A logged-out CLI shows "not logged in"; a CLI without that command shows no account and the Output channel says why
+
 ## 0.5.0
 
 - ⤓ on a row archives the session: it ends like ✕ does and stays off the board afterwards. An archived session comes back on its own only when it needs you; "Show N archived" lists the rest, and ⤒ or a click on the row brings one back. The board's archive is its own and does not touch Claude Code's

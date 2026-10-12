@@ -35,6 +35,7 @@ class BoardProvider {
     this.seq = 0;
     this.searchAbort = null;   // AbortController of the latest search
     this.searchRequestId = null;
+    this.accountError = null;  // the account probe failure last logged, so it is said once per change
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -105,7 +106,16 @@ class BoardProvider {
   mergeUsage() {
     if (!this.last) return;
     this.last.usage = core.usageState();
+    this.noteAccountError(this.last.usage);
     this.push();
+  }
+
+  /** An account probe failure (a CLI without `auth status`, a timeout) is logged when it appears or changes. */
+  noteAccountError(u) {
+    const err = (u && u.accountError) || null;
+    if (err === this.accountError) return;
+    this.accountError = err;
+    if (err) this.log.warn('account probe: ' + err);
   }
 
   /**
@@ -121,7 +131,10 @@ class BoardProvider {
       this.mergeUsage();
       if (u && u.throttled) vscode.window.setStatusBarMessage('Session Board: usage limits were refreshed a moment ago.', 3000);
       else if (u && u.error) this.log.warn('usage probe: ' + u.error);
-      else this.log.info('usage probe ok' + (u && u.subscriptionType ? ' (' + u.subscriptionType + ')' : ''));
+      else {
+        const tags = [u && u.subscriptionType, u && u.account && u.account.email].filter(Boolean);
+        this.log.info('usage probe ok' + (tags.length ? ' (' + tags.join(', ') + ')' : ''));
+      }
       this.post({ type: 'usageResult', requestId: id, throttled: Boolean(u && u.throttled), error: (u && u.error) || null });
     } catch (e) {
       const message = String((e && e.message) || e);

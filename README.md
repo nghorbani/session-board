@@ -25,7 +25,7 @@ shows background agents only, not the sessions you talk to.
 - **Context at a glance.** Each row shows how much of the context window the session has
   used, amber and red near the limit.
 - **Your usage limits.** The 5-hour and 7-day windows sit at the top of the view with the time
-  each one resets.
+  each one resets, next to the account the CLI is signed in with.
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
 - **Archive a session.** ⤓ ends it the same way and keeps it off the board. It comes back on
   its own only when it needs you; "Show N archived" lists the rest, and ⤒ or a click brings
@@ -55,6 +55,10 @@ the Claude Code command line for these numbers the same way Claude Code's own us
 does: a short, hook-free run that makes no model call and uses the CLI's own login. It
 refreshes every 5 minutes while the view is visible, and on ↻. Subscription plans only;
 API-key billing has no limits to report.
+
+The strip also names the account the `claude` command is signed in with (the email;
+organisation and plan on hover), from `claude auth status --json`. That is the CLI's login,
+one per machine, not a per-session account.
 
 ## Privacy
 

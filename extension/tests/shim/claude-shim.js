@@ -8,6 +8,25 @@
 const fs = require('fs');
 
 if (process.argv.includes('agents')) { process.stdout.write((process.env.SB_SHIM_AGENTS || '[]') + '\n'); process.exit(0); }
+// `claude auth status --json`: the account the CLI is signed in with, by SB_SHIM_AUTH: ok
+// (default), notice (a text line before the JSON), loggedout, fail (exit 1: a CLI without the
+// command), hang (falls through to the stdin flow in hang mode, so the process stays alive).
+if (process.argv.includes('auth')) {
+  const auth = process.env.SB_SHIM_AUTH || 'ok';
+  if (auth === 'hang') {
+    process.env.SB_SHIM_MODE = 'hang';
+  } else if (auth === 'fail') {
+    process.stderr.write("error: unknown command 'auth'\n");
+    process.exit(1);
+  } else {
+    const body = auth === 'loggedout'
+      ? { loggedIn: false, authMethod: 'none', apiProvider: 'firstParty', email: null }
+      : { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', analyticsDisabled: false, email: 'dev@example.com', orgId: 'org-1', orgName: 'Example', subscriptionType: 'team' };
+    if (auth === 'notice') process.stdout.write('Update available: 9.9.9\n');
+    process.stdout.write(JSON.stringify(body, null, 2) + '\n');
+    process.exit(0);
+  }
+}
 // `claude stop <job>`: the daemon would stop the job; here SB_SHIM_STOP_KILL_PID names the
 // process to end (SB_SHIM_STOP_FAIL makes it answer "No job matching" with exit 1).
 if (process.argv.includes('stop')) {

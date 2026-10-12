@@ -10,7 +10,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { boot, cleanup, vscode } = require('./shim/host.cjs');
 
-const FRESH = { state: 'ok', at: 2, ageSeconds: 0, subscriptionType: 'team', windows: { five_hour: { label: '5h', usedPct: 10, resetsAt: null, expired: false } }, extraUsage: null, error: null, throttled: false };
+const ACCOUNT = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'team' };
+const FRESH = { state: 'ok', at: 2, ageSeconds: 0, subscriptionType: 'team', windows: { five_hour: { label: '5h', usedPct: 10, resetsAt: null, expired: false } }, extraUsage: null, error: null, account: ACCOUNT, accountError: null, throttled: false };
 
 function bootUsage(fetchImpl, opts) {
   return boot({ fetchUsage: fetchImpl, usageState: () => FRESH }, opts);
@@ -22,7 +23,17 @@ test('refreshUsage: a good probe posts the merged snapshot, then usageResult wit
   assert.deepEqual(posted.map((m) => m.type), ['snapshot', 'usageResult']);
   assert.equal(posted[0].data.usage, FRESH, 'the snapshot carries the fresh usage, not the captured one');
   assert.deepEqual(posted[1], { type: 'usageResult', requestId: 'req-1', throttled: false, error: null });
-  assert.ok(vscode.__log.some(([lvl, m]) => lvl === 'info' && /usage probe ok/.test(m)));
+  assert.ok(vscode.__log.some(([lvl, m]) => lvl === 'info' && /usage probe ok \(team, dev@example\.com\)/.test(m)), JSON.stringify(vscode.__log));
+});
+
+test('refreshUsage: a failed account probe is logged once per change and the last account stays in the snapshot', async () => {
+  const broken = Object.assign({}, FRESH, { accountError: "error: unknown command 'auth'" });
+  const { provider, posted } = boot({ fetchUsage: async () => broken, usageState: () => broken });
+  await provider.refreshUsage('req-6');
+  await provider.refreshUsage('req-7');
+  assert.deepEqual(posted[posted.length - 1], { type: 'usageResult', requestId: 'req-7', throttled: false, error: null });
+  assert.equal(posted[0].data.usage.account.email, 'dev@example.com');
+  assert.equal(vscode.__log.filter(([lvl, m]) => lvl === 'warn' && /account probe: error: unknown command 'auth'/.test(m)).length, 1, JSON.stringify(vscode.__log));
 });
 
 test('refreshUsage: a throttled probe says so in the reply and in the status bar', async () => {

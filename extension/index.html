@@ -62,6 +62,7 @@
   .usage.show { display: block; }
   .usage .u-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 22px; }
   .usage .u-head b { color: var(--text); font-weight: 600; }
+  .usage .u-acct { color: var(--dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .usage .u-note { color: var(--faint); font-size: 11px; margin-left: auto; white-space: nowrap; }
   /* one grid for all rows so the bars line up whatever the label widths */
   .usage .u-rows { display: grid; grid-template-columns: auto 1fr auto; column-gap: 8px; row-gap: 5px; align-items: center; margin-top: 5px; }
@@ -300,6 +301,16 @@ function usageNoteHtml(fallback) {
   return '<span class="u-msg">' + esc(fallback) + '</span>';
 }
 
+/** The account the claude command is signed in with: the email in the head, org and plan on hover. */
+function usageAccountHtml(a) {
+  if (!a) return '';
+  var text = a.email ? a.email : (a.loggedIn === false ? 'not logged in' : (/api.?key/i.test(a.authMethod || '') ? 'API key' : ''));
+  if (!text) return '';
+  var hint = [a.orgName, a.subscriptionType, a.authMethod].filter(Boolean).join(' · ');
+  var what = 'the account the claude command is signed in with';
+  return '<span class="u-acct" title="' + esc(hint ? hint + ' · ' + what : what) + '">' + esc(text) + '</span>';
+}
+
 function renderUsage(u) {
   var el = document.getElementById('usage');
   if (!u) { el.className = 'usage'; el.innerHTML = ''; return; }
@@ -308,7 +319,7 @@ function renderUsage(u) {
   var refreshBtn = state.usageBusy
     ? '<button id="usageRefresh" class="spin" disabled title="refreshing…">↻</button>'
     : '<button id="usageRefresh" title="Refresh usage limits now">↻</button>';
-  var head = '<div class="u-head"><b>Usage limits</b>';
+  var head = '<div class="u-head"><b>Usage limits</b>' + (u.state === 'loading' ? '' : usageAccountHtml(u.account));
   var html;
   if (u.state === 'loading') {
     html = head + '<span>checking usage…</span></div>';

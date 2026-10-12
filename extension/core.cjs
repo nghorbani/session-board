@@ -418,7 +418,8 @@ function boardAlive(exthostPid) {
 // hooks, no MCP servers, no transcript, no registry record. The CLI uses its own login; the
 // board never reads credentials. The CLI marks the reply as experimental, so parsing is
 // tolerant and a changed shape produces a clear message. Results are cached in DATA_DIR so
-// both hosts and every window share one probe.
+// both hosts and every window share one probe. The account the CLI is signed in with comes
+// from `claude auth status --json`, run beside the usage request and kept in the same record.
 
 const DATA_DIR = IS_WINDOWS
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'SessionBoard')
@@ -430,6 +431,7 @@ const PROBE_SETTINGS = '{"disableAllHooks":true}\n';
 const PROBE_MCP = '{"mcpServers":{}}\n';
 const USAGE_TIMEOUT_MS = 30000;
 const USAGE_MIN_INTERVAL_MS = 15000;
+const ACCOUNT_TIMEOUT_MS = 15000;    // `claude auth status --json` answers in well under a second
 // Older reply shape: one named object per window. Newer replies also carry a `limits` list,
 // which is what Claude Code's own usage panel renders (session, weekly_all, weekly_scoped per
 // model); that list wins when present because the named keys stopped covering per-model rows.
@@ -663,11 +665,57 @@ async function probeUsage(opts) {
 }
 
 /**
+ * Map the CLI's `auth status --json` output to the board's account shape. The JSON object is
+ * taken from the first `{` to the last `}`, so a notice line before it does not matter.
+ * Tolerant: `loggedIn` or an `email` is enough; everything else is a string or null.
+ */
+function parseAuthStatus(stdout) {
+  const s = String(stdout || '');
+  const a = s.indexOf('{');
+  const b = s.lastIndexOf('}');
+  let o = null;
+  if (a !== -1 && b > a) { try { o = JSON.parse(s.slice(a, b + 1)); } catch (_) { o = null; } }
+  if (!o || typeof o !== 'object') return { error: 'auth status reply not understood' };
+  const str = (v) => (v == null || v === '' ? null : String(v));
+  const email = str(o.email);
+  if (typeof o.loggedIn !== 'boolean' && !email) return { error: 'auth status reply not understood' };
+  return {
+    loggedIn: typeof o.loggedIn === 'boolean' ? o.loggedIn : Boolean(email),
+    authMethod: str(o.authMethod),
+    apiProvider: str(o.apiProvider),
+    email,
+    orgName: str(o.orgName),
+    subscriptionType: str(o.subscriptionType),
+  };
+}
+
+/** `claude auth status --json`: the account the CLI is signed in with, or { error }. */
+async function probeAccount(opts) {
+  ensureDataDir();
+  const timeoutMs = opts.accountTimeoutMs || ACCOUNT_TIMEOUT_MS;
+  let timer = null;
+  let timedOut = false;
+  const r = await run(opts.command || 'claude', ['auth', 'status', '--json'], {
+    cwd: DATA_DIR, shell: IS_WINDOWS, maxBuffer: 1024 * 1024,
+    onChild: (child) => {
+      try { child.stdin.end(); } catch (_) { /* child gone */ }
+      timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
+    },
+  });
+  clearTimeout(timer);
+  if (timedOut) return { error: 'claude did not answer within ' + Math.round(timeoutMs / 1000) + ' s' };
+  if (r.code !== 0) return { error: firstLine(r.stderr) || firstLine(r.stdout) || ('claude exited with ' + r.code) };
+  return parseAuthStatus(r.stdout);
+}
+
+/**
  * Ask the CLI for the usage windows and cache the result. At most one probe per process
  * at a time, and none within `minIntervalMs` of the previous completion (the cached state
  * comes back with `throttled: true`). A failed probe keeps the last good windows and
  * carries the failure as `error`, so the strip shows numbers with a warning, not nothing.
- * Options: `timeoutMs`, `minIntervalMs`, `command` (tests point it at a shim).
+ * The account probe runs beside it: a failure keeps the last known account and is carried as
+ * `accountError`, never as a usage error.
+ * Options: `timeoutMs`, `accountTimeoutMs`, `minIntervalMs`, `command` (tests point it at a shim).
  */
 function fetchUsage(opts) {
   opts = opts || {};
@@ -678,8 +726,8 @@ function fetchUsage(opts) {
   }
   usageInFlight = (async () => {
     const at = Date.now();
-    let result;
-    try { result = await probeUsage(opts); } catch (e) { result = { error: String((e && e.message) || e) }; }
+    const asError = (e) => ({ error: String((e && e.message) || e) });
+    const [result, account] = await Promise.all([probeUsage(opts).catch(asError), probeAccount(opts).catch(asError)]);
     const prev = lastUsageRecord();
     let rec;
     if (result.error && prev && prev.windows) {
@@ -687,6 +735,8 @@ function fetchUsage(opts) {
     } else {
       rec = { at, subscriptionType: result.subscriptionType || null, available: result.available === true, windows: result.windows || null, extraUsage: result.extraUsage || null, error: result.error || null, errorAt: result.error ? at : null };
     }
+    rec.account = account.error ? ((prev && prev.account) || null) : account;
+    rec.accountError = account.error || null;
     try {
       ensureDataDir();
       const tmp = USAGE_FILE + '.tmp.' + process.pid;
@@ -704,11 +754,13 @@ function fetchUsage(opts) {
 /**
  * What the board shows. `state`: loading (no probe yet), ok (windows; `error` set when the
  * latest probe failed and these are the last good numbers), no-limits (the CLI reports no
- * plan limits), error (no numbers at all). `windows.*.resetsAt` is epoch ms.
+ * plan limits), error (no numbers at all). `windows.*.resetsAt` is epoch ms. `account` is the
+ * CLI's signed-in account (null when never probed) and `accountError` its last probe failure;
+ * neither affects `state`.
  */
 function usageState() {
   const rec = lastUsageRecord();
-  const out = { state: 'loading', at: null, ageSeconds: null, subscriptionType: null, available: null, windows: null, extraUsage: null, error: null, errorAt: null, cacheError: null, file: USAGE_FILE, dataDir: DATA_DIR };
+  const out = { state: 'loading', at: null, ageSeconds: null, subscriptionType: null, available: null, windows: null, extraUsage: null, error: null, errorAt: null, cacheError: null, account: null, accountError: null, file: USAGE_FILE, dataDir: DATA_DIR };
   if (!rec) return out;
   out.at = Number(rec.at) || null;
   out.ageSeconds = out.at ? Math.max(0, Math.round((Date.now() - out.at) / 1000)) : null;
@@ -717,6 +769,8 @@ function usageState() {
   out.error = rec.error ? String(rec.error) : null;
   out.errorAt = Number(rec.errorAt) || null;
   out.cacheError = rec.cacheError ? String(rec.cacheError) : null;
+  out.account = rec.account && typeof rec.account === 'object' ? rec.account : null;
+  out.accountError = rec.accountError ? String(rec.accountError) : null;
   const windows = {};
   for (const k of Object.keys(rec.windows || {})) {
     const w = rec.windows[k];
@@ -1319,6 +1373,7 @@ module.exports = {
   DATA_DIR,
   USAGE_FILE,
   parseUsageResponse,
+  parseAuthStatus,
   fetchUsage,
   usageState,
   refreshUsageIfStale,

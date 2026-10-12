@@ -18,7 +18,7 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   installed (the board opens sessions through it).
 - ripgrep (`rg`) on PATH for content search; VS Code's bundled copy is used when found.
   Title search works without it.
-- Tested with Claude Code 2.1.276 to 2.1.280 on VS Code 1.138. The board relies on
+- Tested with Claude Code 2.1.276 to 2.1.284 on VS Code 1.138. The board relies on
   undocumented Claude Code internals (`claude agents --json`, transcript line types, the
   extension's open command and URI handler), so a Claude Code release can break it; when
   the session output changes shape the board says so instead of guessing.
@@ -76,6 +76,11 @@ no transcript, and uses the CLI's own login. The board reads no credentials and 
 anywhere. Refreshed every 5 minutes while the view is visible (15 when hidden) and on ↻;
 when a refresh fails the last numbers stay, with the failure noted underneath. Subscription
 plans only: with API-key billing Claude Code reports no limits.
+
+The strip head also names the account the `claude` command is signed in with: the email, with
+organisation and plan on hover, read from `claude auth status --json` next to the usage probe.
+It is the CLI's login, one per machine, not a per-session account. A logged-out CLI shows "not
+logged in", and a Claude Code release without that command shows no account.
 
 ## Limits
 

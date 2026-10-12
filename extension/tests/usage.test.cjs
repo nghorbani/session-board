@@ -118,6 +118,24 @@ test('parseUsageResponse: missing or unparsable windows report a shape change', 
   assert.match(core.parseUsageResponse(null).error, /empty/);
 });
 
+test('parseAuthStatus: the CLI reply, also after a notice line', () => {
+  const reply = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', analyticsDisabled: false, email: 'dev@example.com', orgId: 'org-1', orgName: 'Example', subscriptionType: 'team' };
+  const a = core.parseAuthStatus(JSON.stringify(reply, null, 2) + '\n');
+  assert.deepEqual(a, { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'team' });
+  assert.deepEqual(core.parseAuthStatus('Update available: 9.9.9\n' + JSON.stringify(reply)), a);
+});
+
+test('parseAuthStatus: logged out, missing fields, garbage', () => {
+  const out = core.parseAuthStatus('{"loggedIn":false,"authMethod":"none"}');
+  assert.equal(out.loggedIn, false);
+  assert.equal(out.email, null);
+  assert.equal(out.orgName, null);
+  assert.equal(core.parseAuthStatus('{"email":"dev@example.com"}').loggedIn, true, 'an email alone counts as logged in');
+  assert.match(core.parseAuthStatus('not json').error, /not understood/);
+  assert.match(core.parseAuthStatus('').error, /not understood/);
+  assert.match(core.parseAuthStatus('{"version":"1"}').error, /not understood/);
+});
+
 test('usageState: loading with nothing cached, then each cached state', () => {
   fs.rmSync(USAGE_FILE, { force: true });
   assert.equal(core.usageState().state, 'loading');
@@ -132,6 +150,15 @@ test('usageState: loading with nothing cached, then each cached state', () => {
   assert.equal(u.windows.five_hour.label, '5h', 'records without a label fall back to the known name');
   writeCache({ at: now, available: true, windows: { seven_day_fable: { label: '7d Fable', usedPct: 88, resetsAt: now + 1000 } } });
   assert.equal(core.usageState().windows.seven_day_fable.label, '7d Fable');
+  writeCache({ at: now, available: true, windows: { five_hour: { usedPct: 1 } }, account: { loggedIn: true, authMethod: 'claude.ai', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'team' }, accountError: "error: unknown command 'auth'" });
+  u = core.usageState();
+  assert.equal(u.state, 'ok', 'an account failure never changes the usage state');
+  assert.equal(u.account.email, 'dev@example.com');
+  assert.match(u.accountError, /unknown command/);
+  writeCache({ at: now, available: true, windows: { five_hour: { usedPct: 1 } } });
+  u = core.usageState();
+  assert.equal(u.account, null, 'a record from before the account probe');
+  assert.equal(u.accountError, null);
   writeCache({ at: now, available: false, windows: null });
   assert.equal(core.usageState().state, 'no-limits');
   writeCache({ at: now, available: true, windows: null, error: 'claude did not answer within 30 s', errorAt: now });
@@ -151,7 +178,10 @@ test('fetchUsage: success through the shim creates DATA_DIR and the cache', asyn
   assert.equal(u.state, 'ok', JSON.stringify(u));
   assert.equal(u.windows.five_hour.usedPct, 42.4);
   assert.equal(u.subscriptionType, 'team');
+  assert.deepEqual(u.account, { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'team' });
+  assert.equal(u.accountError, null);
   assert.ok(fs.existsSync(USAGE_FILE));
+  assert.equal(JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8')).account.email, 'dev@example.com', 'the account is cached with the numbers');
   assert.equal(fs.readFileSync(path.join(DATA_DIR, 'probe-settings.json'), 'utf8'), '{"disableAllHooks":true}\n');
   assert.equal(fs.readFileSync(path.join(DATA_DIR, 'probe-mcp.json'), 'utf8'), '{"mcpServers":{}}\n');
 });
@@ -169,6 +199,48 @@ test('fetchUsage: garbage output keeps the last good numbers and carries the err
   assert.equal(u.windows.five_hour.usedPct, 42.4);
   assert.match(u.error, /no usage reply/);
   assert.ok(u.errorAt > 0);
+  assert.equal(u.account.email, 'dev@example.com', 'the account probe still ran');
+  assert.equal(u.accountError, null);
+});
+
+test('fetchUsage: a failed account probe keeps the last account and names the failure', async () => {
+  process.env.SB_SHIM_MODE = 'ok';
+  process.env.SB_SHIM_AUTH = 'fail';
+  const u = await core.fetchUsage(FAST);
+  delete process.env.SB_SHIM_AUTH;
+  assert.equal(u.state, 'ok');
+  assert.equal(u.error, null, 'the usage numbers are fresh');
+  assert.equal(u.account.email, 'dev@example.com', 'the account from the previous probe stays');
+  assert.match(u.accountError, /unknown command 'auth'/);
+});
+
+test('fetchUsage: a logged-out CLI gives an account without an email', async () => {
+  process.env.SB_SHIM_AUTH = 'loggedout';
+  const u = await core.fetchUsage(FAST);
+  delete process.env.SB_SHIM_AUTH;
+  assert.equal(u.account.loggedIn, false);
+  assert.equal(u.account.email, null);
+  assert.equal(u.accountError, null);
+});
+
+test('fetchUsage: a notice line before the account JSON is fine', async () => {
+  process.env.SB_SHIM_AUTH = 'notice';
+  const u = await core.fetchUsage(FAST);
+  delete process.env.SB_SHIM_AUTH;
+  assert.equal(u.account.email, 'dev@example.com');
+  assert.equal(u.accountError, null);
+});
+
+test('fetchUsage: the account probe times out on its own clock, the numbers still arrive', async () => {
+  process.env.SB_SHIM_AUTH = 'hang';
+  const t0 = Date.now();
+  const u = await core.fetchUsage({ minIntervalMs: 0, timeoutMs: 20000, accountTimeoutMs: 1500 });
+  delete process.env.SB_SHIM_AUTH;
+  assert.ok(Date.now() - t0 < 15000, 'returned after the account timeout');
+  assert.equal(u.state, 'ok');
+  assert.equal(u.error, null);
+  assert.match(u.accountError, /did not answer within 2 s/);
+  assert.equal(u.account.email, 'dev@example.com', 'the last account stays');
 });
 
 test('fetchUsage: error subtype from the CLI', async () => {

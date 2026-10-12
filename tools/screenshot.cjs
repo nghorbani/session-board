@@ -67,6 +67,7 @@ const snapshot = {
       seven_day_opus: { label: '7d Opus', usedPct: 61, resetsAt: now + 3 * 24 * HOUR, expired: false },
     },
     extraUsage: null, error: null, cacheError: null,
+    account: { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'max' }, accountError: null,
   },
 };
 

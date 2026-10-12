@@ -134,6 +134,14 @@ drag saves the flag back as visible.
   page keeps the button spinning and disabled until that reply or a 45 s watchdog, and only
   a reply carrying its own id ends the busy state. The status line route of 0.3.1 never ran
   for sessions started by the VS Code extension (no terminal UI there) and was removed.
+- **Account**: `probeAccount()` runs `claude auth status --json` in parallel with the usage
+  probe (same stripped environment and cwd, its own 15 s timeout with the same process-tree
+  kill) and keeps `loggedIn`, `authMethod`, `apiProvider`, `email`, `orgName` and
+  `subscriptionType` as `account` in the same `usage-cli.json` record. A failed account
+  probe (an older CLI answers `error: unknown command 'auth'`) keeps the previous `account`
+  and carries the reason as `accountError`; it never changes the usage `state`. The page
+  shows the email in the strip head and the rest on hover; the host logs an `accountError`
+  once per change. `tests/shim/claude-shim.js` answers `auth status` by `SB_SHIM_AUTH`.
 
 ## Optional browser page
 

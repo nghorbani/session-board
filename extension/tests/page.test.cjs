@@ -33,7 +33,7 @@ function row(sessionId, title, status, extra) {
   return Object.assign({ sessionId, title, status, waitingFor: status === 'waiting' ? 'permission prompt' : null, name: null, lastPrompt: null, cwd: 'C:\\code\\x', window: { id: 1, label: 'x' }, ageMinutes: 1, contextTokens: 1000, pct: 1, transcriptPath: null, kind: 'interactive', pid: 100, archived: false }, extra);
 }
 function snapshotOf(sessions) {
-  return { at: Date.now(), stale: false, error: null, limits: { compact: 100000, save: 90000 }, platform: 'win32', sessions, usage: { state: 'ok', at: Date.now(), ageSeconds: 0, subscriptionType: 'x', windows: { five_hour: { label: '5h', usedPct: 1, resetsAt: null, expired: false } } } };
+  return { at: Date.now(), stale: false, error: null, limits: { compact: 100000, save: 90000 }, platform: 'win32', sessions, usage: { state: 'ok', at: Date.now(), ageSeconds: 0, subscriptionType: 'x', windows: { five_hour: { label: '5h', usedPct: 1, resetsAt: null, expired: false } }, account: { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'x' }, accountError: null } };
 }
 
 // -- fake API ----------------------------------------------------------------------------
@@ -118,7 +118,9 @@ const SAMPLE = `(function () {
     chips: q('.row .chip.archived').length,
     dimmed: q('.row.archived').length,
     pendingEnd: JSON.parse(JSON.stringify(state.pendingEnd)),
-    copied: window.__copied || null
+    copied: window.__copied || null,
+    acct: text('.u-acct'),
+    acctTitle: (function () { var e = document.querySelector('.u-acct'); return e ? e.getAttribute('title') : null; })()
   };
 })()`;
 
@@ -257,5 +259,23 @@ test('page: ✕ is unchanged and posts without archive', opts, async () => {
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   s = await page.until((x) => !x.idle.includes(A), 'the ended row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['']);
+  await page.close();
+});
+
+test('page: the usage strip names the signed-in account, org and plan on hover', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([]);
+  const page = await openPage();
+  let s = await page.until((x) => x.acct !== null, 'the account in the strip');
+  assert.equal(s.acct, 'dev@example.com');
+  assert.match(s.acctTitle, /^Example · x · claude\.ai/);
+  const snap = snapshotOf([]);
+  snap.usage = { state: 'no-limits', at: Date.now(), ageSeconds: 0, available: false, windows: null, account: { loggedIn: false, authMethod: 'none', email: null }, accountError: null };
+  fake.snapshot = snap;
+  s = await page.until((x) => x.acct === 'not logged in', 'the logged-out line in the no-limits state');
+  const snap2 = snapshotOf([]);
+  snap2.usage = { state: 'error', at: Date.now(), ageSeconds: 0, available: true, windows: null, error: 'claude exited with 2', account: null, accountError: 'boom' };
+  fake.snapshot = snap2;
+  s = await page.until((x) => x.acct === null, 'no account line when none is known');
   await page.close();
 });
