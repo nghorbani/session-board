@@ -5,7 +5,7 @@ who is working, how much context each has used, and how much of your usage limit
 Click a row to jump to that session, ✕ to end it, and search every session on disk by title
 or content.
 
-![Session Board in the sidebar, with example sessions](media/board.png)
+![Session Board in the sidebar, with example sessions](https://github.com/nghorbani/session-board/raw/HEAD/extension/media/board.png)
 
 Session Board is an independent, unofficial tool. It is not affiliated with or endorsed by
 Anthropic; it reads the local files and CLI output that Claude Code leaves on your machine.

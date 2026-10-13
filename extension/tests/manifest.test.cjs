@@ -25,4 +25,14 @@ test('manifest identity matches the Marketplace listing', () => {
   assert.equal(core.EXTENSION_ID, 'nima-ghorbani.session-board-vscode');
 });
 
+test('Marketplace page images are absolute links into extension/media', () => {
+  // vsce rewrites a relative image link against the repository root, but the images live under
+  // extension/media/, so a relative link lands one folder too high and the listing shows a
+  // broken image. Absolute links are left alone.
+  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  const links = [...readme.matchAll(/!\[[^\]]*\]\(([^)\s]+)/g)].map((m) => m[1]);
+  assert.ok(links.length > 0, 'the Marketplace page has at least one screenshot');
+  for (const l of links) assert.match(l, /^https:\/\/github\.com\/nghorbani\/session-board\/raw\/HEAD\/extension\/media\//, l);
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

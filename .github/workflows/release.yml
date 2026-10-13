@@ -1,0 +1,45 @@
+# Builds the .vsix on a Windows runner (the tests use taskkill, Win32 paths and Chrome at
+# Program Files, like a developer machine) and attaches it to a GitHub Release when a version
+# tag is pushed. The tag must match extension/package.json and have a CHANGELOG.md section.
+# The Marketplace publish stays a manual step; see DEVELOPMENT.md.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the tag against the manifest and collect the release notes
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF_NAME.TrimStart('v')
+          $pkg = (Get-Content extension/package.json -Raw | ConvertFrom-Json).version
+          if ($pkg -ne $ver) { throw "tag $env:GITHUB_REF_NAME does not match package.json version $pkg" }
+          node tools/release-notes.cjs $ver | Out-File -Encoding utf8 release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw "no release notes for $ver" }
+          Get-Content release-notes.md
+
+      - name: Test and package
+        shell: pwsh
+        run: pwsh -File build.ps1 -NoInstall
+
+      - name: Create the GitHub Release with the .vsix attached
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = $env:GITHUB_REF_NAME.TrimStart('v')
+          gh release create $env:GITHUB_REF_NAME "session-board-vscode-$ver.vsix" --title "Session Board $ver" --notes-file release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }

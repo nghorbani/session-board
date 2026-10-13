@@ -3,6 +3,7 @@
 ## 0.6.0
 
 - The usage strip now names the account the `claude` command is signed in with: the email, with organisation and plan on hover. It comes from `claude auth status --json`, run beside the usage probe. A logged-out CLI shows "not logged in"; a CLI without that command shows no account and the Output channel says why
+- The Marketplace page shows its screenshot again; the image link pointed one folder too high
 
 ## 0.5.0
 
