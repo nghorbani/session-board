@@ -503,6 +503,235 @@ function applyArchive(sessionId, result, archive) {
   }
 }
 
+// ---------------------------------------------------------------------------------------
+// Unseen answers: a turn that ended while the board was watching, not opened since
+// ---------------------------------------------------------------------------------------
+
+/*
+ * Each process remembers the registry's statusUpdatedAt per session. When an idle row shows
+ * a newer statusUpdatedAt than the one last seen (an answer ended, even in a turn shorter
+ * than a poll interval), noteAnswer() writes DATA_DIR/unseen/<id>.json with that time. The
+ * time comes from the registry, so every window writes the same value and a slow window
+ * cannot bring back a flag the user already cleared. Opening the session from the board
+ * writes DATA_DIR/seen/<id>.json with the current time. A row is unseen while it is idle and
+ * its unseen time is newer than its seen time. A session first observed idle is never
+ * flagged (no flood at start-up); a new prompt makes it busy, so the flag only returns with
+ * the next answer. Markers older than MARKER_MAX_AGE_MS are dropped on read.
+ */
+const UNSEEN_DIR = path.join(DATA_DIR, 'unseen');
+const SEEN_DIR = path.join(DATA_DIR, 'seen');
+const TITLES_DIR = path.join(DATA_DIR, 'titles');
+const MARKER_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
+const observedStatus = new Map();   // sessionId -> { status, statusUpdatedAt } from this process's last snapshot
+
+/** UUID-named JSON markers of one dir as a Map; unreadable ones and, with maxAgeMs, stale ones are removed. */
+function readMarkers(dir, maxAgeMs) {
+  const out = new Map();
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (_) { return out; }
+  const cutoff = maxAgeMs ? Date.now() - maxAgeMs : 0;
+  for (const name of names) {
+    const id = name.endsWith('.json') ? name.slice(0, -5) : null;
+    if (!id || !UUID_RE.test(id)) continue;
+    const file = path.join(dir, name);
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
+    const at = rec && typeof rec === 'object' ? Number(rec.at) : 0;
+    if (!at || at < cutoff) { try { fs.unlinkSync(file); } catch (_) { /* leave it */ } continue; }
+    out.set(id, rec);
+  }
+  return out;
+}
+
+function writeMarker(dir, sessionId, rec) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, sessionId + '.json'), JSON.stringify(rec));
+}
+
+function markUnseen(sessionId, at) { writeMarker(UNSEEN_DIR, sessionId, { at: Number(at) || Date.now() }); }
+function markSeen(sessionId) { writeMarker(SEEN_DIR, sessionId, { at: Date.now() }); }
+function readUnseen() { return readMarkers(UNSEEN_DIR, MARKER_MAX_AGE_MS); }
+function readSeen() { return readMarkers(SEEN_DIR, MARKER_MAX_AGE_MS); }
+
+/**
+ * Remember a row's status and, when an answer ended since this process last looked, write
+ * the unseen marker. True when the marker was written. The first observation of a session
+ * never counts.
+ */
+function noteAnswer(sessionId, status, statusUpdatedAt) {
+  const prev = observedStatus.get(sessionId);
+  const at = Number(statusUpdatedAt) || null;
+  observedStatus.set(sessionId, { status, statusUpdatedAt: at });
+  if (!prev || status !== 'idle') return false;
+  const ended = prev.status !== 'idle' || (at && prev.statusUpdatedAt && at > prev.statusUpdatedAt);
+  if (!ended) return false;
+  try { markUnseen(sessionId, at || Date.now()); return true; } catch (_) { return false; }
+}
+
+/** Forget sessions that are no longer listed, so a resumed id starts fresh. */
+function forgetStatuses(liveIds) {
+  for (const id of [...observedStatus.keys()]) if (!liveIds.has(id)) observedStatus.delete(id);
+}
+
+// ---------------------------------------------------------------------------------------
+// Board titles: ✎ asks a small model for a title from the transcript so far
+// ---------------------------------------------------------------------------------------
+
+/*
+ * Claude Code titles a session once, from its first prompt, so a long session often carries
+ * a title that says nothing about where it went. ✎ runs `claude -p --model haiku` over the
+ * recent prompts and the last answer (a few KB from the transcript tail; hook-free, no tools,
+ * no MCP servers, no transcript of its own) and stores the reply as the board's title in
+ * DATA_DIR/titles/<id>.json together with the renamed title seen at that moment. The board
+ * title shows while that renamed title is unchanged; a later /rename wins again. Claude
+ * Code's files are never written.
+ */
+const TITLE_MODEL = 'haiku';
+const TITLE_TIMEOUT_MS = 90000;
+const TITLE_MAX_CHARS = 80;
+const EXCERPT_PROMPTS = 6;
+const EXCERPT_PROMPT_CHARS = 300;
+const EXCERPT_ANSWER_CHARS = 1500;
+const EXCERPT_CHUNK = 1024 * 1024;            // read from the end in steps of this size
+const EXCERPT_MAX_BYTES = 16 * 1024 * 1024;   // a transcript with no prompt in its last 16 MB gives nothing
+const TITLE_INSTRUCTION = 'Write a title for this coding session: at most eight words, plain text, no quotes, '
+  + 'no trailing period, naming what has been done or decided so far rather than the first question. '
+  + 'Reply with the title only.\n\n';
+
+function readTitles() { return readMarkers(TITLES_DIR, 0); }
+function setTitle(sessionId, title, seenCustomTitle) {
+  writeMarker(TITLES_DIR, sessionId, { title: String(title), at: Date.now(), seenCustomTitle: seenCustomTitle ? String(seenCustomTitle) : null });
+}
+
+/** The text blocks of a transcript message; tool results, thinking and tool calls are skipped. */
+function messageText(message) {
+  const c = message && message.content;
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return '';
+  return c.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
+}
+
+function clip(s, n) {
+  s = String(s || '').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n - 1).trim() + '…' : s;
+}
+
+/**
+ * What the title call sees: the last few prompts and the last answer. The transcript is read
+ * from its end in EXCERPT_CHUNK steps until enough prompts are found, because a long run of
+ * tool output can push the last prompt megabytes back from the tail. Injected lines (isMeta)
+ * and command or system markup (text starting with "<") are skipped. Empty when no prompt
+ * turns up within EXCERPT_MAX_BYTES.
+ */
+function transcriptExcerpt(transcriptPath) {
+  let stat;
+  try { stat = fs.statSync(transcriptPath); } catch (_) { return ''; }
+  if (!stat.isFile() || stat.size === 0) return '';
+  const prompts = [];   // newest first
+  let answer = '';
+  let fd = null;
+  try {
+    fd = fs.openSync(transcriptPath, 'r');
+    let end = stat.size;
+    let carry = null;     // bytes before the first newline of the chunk read last: the end of a line that continues further back
+    let scanned = 0;
+    while (end > 0 && prompts.length < EXCERPT_PROMPTS && scanned < EXCERPT_MAX_BYTES) {
+      const start = Math.max(0, end - EXCERPT_CHUNK);
+      const buf = Buffer.alloc(end - start);
+      const n = fs.readSync(fd, buf, 0, end - start, start);
+      scanned += n;
+      const combined = carry ? Buffer.concat([buf.subarray(0, n), carry]) : buf.subarray(0, n);
+      let body = combined;
+      carry = null;
+      if (start > 0) {
+        const nl = combined.indexOf(10);
+        if (nl === -1) { carry = combined; end = start; continue; }   // one line longer than the chunk
+        carry = combined.subarray(0, nl);
+        body = combined.subarray(nl + 1);
+      }
+      const lines = body.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line) continue;
+        const isUser = line.indexOf('"type":"user"') !== -1;
+        if (!isUser && (answer || line.indexOf('"type":"assistant"') === -1)) continue;
+        let o;
+        try { o = JSON.parse(line); } catch (_) { continue; }
+        if (!o || !o.message) continue;
+        if (o.type === 'user') {
+          if (o.isMeta) continue;
+          const t = messageText(o.message).trim();
+          if (!t || t[0] === '<') continue;
+          prompts.push(t);
+          if (prompts.length >= EXCERPT_PROMPTS) break;
+        } else if (o.type === 'assistant' && !answer) {
+          answer = messageText(o.message).trim();
+        }
+      }
+      end = start;
+    }
+  } catch (_) {
+    return '';
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch (_) { /* ignore */ } }
+  }
+  if (!prompts.length) return '';
+  const parts = prompts.reverse().map((p, i) => 'Prompt ' + (i + 1) + ': ' + clip(p, EXCERPT_PROMPT_CHARS));
+  if (answer) parts.push('Last answer: ' + clip(answer, EXCERPT_ANSWER_CHARS));
+  return parts.join('\n');
+}
+
+/** The model's reply as one clean title line (the last non-empty line, unquoted, no trailing period), or null. */
+function cleanTitle(stdout) {
+  const lines = String(stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  let t = lines[lines.length - 1].replace(/^["'“”‘’`]+|["'“”‘’`.]+$/g, '').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (t.length > TITLE_MAX_CHARS) t = t.slice(0, TITLE_MAX_CHARS - 1).trim() + '…';
+  return t;
+}
+
+/**
+ * Ask for a new title and store it. { ok: true, title } or { ok: false, code, message } with
+ * code invalid, no-transcript, timeout, failed or empty. Options: `timeoutMs`, `model`,
+ * `command` (tests point it at the shim).
+ */
+async function retitleSession(sessionId, opts) {
+  opts = opts || {};
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) return { ok: false, code: 'invalid', message: 'not a session id' };
+  const row = lastSnapshotRows().find((s) => s.sessionId === sessionId) || null;
+  const file = (row && row.transcriptPath) || transcriptIndex().get(sessionId) || null;
+  const excerpt = file ? transcriptExcerpt(file) : '';
+  if (!excerpt) return { ok: false, code: 'no-transcript', message: 'no prompts in the transcript yet' };
+  ensureDataDir();
+  ensureFile(PROBE_SETTINGS_FILE, PROBE_SETTINGS);
+  ensureFile(PROBE_MCP_FILE, PROBE_MCP);
+  const q = (p) => (IS_WINDOWS ? '"' + p + '"' : p);   // shell mode passes arguments unquoted
+  const args = ['-p', '--model', opts.model || TITLE_MODEL, '--output-format', 'text', '--no-session-persistence',
+    '--tools', IS_WINDOWS ? '""' : '', '--settings', q(PROBE_SETTINGS_FILE), '--disable-slash-commands',
+    '--strict-mcp-config', '--mcp-config', q(PROBE_MCP_FILE)];
+  const timeoutMs = opts.timeoutMs || TITLE_TIMEOUT_MS;
+  let timer = null;
+  let timedOut = false;
+  const r = await run(opts.command || 'claude', args, {
+    cwd: DATA_DIR, shell: IS_WINDOWS, maxBuffer: 4 * 1024 * 1024,
+    onChild: (child) => {
+      try { child.stdin.end(TITLE_INSTRUCTION + excerpt + '\n'); } catch (_) { /* child gone */ }
+      timer = setTimeout(() => { timedOut = true; killTree(child.pid); }, timeoutMs);
+    },
+  });
+  clearTimeout(timer);
+  if (timedOut) return { ok: false, code: 'timeout', message: 'claude did not answer within ' + Math.round(timeoutMs / 1000) + ' s' };
+  if (r.code !== 0) return { ok: false, code: 'failed', message: firstLine(r.stderr) || firstLine(r.stdout) || ('claude exited with ' + r.code) };
+  const title = cleanTitle(r.stdout);
+  if (!title) return { ok: false, code: 'empty', message: 'the model returned no title' };
+  setTitle(sessionId, title, row ? row.renamedTitle : null);
+  return { ok: true, title };
+}
+
 /** Write a probe config file when missing or different. */
 function ensureFile(file, content) {
   let cur = null;
@@ -882,7 +1111,11 @@ async function snapshot() {
   const index = transcriptIndex();
   const times = registryTimes();
   const archived = readArchived();
+  const unseen = readUnseen();
+  const seen = readSeen();
+  const titles = readTitles();
   const now = Date.now();
+  forgetStatuses(new Set(rows.map((r) => r.sessionId)));
 
   const windows = new Map();
   for (const r of rows) {
@@ -908,15 +1141,24 @@ async function snapshot() {
     const changedAt = t.statusUpdatedAt || null;
     const w = windows.get(r.sessionId) || null;
     const tokens = facts.tokens;
+    // a /rename (custom-title line, or the registry's user-set name) beats the generated title;
+    // a board title (✎) beats both while the renamed title is the one it was taken against
+    const renamed = facts.customTitle || (t.nameSource === 'user' && r.name ? String(r.name) : null) || null;
+    const board = titles.get(r.sessionId) || null;
+    const boardTitle = board && board.title && (board.seenCustomTitle || null) === renamed ? String(board.title) : null;
+    const answered = noteAnswer(r.sessionId, r.status, changedAt);
+    const u = answered ? { at: changedAt || now } : (unseen.get(r.sessionId) || null);
+    const sn = seen.get(r.sessionId) || null;
     return {
       sessionId: r.sessionId,
       pid: Number(r.pid),
       window: w ? { id: w.windowId, exthostPid: w.exthostPid, label: windowLabel.get(w.windowId) || null } : null,
       name: r.name || String(r.sessionId).slice(0, 8),
       nameSource: t.nameSource || null,
-      // a /rename (custom-title line, or the registry's user-set name) beats the generated title
-      title: facts.customTitle || (t.nameSource === 'user' && r.name ? String(r.name) : null) || facts.title,
+      title: boardTitle || renamed || facts.title,
       generatedTitle: facts.title,
+      renamedTitle: renamed,
+      boardTitle,
       lastPrompt: facts.lastPrompt,
       cwd: r.cwd || '',
       transcriptPath: file,
@@ -931,6 +1173,7 @@ async function snapshot() {
       hasTranscript: Boolean(file),
       needsAttention: r.status === 'waiting',
       archived: archived.has(r.sessionId),
+      unseen: r.status === 'idle' && Boolean(u) && (!sn || Number(u.at) > Number(sn.at)),
     };
   });
 
@@ -1363,6 +1606,19 @@ module.exports = {
   archivedIds,
   archiveSession,
   unarchiveSession,
+  UNSEEN_DIR,
+  SEEN_DIR,
+  TITLES_DIR,
+  markUnseen,
+  markSeen,
+  readUnseen,
+  readSeen,
+  noteAnswer,
+  readTitles,
+  setTitle,
+  transcriptExcerpt,
+  cleanTitle,
+  retitleSession,
   ARCHIVE_DIR,
   SESSIONS_DIR,
   rgProbe,

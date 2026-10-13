@@ -5,9 +5,9 @@
  * data layer run inside VS Code via the extension.
  *
  * Every /api route requires the per-run token the server embeds into the page, and a Host
- * of 127.0.0.1:<port> (Origin, when sent, must match too): the end and unarchive routes
- * change state, the usage route starts a CLI process, and the search route returns private
- * transcript text.
+ * of 127.0.0.1:<port> (Origin, when sent, must match too): the end, unarchive, seen and
+ * retitle routes change state, the usage and retitle routes start a CLI process, and the
+ * search route returns private transcript text.
  */
 
 const fs = require('fs');
@@ -66,6 +66,7 @@ async function handle(req, res) {
     if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { error: 'not a session id' });
     const row = core.lastGoodRows().find((r) => r.sessionId === sessionId);
     if (!row) return sendJson(res, 404, { error: 'unknown session' });
+    try { core.markSeen(sessionId); } catch (_) { /* the jump still happens; the flag returns on the next poll */ }
     const win = await core.windowForPid(Number(row.pid));
     if (!win) return sendJson(res, 409, { error: 'no VS Code window owns this session' });
     try {
@@ -91,6 +92,22 @@ async function handle(req, res) {
     if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
     try { core.unarchiveSession(sessionId); return sendJson(res, 200, { ok: true }); }
     catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  }
+
+  if (route.startsWith('/api/seen/') && req.method === 'POST') {
+    const sessionId = safeDecode(route.slice('/api/seen/'.length));
+    if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
+    try { core.markSeen(sessionId); return sendJson(res, 200, { ok: true }); }
+    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  }
+
+  if (route.startsWith('/api/retitle/') && req.method === 'POST') {
+    // One short model call over the transcript; the reply is stored as the board's title.
+    const sessionId = safeDecode(route.slice('/api/retitle/'.length));
+    if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, code: 'invalid', message: 'not a session id' });
+    const result = await core.retitleSession(sessionId);
+    const codes = { invalid: 400, 'no-transcript': 404, timeout: 504, failed: 502, empty: 502 };
+    return sendJson(res, result.ok ? 200 : (codes[result.code] || 500), result);
   }
 
   if (route === '/api/usage/refresh' && req.method === 'POST') {

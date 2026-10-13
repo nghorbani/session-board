@@ -23,12 +23,16 @@ shows background agents only, not the sessions you talk to.
   sit at the top, highlighted, with what they are waiting for. Working and idle sessions
   follow. The activity-bar badge counts the waiting ones and a toast tells you when a new
   session starts waiting.
+- **Unseen answers stand out.** A session whose answer ended while the board was running sits
+  in its own group until you open it or send it a new prompt.
 - **One click to the session.** A row opens its session where you keep Claude Code, sidebar
   or editor tab, and brings the right VS Code window to the front.
 - **Context at a glance.** Each row shows how much of the context window the session has
   used, amber and red near the limit.
 - **Your usage limits.** The 5-hour and 7-day windows sit at the top of the view with the time
   each one resets, next to the account the CLI is signed in with.
+- **A title that follows the work.** Claude Code titles a session from its first question;
+  ✎ asks for a new title from the recent prompts and the last answer (one short haiku call).
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
 - **Archive a session.** ⤓ ends it the same way and keeps it off the board. It comes back on
   its own only when it needs you; "Show N archived" lists the rest, and ⤒ or a click brings
@@ -67,7 +71,9 @@ one per machine, not a per-session account.
 
 Everything stays on your machine. Session Board reads the session files and command-line
 output that Claude Code keeps in your user profile, and talks to nothing else. It reads no
-credentials and sends nothing anywhere.
+credentials and sends nothing anywhere, with one exception you trigger yourself: ✎ passes a
+few KB of a session's prompts and last answer to the model through your own `claude`
+command, the way a prompt in that session would.
 
 Session Board is an independent project. It is not affiliated with or endorsed by Anthropic.
 

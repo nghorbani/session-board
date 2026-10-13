@@ -53,7 +53,7 @@ const sessions = [
   session('a2', 'Release notes for 2.4', 'waiting', { waitingFor: 'input needed', ageMinutes: 22, contextTokens: 94000, pct: 10, cwd: 'C:\\code\\acme\\docs', window: { id: 2, label: 'docs' } }),
   session('a3', 'Migrate auth to OAuth', 'busy', { contextTokens: 611000, pct: 66 }),
   session('a4', 'Refactor CSV importer', 'busy', { contextTokens: 872000, pct: 95, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' } }),
-  session('a5', 'Explore vector databases', 'idle', { ageMinutes: 48, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' } }),
+  session('a5', 'Explore vector databases', 'idle', { ageMinutes: 48, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' }, unseen: true }),
   session('a6', 'Spike: streaming parser', 'idle', { ageMinutes: 95, contextTokens: 210000, pct: 23, archived: true }),
 ];
 

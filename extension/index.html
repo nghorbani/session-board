@@ -105,6 +105,7 @@
     color: var(--faint); font-weight: 600; margin: 0 0 8px 2px;
   }
   .group.waiting h2 { color: var(--wait); }
+  .group.unseen h2 { color: var(--ok); }
   .group.results h2 { color: var(--busy); }
 
   .row {
@@ -117,6 +118,7 @@
   .row.waiting { border-left-color: var(--wait); background: #221d12; }
   .row.waiting:hover { background: #2a2417; }
   .row.busy { border-left-color: var(--busy); }
+  .row.unseen { border-left-color: var(--ok); }
   .row.past { border-left-color: var(--faint); opacity: .92; }
   .row.copied { border-color: var(--ok); }
   .row.jumped { border-color: var(--busy); }
@@ -145,13 +147,16 @@
   .iconbtn:hover { color: var(--text); background: var(--panel-2); border: none; }
   .iconbtn.end:hover { color: var(--crit); }
   .iconbtn.archive:hover, .iconbtn.unarchive:hover { color: var(--busy); }
+  .iconbtn.retitle:hover { color: var(--ok); }
   .iconbtn.confirm { color: var(--crit); font-size: 12px; font-weight: 600; background: color-mix(in srgb, var(--crit) 15%, transparent); }
   .status { font-size: 12px; white-space: nowrap; }
   .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--idle); }
   .row.waiting .dot { background: var(--wait); }
   .row.busy .dot { background: var(--busy); }
+  .row.unseen .dot { background: var(--ok); }
   .waitfor { color: var(--wait); }
   .row.busy .status span:last-child { color: var(--busy); }
+  .row.unseen .status span:last-child { color: var(--ok); }
   .row.idle .status span:last-child { color: var(--dim); }
   .ctx { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .bar { height: 4px; border-radius: 2px; background: #2a2f38; margin-top: 4px; overflow: hidden; }
@@ -192,6 +197,7 @@
   <div class="group results" id="g-results" style="display:none"><h2 id="h-results">Search results</h2><div id="l-results"></div></div>
   <div class="group waiting" id="g-waiting"><h2>Needs you</h2><div id="l-waiting"></div></div>
   <div class="group" id="g-busy"><h2>Working</h2><div id="l-busy"></div></div>
+  <div class="group unseen" id="g-unseen"><h2>Unseen</h2><div id="l-unseen"></div></div>
   <div class="group" id="g-idle"><h2>Idle</h2><div id="l-idle"></div></div>
   <div class="group" id="g-archived" style="display:none"><h2>Archived</h2><div id="l-archived"></div></div>
 </div>
@@ -223,6 +229,7 @@ var state = {
   prevWaiting: Object.create(null),
   firstLoad: true,
   flashes: Object.create(null),             // sessionId -> { cls, text, until }
+  retitling: Object.create(null),           // sessionId -> true while ✎ waits for the new title
   usageBusy: null,                          // { id, since, timer } while a ↻ refresh is in flight
   usageNote: null,                          // { text, until, warn } shown in the strip after a refresh
 };
@@ -418,6 +425,11 @@ function actionsHtml(s, opts) {
   var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
   var html = '<span class="age">' + esc(age) + '</span>';
   html += '<button class="iconbtn copy" title="copy: claude --resume …" data-act="copy">⧉</button>';
+  if (opts.endable) {
+    html += state.retitling[s.sessionId]
+      ? '<button class="iconbtn retitle" disabled title="asking for a title…">…</button>'
+      : '<button class="iconbtn retitle" data-act="retitle" title="Retitle from the progress so far (one short model call)">✎</button>';
+  }
   if (s.archived) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: show this session on the board again">⤒</button>';
   if (opts.endable) {
     if (pe && pe.kind === 'pending') html += '<button class="iconbtn end" disabled title="' + (pe.archive ? 'archiving' : 'ending') + '">…</button>';
@@ -436,7 +448,7 @@ function actionsHtml(s, opts) {
 function rowHtml(s, limits, opts) {
   opts = opts || {};
   var isLive = opts.past ? s.live : true;
-  var cls = !isLive ? 'past' : s.status === 'waiting' ? 'waiting' : (s.status === 'busy' ? 'busy' : 'idle');
+  var cls = !isLive ? 'past' : s.status === 'waiting' ? 'waiting' : s.status === 'busy' ? 'busy' : s.unseen ? 'unseen' : 'idle';
   var pe = state.pendingEnd[s.sessionId];
   if (pe && pe.kind === 'pending') cls += ' ending';
   if (pe && pe.kind === 'error') cls += ' error';
@@ -446,6 +458,7 @@ function rowHtml(s, limits, opts) {
 
   var statusText = !isLive ? '<span>past</span>'
     : s.status === 'waiting' ? '<span class="waitfor">' + esc(s.waitingFor || 'waiting') + '</span>'
+    : s.unseen ? '<span title="the last answer ended and you have not opened the session since">unseen</span>'
     : '<span>' + esc(s.status) + '</span>';
 
   var ctx = '';
@@ -471,7 +484,7 @@ function rowHtml(s, limits, opts) {
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
   var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
-    : s.window ? 'click: open this session in VS Code' : 'no VS Code window found; click copies: claude --resume ' + s.sessionId;
+    : s.window ? 'click: open this session in VS Code' + (s.unseen ? ' (marks it seen)' : '') : 'no VS Code window found; click copies: claude --resume ' + s.sessionId;
 
   var snips = '';
   if (opts.past && s.snippets && s.snippets.length) {
@@ -505,8 +518,19 @@ function copyResume(sid, note) {
   } else window.prompt('Copy:', cmd);
 }
 
+function markSeenHere(sid) {
+  var live = rowById(sid);
+  if (live && live.unseen) live.unseen = false;         // the host writes the marker; the next snapshot agrees
+}
+
 function openLive(el, sid) {
-  if (el.getAttribute('data-haswindow') !== '1') { copyResume(sid, 'copied · no window'); return; }
+  markSeenHere(sid);
+  if (el.getAttribute('data-haswindow') !== '1') {
+    if (vsapi) send({ type: 'seen', sessionId: sid });
+    else api('POST', '/api/seen/' + encodeURIComponent(sid)).catch(function () { /* the copy still happens */ });
+    copyResume(sid, 'copied · no window');
+    return;
+  }
   flash(sid, 'opening…', 'jumped');
   if (vsapi) { send({ type: 'open', sessionId: sid }); return; }
   api('POST', '/api/focus/' + encodeURIComponent(sid)).then(function (res) {
@@ -586,6 +610,30 @@ function onUnarchiveResult(r) {
   flash(r.sessionId, 'unarchived', 'copied');
 }
 
+/*
+ * ✎: click ──▶ state.retitling[sid] = true (button disabled, "…") ──▶ host or POST /api/retitle/<id>
+ *    result ok ──▶ the row shows the title at once; the next snapshot carries it from the store
+ *    result not ok ──▶ the message on the row for 6 s, like a failed end
+ */
+function requestRetitle(sid) {
+  if (state.retitling[sid]) return;
+  state.retitling[sid] = true;
+  render();
+  if (vsapi) { send({ type: 'retitle', sessionId: sid }); return; }
+  api('POST', '/api/retitle/' + encodeURIComponent(sid)).then(function (res) {
+    var b = res.body || {};
+    onRetitleResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), title: b.title || null, message: b.message || b.error || ('http ' + res.status) });
+  }).catch(function () { onRetitleResult({ sessionId: sid, ok: false, title: null, message: 'server not reachable' }); });
+}
+
+function onRetitleResult(r) {
+  delete state.retitling[r.sessionId];
+  if (!r.ok) { endError(r.sessionId, 'retitle failed: ' + (r.message || 'unknown')); return; }
+  var live = rowById(r.sessionId);
+  if (live && r.title) live.title = r.title;
+  flash(r.sessionId, 'retitled', 'copied');
+}
+
 function rowById(sid) {
   var all = (state.data && state.data.sessions) || [];
   for (var i = 0; i < all.length; i++) if (all[i].sessionId === sid) return all[i];
@@ -602,6 +650,7 @@ function onRowClick(ev) {
     var act = btn.getAttribute('data-act');
     if (act === 'copy') { copyResume(sid); return; }
     if (act === 'unarchive') { requestUnarchive(sid); return; }
+    if (act === 'retitle') { requestRetitle(sid); return; }
     if (act === 'end' || act === 'archive') { startConfirm(sid, act === 'archive'); return; }
     return;
   }
@@ -670,22 +719,25 @@ function render() {
 
   // An archived session is put away until it needs you; a typed filter or the toggle shows it.
   var putAway = function (s) { return Boolean(s.archived) && s.status !== 'waiting'; };
-  var waiting = [], busy = [], idle = [], archived = [];
+  var waiting = [], busy = [], unseen = [], idle = [], archived = [];
   all.forEach(function (s) {
     if (!matchesFilter(s)) return;
     if (state.pendingEnd[s.sessionId] && state.pendingEnd[s.sessionId].kind === 'ended') return;
     if (putAway(s) && !state.filter) { archived.push(s); return; }
-    if (s.status === 'waiting') waiting.push(s); else if (s.status === 'busy') busy.push(s); else idle.push(s);
+    if (s.status === 'waiting') waiting.push(s); else if (s.status === 'busy') busy.push(s); else if (s.unseen) unseen.push(s); else idle.push(s);
   });
   var byAge = function (a, b) { return (a.ageMinutes == null ? 1e9 : a.ageMinutes) - (b.ageMinutes == null ? 1e9 : b.ageMinutes); };
-  waiting.sort(byAge); busy.sort(byAge); idle.sort(byAge); archived.sort(byAge);
+  waiting.sort(byAge); busy.sort(byAge); unseen.sort(byAge); idle.sort(byAge); archived.sort(byAge);
   var freshIdle = idle.filter(function (s) { return s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES; });
   var staleIdle = idle.filter(function (s) { return !(s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES); });
   var shownIdle = state.showStale || state.filter ? idle : freshIdle;
 
   var allWaiting = all.filter(function (s) { return s.status === 'waiting'; });
   var visible = all.filter(function (s) { return !putAway(s); });
-  document.getElementById('counts').innerHTML = '<b>' + allWaiting.length + '</b> need you · <b>' + visible.filter(function (s) { return s.status === 'busy'; }).length + '</b> working · <b>' + visible.filter(function (s) { return s.status !== 'waiting' && s.status !== 'busy'; }).length + '</b> idle';
+  var isIdle = function (s) { return s.status !== 'waiting' && s.status !== 'busy'; };
+  var unseenCount = visible.filter(function (s) { return isIdle(s) && s.unseen; }).length;
+  document.getElementById('counts').innerHTML = '<b>' + allWaiting.length + '</b> need you · <b>' + visible.filter(function (s) { return s.status === 'busy'; }).length + '</b> working · '
+    + (unseenCount ? '<b>' + unseenCount + '</b> unseen · ' : '') + '<b>' + visible.filter(function (s) { return isIdle(s) && !s.unseen; }).length + '</b> idle';
   document.title = (allWaiting.length ? '(' + allWaiting.length + ') ' : '') + 'Sessions';
 
   var banner = document.getElementById('banner');
@@ -697,6 +749,8 @@ function render() {
   document.getElementById('l-waiting').innerHTML = waiting.length ? waiting.map(function (s) { return rowHtml(s, limits); }).join('') : '<div class="empty">' + (state.filter ? 'No waiting session matches.' : 'Nothing is waiting on you.') + '</div>';
   document.getElementById('g-busy').style.display = busy.length ? '' : 'none';
   document.getElementById('l-busy').innerHTML = busy.map(function (s) { return rowHtml(s, limits); }).join('');
+  document.getElementById('g-unseen').style.display = unseen.length ? '' : 'none';
+  document.getElementById('l-unseen').innerHTML = unseen.map(function (s) { return rowHtml(s, limits); }).join('');
   var idleHtml = shownIdle.map(function (s) { return rowHtml(s, limits); }).join('');
   if (staleIdle.length && !state.filter) idleHtml += '<div class="empty"><button id="toggleStale">' + (state.showStale ? 'Hide' : 'Show') + ' ' + staleIdle.length + ' idle over 2h</button></div>';
   document.getElementById('g-idle').style.display = idle.length ? '' : 'none';
@@ -773,6 +827,7 @@ if (vsapi) {
     if (m.type === 'snapshot' && m.data) onSnapshot(m.data);
     else if (m.type === 'endResult') onEndResult(m);
     else if (m.type === 'unarchiveResult') onUnarchiveResult(m);
+    else if (m.type === 'retitleResult') onRetitleResult(m);
     else if (m.type === 'searchResult') onSearchResult(m.data);
     else if (m.type === 'openResult') { if (m.ok) flash(m.sessionId, 'resumed', 'jumped'); else flash(m.sessionId, m.message || 'copied', 'copied'); }
     else if (m.type === 'usageResult') onUsageResult(m);

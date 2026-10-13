@@ -43,10 +43,31 @@ if (modeFile) { try { fileMode = fs.readFileSync(modeFile, 'utf8').trim(); } cat
 const mode = fileMode || process.env.SB_SHIM_MODE || 'ok';
 if (process.env.SB_SHIM_PIDFILE) fs.writeFileSync(process.env.SB_SHIM_PIDFILE, String(process.pid));
 
+// `claude -p --output-format text`: the title call. The prompt arrives on stdin (copied to
+// SB_SHIM_TITLE_PROMPT_FILE when set) and the answer follows SB_SHIM_TITLE: ok (default: a
+// warning line, then a quoted title with a trailing period), fail (exit 1), empty, hang.
+const TITLE_CALL = process.argv.includes('--output-format') && process.argv.includes('text');
+if (TITLE_CALL) {
+  let prompt = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (d) => { prompt += d; });
+  process.stdin.on('end', () => {
+    if (process.env.SB_SHIM_TITLE_PROMPT_FILE) fs.writeFileSync(process.env.SB_SHIM_TITLE_PROMPT_FILE, prompt);
+    const title = process.env.SB_SHIM_TITLE || 'ok';
+    if (title === 'hang') { setTimeout(() => {}, 120000); return; }
+    if (title === 'fail') { process.stderr.write('API Error: model not available\n'); process.exit(1); }
+    if (title === 'empty') process.exit(0);
+    process.stdout.write('Permission allow rule warning line\n');
+    process.stdout.write('"Walnut threshold fix verified on Thor."\n');
+    process.exit(0);
+  });
+}
+
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { input += d; });
 process.stdin.on('end', () => {
+  if (TITLE_CALL) return;
   const m = input.match(/"request_id":"([^"]+)"/);
   const id = m ? m[1] : 'unknown';
   if (mode === 'hang') { setTimeout(() => {}, 120000); return; }

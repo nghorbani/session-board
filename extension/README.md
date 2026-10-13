@@ -26,8 +26,9 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 ## What you see
 
 - **Needs you** on top with what each session is blocked on (`permission prompt`,
-  `input needed`, `dialog open`), then **Working**, then **Idle**; idle rows over 2 h fold
-  behind a toggle.
+  `input needed`, `dialog open`), then **Working**, then **Unseen** (the answer ended while
+  the board was running and you have not opened the session since; opening it or sending a
+  new prompt moves it to Idle), then **Idle**; idle rows over 2 h fold behind a toggle.
 - Each row: the session's name (`/rename` wins over the generated title; a session with
   neither shows its last prompt), the VS Code window it lives in, its folder, status, a
   context bar, and time in that state. Hover for the folder and the internal agent name.
@@ -40,6 +41,10 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   the window that owns it, and that window comes to the front. Without a mapped window the
   resume command is copied instead.
 - **⧉** copies `claude --resume <id>`.
+- **✎ retitles the session** from its progress so far: one short haiku call over the recent
+  prompts and the last answer (a few KB of the transcript, passed through your own `claude`
+  command the way a prompt would be), hook-free and without tools. The title is the board's
+  own; Claude Code's files are not written, and a later `/rename` wins again.
 - **✕ ends the session** and everything it started (its subagents and tool processes).
   Click once, then click `End?` within 3 s. Busy or waiting sessions ask once more; in-flight
   work is lost. The transcript stays and Claude Code's picker still offers "Resume session".
@@ -72,8 +77,8 @@ The strip at the top shows how much of your 5-hour and 7-day usage windows is us
 each resets, plus per-model weekly windows and extra usage when your plan has them. Session
 Board asks the `claude` command line for these numbers the same way Claude Code's own usage
 screen does: a short, hook-free run that makes no model call, starts no MCP server, leaves
-no transcript, and uses the CLI's own login. The board reads no credentials and sends nothing
-anywhere. Refreshed every 5 minutes while the view is visible (15 when hidden) and on ↻;
+no transcript, and uses the CLI's own login. The board reads no credentials and, apart from
+✎, sends nothing anywhere. Refreshed every 5 minutes while the view is visible (15 when hidden) and on ↻;
 when a refresh fails the last numbers stay, with the failure noted underneath. Subscription
 plans only: with API-key billing Claude Code reports no limits.
 

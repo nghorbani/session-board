@@ -53,7 +53,8 @@ itself needs no reload, and the page is the same file the webview shows. Every `
 per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON replies are
 `no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`,
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>`,
-`GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`.
+`GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
+`POST /api/retitle/<id>`.
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
 it (`-NoInstall` stops after packaging). What to expect from VS Code (seen on 1.138): a first
@@ -86,7 +87,8 @@ fixture folders. Nothing in the suites touches your real sessions or needs Claud
 - `usage.test.cjs`: the usage and account path of `core.cjs` against `tests/shim/claude-shim.js`,
   which stands in for the CLI. `SB_SHIM_MODE` picks the usage reply (`ok`, `hang`, `garbage`,
   `exit2`, `error`), `SB_SHIM_AUTH` the `auth status` reply (`ok`, `notice`, `loggedout`,
-  `fail`, `hang`); `SB_SHIM_BODY` substitutes a whole usage body.
+  `fail`, `hang`), `SB_SHIM_TITLE` the title call's reply (`ok`, `fail`, `empty`, `hang`);
+  `SB_SHIM_BODY` substitutes a whole usage body.
 - `refresh-usage.test.cjs` and `archive-host.test.cjs`: `extension.js` booted by
   `tests/shim/host.cjs` against `tests/shim/vscode.js`, which records registered commands,
   status-bar messages, warnings and log lines so a test can assert on them.
@@ -97,6 +99,12 @@ fixture folders. Nothing in the suites touches your real sessions or needs Claud
 - `manifest.test.cjs`: pins `publisher`, `name` and `displayName`; see "Conventions".
 - `release-notes.test.cjs`: the changelog has a section for the manifest version and the
   release-notes script prints it.
+- `unseen.test.cjs`: the unseen and seen markers, `noteAnswer()` and the `unseen` flag on
+  snapshot rows, and how a board title ranks against the generated and the renamed title.
+- `retitle.test.cjs`: the transcript excerpt (also with a prompt buried behind megabytes of
+  tool output), the cleaning of the model's reply and `retitleSession()` against the shim.
+- `unseen-host.test.cjs`: opening marks a session seen, the `seen` message, and the
+  `retitle` message's replies.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -182,6 +190,29 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   and carries the reason as `accountError`; it never changes the usage `state`. The page
   shows the email in the strip head and the rest on hover; the host logs an `accountError`
   once per change.
+- **Unseen**: each process remembers the registry's `statusUpdatedAt` per session. When an
+  idle row shows a newer value than the one last seen (an answer ended, even in a turn
+  shorter than a poll interval), `noteAnswer()` writes `%LOCALAPPDATA%\SessionBoard\unseen\<id>.json`
+  with that time; the time comes from the registry, so every window writes the same value
+  and a slow window cannot bring back a flag the user already cleared. Opening the session
+  from the board (the host's `openSession()`, the `seen` message, `/api/focus` and
+  `/api/seen`) writes `seen\<id>.json` with the current time. A row is `unseen` while it is
+  idle and its unseen time is newer than its seen time; a session first observed idle is never
+  flagged, and a new prompt makes it busy, so the flag only returns with the next answer.
+  Markers older than two weeks are dropped on read. The page keeps those rows in their own
+  group, never folds them, and flips the flag at once on a click.
+- **Titles**: ✎ sends `retitle`; `retitleSession()` collects the last six prompts and the
+  newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB
+  steps until it has them (a long tool run can push the last prompt megabytes back; after
+  16 MB without a prompt it gives up) and skips injected `isMeta` lines, text starting with
+  `<`, tool results and thinking. It then runs
+  `claude -p --model haiku --output-format text --no-session-persistence --tools "" --settings
+  <file> --disable-slash-commands --strict-mcp-config --mcp-config <file>` with the
+  instruction and the excerpt on stdin, keeps the last non-empty stdout line (settings
+  warnings come first) unquoted and without a trailing period, and stores it in
+  `titles\<id>.json` with the renamed title seen at that moment. `snapshot()` shows the board
+  title while that renamed title is unchanged, so a later `/rename` wins again. Outcomes:
+  `invalid`, `no-transcript`, `timeout` (90 s, process tree killed), `failed`, `empty`.
 
 ## Where a change goes
 

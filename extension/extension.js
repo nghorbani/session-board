@@ -87,6 +87,8 @@ class BoardProvider {
         case 'search': return await this.search(String(m.query || ''), Boolean(m.content), String(m.requestId || ''));
         case 'cancelSearch': return this.cancelSearch();
         case 'openPast': if (core.UUID_RE.test(sid)) return await this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
+        case 'seen': if (core.UUID_RE.test(sid)) this.markSeen(sid); return;
+        case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
         case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
         default: return;
       }
@@ -261,6 +263,7 @@ class BoardProvider {
       this.schedule(0);
       return;
     }
+    this.markSeen(sessionId);                 // opening from the board is "seen", whatever the jump does next
     const owner = await core.exthostForPid(Number(row.pid));
     if (owner === process.pid) {
       this.log.info('open ' + sessionId + ': owned by this window');
@@ -351,6 +354,22 @@ class BoardProvider {
       this.post({ type: 'unarchiveResult', sessionId, ok: false, message });
     }
     this.schedule(0);
+  }
+
+  // -- unseen and titles -----------------------------------------------------------------
+
+  /** The seen marker: an unseen row leaves the Unseen group with the next snapshot. */
+  markSeen(sessionId) {
+    try { core.markSeen(sessionId); } catch (e) { this.log.warn('seen marker for ' + sessionId + ' failed: ' + String((e && e.message) || e)); }
+  }
+
+  /** ✎ on a row: one short model call over the transcript; the reply becomes the board's title. */
+  async retitle(sessionId) {
+    const result = await core.retitleSession(sessionId);
+    if (result.ok) this.log.info('retitle ' + sessionId + ': "' + result.title + '"');
+    else this.log.warn('retitle ' + sessionId + ' failed: ' + (result.message || result.code));
+    this.post({ type: 'retitleResult', sessionId, ok: Boolean(result.ok), title: result.ok ? result.title : null, message: result.ok ? '' : (result.message || result.code || '') });
+    if (result.ok) this.schedule(0);
   }
 
   // -- search ----------------------------------------------------------------------------

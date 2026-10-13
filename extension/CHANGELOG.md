@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0
+
+- New group Unseen between Working and Idle: a session whose answer ended while the board was running and that you have not opened since. Its row says "unseen" with a green mark; opening it from the board, or sending it a new prompt, moves it back to Idle. Sessions that were already idle when the board started are not flagged
+- ✎ on a row asks for a new title from the session's progress: one short haiku call over the recent prompts and the last answer, hook-free and without tools. The title is the board's own; Claude Code's files are not written, and a later /rename wins again
+
 ## 0.6.1
 
 - The Marketplace page shows its screenshot again; the image link pointed one folder too high

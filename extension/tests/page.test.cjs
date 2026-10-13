@@ -38,7 +38,7 @@ function snapshotOf(sessions) {
 
 // -- fake API ----------------------------------------------------------------------------
 
-const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), search: { rows: [] }, calls: [] };
+const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), search: { rows: [] }, calls: [] };
 let PORT = 0;
 function json(res, code, body) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function serve(req, res) {
@@ -59,6 +59,8 @@ function serve(req, res) {
   if (u.pathname.startsWith('/api/end/')) { const r = fake.end(u.pathname.slice('/api/end/'.length), u.searchParams); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unarchive/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
+  if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
+  if (u.pathname.startsWith('/api/retitle/')) { const r = fake.retitle(u.pathname.slice('/api/retitle/'.length)); return json(res, r.status, r.body); }
   if (u.pathname === '/api/search') {
     return json(res, 200, Object.assign({ requestId: u.searchParams.get('requestId'), query: u.searchParams.get('q'), content: true, total: fake.search.rows.length, shown: fake.search.rows.length, partial: false, skipped: 0, rgAvailable: true }, fake.search));
   }
@@ -110,7 +112,10 @@ const SAMPLE = `(function () {
   var ids = function (sel) { return q(sel + ' .row[data-session]').map(function (r) { return r.getAttribute('data-session'); }); };
   var text = function (sel) { var e = document.querySelector(sel); return e ? e.textContent : null; };
   return {
-    waiting: ids('#l-waiting'), busy: ids('#l-busy'), idle: ids('#l-idle'), archivedList: ids('#l-archived'), results: ids('#l-results'),
+    waiting: ids('#l-waiting'), busy: ids('#l-busy'), unseen: ids('#l-unseen'), idle: ids('#l-idle'), archivedList: ids('#l-archived'), results: ids('#l-results'),
+    titles: q('.row[data-session]').map(function (r) { var t = r.querySelector('.title'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
+    statusWords: q('.row[data-session]').map(function (r) { var t = r.querySelector('.status span:last-child'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
+    retitleBusy: q('.iconbtn.retitle:disabled').length,
     counts: (text('#counts') || '').replace(/\\s+/g, ' ').trim(),
     toggleArchived: text('#toggleArchived'),
     confirmText: text('.row .iconbtn.confirm'),
@@ -277,5 +282,50 @@ test('page: the usage strip names the signed-in account, org and plan on hover',
   snap2.usage = { state: 'error', at: Date.now(), ageSeconds: 0, available: true, windows: null, error: 'claude exited with 2', account: null, accountError: 'boom' };
   fake.snapshot = snap2;
   s = await page.until((x) => x.acct === null, 'no account line when none is known');
+  await page.close();
+});
+
+test('page: an unseen answer sits in its own group with the unseen status, and opening it moves it to Idle', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { unseen: true }), row(B, 'Old', 'idle')]);
+  const page = await openPage();
+  let s = await page.until((x) => x.unseen.includes(A) && x.idle.includes(B), 'the unseen row');
+  assert.equal(s.counts, '0 need you · 0 working · 1 unseen · 1 idle');
+  assert.ok(s.statusWords.includes(A + '=unseen'), JSON.stringify(s.statusWords));
+  assert.ok(s.statusWords.includes(B + '=idle'));
+  await page.click(rowSel(A));
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Old', 'idle')]);
+  s = await page.until((x) => x.idle.includes(A) && x.unseen.length === 0, 'the row in Idle after the click');
+  assert.ok(fake.calls.some((c) => c.method === 'POST' && c.path === '/api/focus/' + A), 'the open went to the server');
+  assert.equal(s.counts, '0 need you · 0 working · 2 idle');
+  await page.close();
+});
+
+test('page: a click on an unseen row without a window copies the command and still marks it seen', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { unseen: true, window: null })]);
+  const page = await openPage();
+  await page.until((x) => x.unseen.includes(A), 'the unseen row');
+  await page.click(rowSel(A));
+  await page.until((x) => fake.calls.some((c) => c.path === '/api/seen/' + A), 'the seen call');
+  const s = await page.sample();
+  assert.equal(s.copied, 'claude --resume ' + A);
+  await page.close();
+});
+
+test('page: ✎ asks for a new title and shows it when it arrives', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
+  const page = await openPage();
+  await page.until((x) => x.idle.includes(A), 'the row');
+  await page.click(rowSel(A) + ' .iconbtn.retitle');
+  let s = await page.until((x) => x.titles.includes(A + '=Renamed by model'), 'the new title');
+  assert.ok(fake.calls.some((c) => c.method === 'POST' && c.path === '/api/retitle/' + A));
+  assert.equal(s.retitleBusy, 0, 'the button is free again');
+  fake.retitle = () => ({ status: 502, body: { ok: false, code: 'failed', message: 'model not available' } });
+  await page.click(rowSel(A) + ' .iconbtn.retitle');
+  s = await page.until((x) => x.errorText !== null, 'the failure on the row');
+  assert.equal(s.errorText, 'retitle failed: model not available');
+  fake.retitle = () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } });
   await page.close();
 });
