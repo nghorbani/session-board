@@ -1,6 +1,6 @@
 # Session Board
 
-[![Marketplace](https://img.shields.io/visual-studio-marketplace/v/nima-ghorbani.session-board-vscode?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=nima-ghorbani.session-board-vscode)
+[![VS Marketplace](https://vsmarketplacebadges.dev/version-short/nima-ghorbani.session-board-vscode.svg)](https://marketplace.visualstudio.com/items?itemName=nima-ghorbani.session-board-vscode)
 [![GitHub release](https://img.shields.io/github/v/release/nghorbani/session-board?label=GitHub%20release)](https://github.com/nghorbani/session-board/releases)
 
 **Every Claude Code session you have running, in one VS Code sidebar: who needs you, who is
