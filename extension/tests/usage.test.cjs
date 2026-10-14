@@ -11,6 +11,7 @@ const path = require('path');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-usage-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
+process.env.SB_CODE_USER_DIR = path.join(tmp, "User");   // never the real state.vscdb
 process.env.PATH = path.join(__dirname, 'shim') + path.delimiter + process.env.PATH;
 const core = require('../core.cjs');
 

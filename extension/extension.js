@@ -36,6 +36,7 @@ class BoardProvider {
     this.searchAbort = null;   // AbortController of the latest search
     this.searchRequestId = null;
     this.accountError = null;  // the account probe failure last logged, so it is said once per change
+    this.claudeArchiveError = null;   // same for the read of Claude Code's archive
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -97,7 +98,19 @@ class BoardProvider {
     }
   }
 
+  /** The resume command; a transcript the board stowed is brought back first, or nothing is copied. */
   async copyResume(sid) {
+    if (core.stowedTranscripts(sid).length) {
+      try {
+        const r = await core.unarchiveSession(sid);
+        this.log.info('unarchive ' + sid + ' (copy)' + (r && r.restoredTo ? ': ' + r.restoredTo : ''));
+      } catch (e) {
+        const message = String((e && e.message) || e);
+        this.log.warn('unarchive ' + sid + ' (copy) failed: ' + message);
+        vscode.window.showWarningMessage('Could not bring the transcript back, so the resume command was not copied: ' + message);
+        return;
+      }
+    }
     await vscode.env.clipboard.writeText('claude --resume ' + sid);
     vscode.window.setStatusBarMessage('Copied: claude --resume ' + sid, 3000);
   }
@@ -118,6 +131,14 @@ class BoardProvider {
     if (err === this.accountError) return;
     this.accountError = err;
     if (err) this.log.warn('account probe: ' + err);
+  }
+
+  /** A failed read of Claude Code's archive (its state database busy, corrupt, or no node:sqlite) is logged when it appears or changes. */
+  noteClaudeArchiveError(snap) {
+    const err = (snap && snap.claudeArchiveError) || null;
+    if (err === this.claudeArchiveError) return;
+    this.claudeArchiveError = err;
+    if (err) this.log.warn("Claude Code's archive could not be read; its archived sessions are not put away: " + err);
   }
 
   /**
@@ -163,6 +184,7 @@ class BoardProvider {
       const snap = await core.snapshot();
       if (mySeq === this.seq) {          // an older result never overwrites a newer one
         this.last = snap;
+        this.noteClaudeArchiveError(snap);
         this.push();
         this.updateBadge();
         this.notifyNewlyWaiting();
@@ -286,10 +308,28 @@ class BoardProvider {
     }
   }
 
-  /** A past session: resume in place when its folder is in this window, otherwise hand over. */
+  /**
+   * A past session: resume in place when its folder is in this window, otherwise hand over.
+   * A transcript the board stowed (or a board marker) is brought back first, and the path is
+   * resolved by id afterwards: the page may still hold the stowed path.
+   */
   async openPast(sessionId, transcriptPath, cwd) {
-    if (transcriptPath && !fs.existsSync(transcriptPath)) {
-      this.post({ type: 'openResult', sessionId, ok: false, message: 'transcript no longer exists' });
+    let restoredTo = null;
+    if (core.stowedTranscripts(sessionId).length || core.readArchived().has(sessionId)) {
+      try {
+        const r = await core.unarchiveSession(sessionId);
+        restoredTo = (r && r.restoredTo) || null;
+        this.log.info('unarchive ' + sessionId + ' (open)' + (restoredTo ? ': ' + restoredTo : ''));
+      } catch (e) {
+        const message = String((e && e.message) || e);
+        this.log.warn('unarchive ' + sessionId + ' (open) failed: ' + message);
+        this.post({ type: 'openResult', sessionId, ok: false, message });
+        return;
+      }
+    }
+    const resolved = core.liveTranscripts(sessionId)[0] || transcriptPath;
+    if (resolved && !fs.existsSync(resolved)) {
+      this.post({ type: 'openResult', sessionId, ok: false, message: 'transcript no longer exists', restoredTo });
       return;
     }
     const liveRow = this.sessionRow(sessionId);
@@ -299,10 +339,10 @@ class BoardProvider {
     const here = cwd && folders.some((f) => core.isInside(cwd, f));
     if (here) {
       this.log.info('openPast ' + sessionId + ': resuming in this window');
-      if (await this.revealHere(sessionId)) { this.post({ type: 'openResult', sessionId, ok: true }); return; }
+      if (await this.revealHere(sessionId)) { this.post({ type: 'openResult', sessionId, ok: true, restoredTo }); return; }
     }
     await this.copyResume(sessionId);
-    this.post({ type: 'openResult', sessionId, ok: false, message: 'copied resume command' });
+    this.post({ type: 'openResult', sessionId, ok: false, message: 'copied resume command', restoredTo });
     const folderExists = cwd && fs.existsSync(cwd);
     const choice = await vscode.window.showInformationMessage(
       'Session ' + sessionId.slice(0, 8) + ' belongs to ' + (cwd || 'an unknown folder') + '. Copied "claude --resume ' + sessionId
@@ -333,21 +373,25 @@ class BoardProvider {
       }
       result = await core.endSession(sessionId, { force: true, archive });
     }
-    this.log.info((archive ? 'archive ' : 'end ') + sessionId + ': ' + result.code + (result.archived ? ' +archived' : '')
-      + (result.message ? ' (' + result.message + ')' : '') + (result.archiveError ? '; archive failed: ' + result.archiveError : ''));
-    this.post({ type: 'endResult', sessionId, ok: result.ok, code: result.code, message: result.message || '', archived: Boolean(result.archived), archiveError: result.archiveError || null });
+    const moveError = result.archived ? (result.moveError || null) : null;
+    this.log.info((archive ? 'archive ' : 'end ') + sessionId + ': ' + result.code + (result.archived ? ' +archived' : '') + (result.moved ? ' +moved' : '')
+      + (result.message ? ' (' + result.message + ')' : '') + (result.archiveError ? '; archive failed: ' + result.archiveError : '')
+      + (moveError ? '; move failed: ' + moveError : ''));
+    this.post({ type: 'endResult', sessionId, ok: result.ok, code: result.code, message: result.message || '', archived: Boolean(result.archived), archiveError: result.archiveError || null, moved: Boolean(result.moved), moveError });
     if (result.ok && result.archiveError) vscode.window.showWarningMessage('Ended, not archived: ' + label + ' (' + result.archiveError + ')');
+    else if (result.ok && moveError) vscode.window.showWarningMessage('Archived on the board; transcript not moved: ' + moveError);
     else if (result.ok) vscode.window.setStatusBarMessage((result.archived ? 'Archived: ' : 'Ended: ') + label, 3000);
     else if (result.code !== 'cancelled') vscode.window.showWarningMessage('Could not ' + verb.toLowerCase() + ' ' + label + ': ' + (result.message || result.code));
     this.schedule(300);
   }
 
-  /** ⤒ on a row, or a click on an archived row: the session shows on the board again. */
+  /** ⤒ on a row, or a click on an archived live row: the transcript comes back and the session shows on the board again. */
   async unarchive(sessionId) {
     try {
-      core.unarchiveSession(sessionId);
-      this.log.info('unarchive ' + sessionId);
-      this.post({ type: 'unarchiveResult', sessionId, ok: true });
+      const r = await core.unarchiveSession(sessionId);
+      const restoredTo = (r && r.restoredTo) || null;
+      this.log.info('unarchive ' + sessionId + (restoredTo ? ': ' + restoredTo : ''));
+      this.post({ type: 'unarchiveResult', sessionId, ok: true, restoredTo });
     } catch (e) {
       const message = String((e && e.message) || e);
       this.log.error('unarchive ' + sessionId + ' failed: ' + message);
@@ -414,8 +458,8 @@ class BoardProvider {
     }));
     const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Open a Claude Code session', matchOnDetail: true });
     if (!pick) return;
-    if (rows.some((s) => s.sessionId === pick.sessionId && s.archived)) {   // an explicit open brings it back
-      try { core.unarchiveSession(pick.sessionId); this.log.info('unarchive ' + pick.sessionId + ' (picked)'); }
+    if (rows.some((s) => s.sessionId === pick.sessionId && s.archivedBy !== 'claude-code' && s.archived)) {   // an explicit open brings it back
+      try { await core.unarchiveSession(pick.sessionId); this.log.info('unarchive ' + pick.sessionId + ' (picked)'); }
       catch (e) { this.log.warn('unarchive ' + pick.sessionId + ' failed: ' + String((e && e.message) || e)); }
     }
     await this.openSession(pick.sessionId);

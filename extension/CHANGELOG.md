@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0
+
+- Sessions archived in Claude Code's own sidebar are put away on the board too. The board reads Claude Code's archive list from VS Code's state database (read-only, through Node's built-in SQLite) and marks those rows "archived in Claude Code"; they return when Claude Code unarchives them, and ⤒ is not offered for them
+- ⤓ now also moves the transcript out of `~/.claude/projects` into `%LOCALAPPDATA%\SessionBoard\transcripts\<folder>\<id>.jsonl` (a hard link, then the old name goes), so Claude Code's session list drops the session at its next refresh. ⤒, a click on the row or ⧉ moves it back before anything resumes it. While it is stowed, `claude --resume <id>` and Claude Code's own picker do not find the session; the board's search still does
+- A move or a restore that fails says so on a notice line above the groups, and as a VS Code warning; the session stays archived on the board
+- ✕ is unchanged: Claude Code keeps an ended session in its list until its own auto-archive (`claudeCode.archiveInactiveSessions`, 14 days by default; sessions that are open, waiting or unread are never auto-archived)
+- The browser page needs Node 22.13 or newer for the state-database read
+
 ## 0.7.0
 
 - New group Unseen between Working and Idle: a session whose answer ended while the board was running and that you have not opened since. Its row says "unseen" with a green mark; opening it from the board, or sending it a new prompt, moves it back to Idle. Sessions that were already idle when the board started are not flagged

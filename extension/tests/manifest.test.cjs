@@ -15,6 +15,7 @@ const fs = require('fs');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-manifest-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
+process.env.SB_CODE_USER_DIR = path.join(tmp, "User");   // never the real state.vscdb
 const PKG = require('../package.json');
 const core = require('../core.cjs');
 

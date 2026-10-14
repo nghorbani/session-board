@@ -13,9 +13,24 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
+
+// ripgrep for the search cases: VS Code's bundled copy, looked up before LOCALAPPDATA is
+// pointed at the temp dir; without a VS Code install the search cases skip with a reason.
+const REAL_LOCALAPPDATA = process.env.LOCALAPPDATA;
+function vscodeAppRoot() {
+  if (!REAL_LOCALAPPDATA) return undefined;
+  const base = path.join(REAL_LOCALAPPDATA, 'Programs', 'Microsoft VS Code');
+  const direct = path.join(base, 'resources', 'app');
+  if (fs.existsSync(direct)) return direct;
+  try { for (const d of fs.readdirSync(base)) { const nested = path.join(base, d, 'resources', 'app'); if (fs.existsSync(nested)) return nested; } } catch (_) { /* no install */ }
+  return undefined;
+}
+const APP_ROOT = vscodeAppRoot();
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-archive-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
+process.env.SB_CODE_USER_DIR = path.join(tmp, "User");   // never the real state.vscdb
 const sessionsDir = path.join(tmp, 'sessions');
 const projectsDir = path.join(tmp, 'projects');
 fs.mkdirSync(sessionsDir);
@@ -201,7 +216,7 @@ test('snapshot rows carry the archived flag', winOnly, async () => {
 });
 
 test('search rows carry the archived flag', async () => {
-  const rg = await core.rgProbe();
+  const rg = await core.rgProbe(APP_ROOT);
   if (!rg.path) { assert.ok(true, 'ripgrep not found; the flag on search rows is checked manually'); return; }
   const dir = path.join(projectsDir, 'proj');
   fs.mkdirSync(dir, { recursive: true });
@@ -210,13 +225,202 @@ test('search rows carry the archived flag', async () => {
     + JSON.stringify({ type: 'ai-title', aiTitle: 'Archived spike', sessionId: B }) + '\n');
   core.archiveSession(B);
   try {
-    const res = await core.searchSessions('Archived spike', { content: false, requestId: 'arch-1' });
+    const res = await core.searchSessions('Archived spike', { content: false, requestId: 'arch-1', appRoot: APP_ROOT });
     const row = res.rows.find((r) => r.sessionId === B);
     assert.ok(row, 'the seeded transcript is found by title: ' + JSON.stringify(res));
     assert.equal(row.archived, true);
   } finally {
     core.unarchiveSession(B);
   }
+});
+
+// The transcript moves with the archive: stow on ⤓, restore on ⤒, and the recovery paths.
+
+const D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const E = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+const live = (slug, id) => path.join(projectsDir, slug, id + '.jsonl');
+const stowed = (slug, id) => path.join(core.ARCHIVE_TRANSCRIPTS_DIR, slug, id + '.jsonl');
+const seed = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text || ('{"type":"user","sessionId":"' + path.basename(file, '.jsonl') + '"}\n')); };
+const errWith = (code) => async () => { throw Object.assign(new Error(code + ' injected'), { code }); };
+
+test('stow: ⤓ moves the transcript under the slug folder, keeps the marker shape, and the file stays listed', async () => {
+  seed(live('proj', D), 'line one\n');
+  const out = await core.endSession(D, { archive: true });
+  assert.deepEqual([out.ok, out.code, out.archived, out.moved, out.from, out.to], [true, 'unknown', true, true, live('proj', D), stowed('proj', D)], JSON.stringify(out));
+  assert.equal(fs.existsSync(live('proj', D)), false);
+  assert.equal(fs.readFileSync(stowed('proj', D), 'utf8'), 'line one\n');
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker(D), 'utf8')).transcript, undefined, 'the marker carries no paths');
+  assert.deepEqual(core.liveTranscripts(D), []);
+  assert.deepEqual(core.stowedTranscripts(D), [stowed('proj', D)]);
+  assert.ok(core.transcriptRoots().includes(core.ARCHIVE_TRANSCRIPTS_DIR));
+});
+
+test('stow: a second ⤓ on a stowed session moves nothing and reports no error', async () => {
+  const out = await core.endSession(D, { archive: true });
+  assert.deepEqual([out.archived, out.moved, out.moveError], [true, false, undefined], JSON.stringify(out));
+  assert.equal(fs.readFileSync(stowed('proj', D), 'utf8'), 'line one\n');
+});
+
+test('restore: ⤒ moves the transcript back by slug, unlinks the marker after, and says where it went', async () => {
+  const r = await core.unarchiveSession(D);
+  assert.deepEqual(r, { restoredTo: live('proj', D) });
+  assert.equal(fs.readFileSync(live('proj', D), 'utf8'), 'line one\n');
+  assert.equal(fs.existsSync(stowed('proj', D)), false);
+  assert.equal(fs.existsSync(marker(D)), false);
+});
+
+test('restore: a stowed file whose marker was deleted by hand is still restored', async () => {
+  await core.endSession(D, { archive: true });
+  fs.unlinkSync(marker(D));
+  assert.ok(fs.existsSync(stowed('proj', D)));
+  const r = await core.unarchiveSession(D);
+  assert.deepEqual(r, { restoredTo: live('proj', D) });
+  assert.ok(fs.existsSync(live('proj', D)));
+});
+
+test('restore: a marker without a stowed file only unlinks, synchronously', () => {
+  core.archiveSession(E);
+  const p = core.unarchiveSession(E);
+  assert.equal(fs.existsSync(marker(E)), false, 'gone before the promise settles');
+  return p.then((r) => assert.deepEqual(r, { restoredTo: null }));
+});
+
+test('stow: the same id in two project folders is refused, the files stay', async () => {
+  seed(live('proj', E));
+  seed(live('proj2', E));
+  const out = await core.endSession(E, { archive: true });
+  assert.deepEqual([out.archived, out.moved], [true, false]);
+  assert.match(String(out.moveError), /2 project folders/);
+  assert.ok(fs.existsSync(live('proj', E)) && fs.existsSync(live('proj2', E)));
+  fs.unlinkSync(live('proj2', E));
+  await core.unarchiveSession(E);
+});
+
+test('stow: a session running again under a live pid is refused', async () => {
+  const record = path.join(sessionsDir, process.pid + '.json');
+  fs.writeFileSync(record, JSON.stringify({ sessionId: E, status: 'idle', pid: process.pid }));
+  try {
+    const out = await core.endSession(E, { archive: true });
+    assert.deepEqual([out.archived, out.moved], [true, false]);
+    assert.match(String(out.moveError), /running again under pid \d+/);
+    assert.ok(fs.existsSync(live('proj', E)));
+  } finally {
+    fs.unlinkSync(record);
+    await core.unarchiveSession(E);
+  }
+});
+
+test('stow: a marker that vanished before the move (a concurrent unarchive) skips the move', async () => {
+  const out = await core.stowTranscript(E);
+  assert.deepEqual([out.moved, out.moveError], [false, 'unarchived before the move']);
+  assert.ok(fs.existsSync(live('proj', E)));
+});
+
+test('stow: a different file already at the archived path is refused, both stay', async () => {
+  seed(stowed('proj', E), 'older copy\n');
+  const out = await core.endSession(E, { archive: true });
+  assert.deepEqual([out.archived, out.moved], [true, false]);
+  assert.match(String(out.moveError), /archived copy already exists/);
+  assert.ok(fs.existsSync(live('proj', E)));
+  assert.equal(fs.readFileSync(stowed('proj', E), 'utf8'), 'older copy\n');
+  fs.unlinkSync(stowed('proj', E));
+  await core.unarchiveSession(E);
+});
+
+test('restore: a different file already back at the live path throws, marker and stowed copy stay', async () => {
+  await core.endSession(E, { archive: true });
+  assert.ok(fs.existsSync(stowed('proj', E)));
+  seed(live('proj', E), 'a new session wrote this\n');
+  await assert.rejects(core.unarchiveSession(E), /a different file is already at/);
+  assert.ok(fs.existsSync(marker(E)), 'marker kept');
+  assert.ok(fs.existsSync(stowed('proj', E)), 'stowed copy kept');
+  fs.unlinkSync(live('proj', E));
+  await core.unarchiveSession(E);
+  assert.equal(fs.existsSync(marker(E)), false);
+});
+
+test('recovery: an interrupted move (both names, one file) is completed by the next stow and the next restore', async () => {
+  core.archiveSession(E);
+  fs.mkdirSync(path.dirname(stowed('proj', E)), { recursive: true });
+  fs.linkSync(live('proj', E), stowed('proj', E));              // crashed after the link, before the unlink
+  let out = await core.stowTranscript(E);
+  assert.deepEqual([out.moved, out.to], [true, stowed('proj', E)], JSON.stringify(out));
+  assert.equal(fs.existsSync(live('proj', E)), false);
+  fs.linkSync(stowed('proj', E), live('proj', E));              // the same on the way back
+  const r = await core.unarchiveSession(E);
+  assert.deepEqual(r, { restoredTo: live('proj', E) });
+  assert.equal(fs.existsSync(stowed('proj', E)), false);
+});
+
+test('linkMove: a conflict refuses, no hard links refuses, a failed unlink after the link undoes the link', async () => {
+  const from = live('proj', E);
+  const other = path.join(tmp, 'elsewhere.jsonl');
+  seed(other, 'different\n');
+  await assert.rejects(core.linkMove(from, other), (e) => e.code === 'conflict');
+  assert.ok(fs.existsSync(from) && fs.readFileSync(other, 'utf8') === 'different\n');
+  fs.unlinkSync(other);
+  await assert.rejects(core.linkMove(from, other, { link: errWith('EXDEV') }), (e) => e.code === 'no-hardlink');
+  assert.ok(fs.existsSync(from) && !fs.existsSync(other));
+  await assert.rejects(core.linkMove(from, other, { unlink: errWith('EPERM') }), (e) => e.code === 'EPERM');
+  assert.ok(fs.existsSync(from), 'the source stays');
+  assert.equal(fs.existsSync(other), false, 'the new name was undone');
+});
+
+test('stow across volumes is refused with the file in place; restore copies via .part instead', async () => {
+  core.archiveSession(E);
+  let out = await core.stowTranscript(E, { link: errWith('EXDEV') });
+  assert.deepEqual(out.moved, false);
+  assert.match(String(out.moveError), /another volume/);
+  assert.ok(fs.existsSync(live('proj', E)));
+  out = await core.stowTranscript(E);
+  assert.equal(out.moved, true);
+  seed(live('proj', E) + '.part', 'stale partial copy\n');
+  const r = await core.unarchiveSession(E, { link: errWith('EXDEV') });
+  assert.deepEqual(r, { restoredTo: live('proj', E) });
+  assert.equal(fs.existsSync(live('proj', E) + '.part'), false, 'no .part left');
+  assert.equal(fs.existsSync(stowed('proj', E)), false);
+  assert.equal(fs.readFileSync(live('proj', E), 'utf8'), '{"type":"user","sessionId":"' + E + '"}\n');
+});
+
+test('stow: a marker removed while the link was being made is honoured; the file goes back and the move says so', async () => {
+  core.archiveSession(E);
+  let fired = false;                                           // the other window's unarchive, once, during the first link
+  const out = await core.stowTranscript(E, { link: async (from, to) => { if (!fired) { fired = true; await core.unarchiveSession(E); } await fs.promises.link(from, to); } });
+  assert.deepEqual([out.moved, out.moveError], [false, 'unarchived during the move'], JSON.stringify(out));
+  assert.ok(fs.existsSync(live('proj', E)), 'the transcript is live again');
+  assert.equal(fs.existsSync(stowed('proj', E)), false);
+  assert.equal(fs.existsSync(marker(E)), false);
+});
+
+test('search: a stowed transcript is found once, under its session id, with the archived chip', async () => {
+  const rg = await core.rgProbe(APP_ROOT);
+  if (!rg.path) { assert.ok(true, 'ripgrep not found; the search of stowed transcripts is checked manually'); return; }
+  seed(live('proj', D), JSON.stringify({ type: 'user', cwd: 'C:\\x', sessionId: D, message: { role: 'user', content: 'hello' } }) + '\n'
+    + JSON.stringify({ type: 'ai-title', aiTitle: 'Stowed spike', sessionId: D }) + '\n');
+  process.env.SB_SHIM_AGENTS = JSON.stringify([{ sessionId: D, pid: process.pid, status: 'idle', cwd: tmp, name: 'd', kind: 'interactive' }]);
+  await core.snapshot();                                      // a live row whose transcriptPath is the live path
+  core.archiveSession(D);
+  const out = await core.stowTranscript(D);                   // stowed while the snapshot still names the old path
+  assert.equal(out.moved, true, JSON.stringify(out));
+  try {
+    const res = await core.searchSessions('Stowed spike', { content: false, requestId: 'arch-2', appRoot: APP_ROOT });
+    const rows = res.rows.filter((r) => r.sessionId === D);
+    assert.equal(rows.length, 1, 'one row for the id, not one per path: ' + JSON.stringify(res.rows));
+    assert.deepEqual([rows[0].archived, rows[0].archivedBy, rows[0].path], [true, 'board', stowed('proj', D)]);
+  } finally {
+    delete process.env.SB_SHIM_AGENTS;
+    await core.snapshot();                                    // no live rows again
+    await core.unarchiveSession(D);
+  }
+});
+
+test('unarchive waits for a pending end of the same id, so the file ends up live and unmarked', async () => {
+  const [end, un] = await Promise.all([core.endSession(E, { archive: true }), core.unarchiveSession(E)]);
+  assert.equal(end.moved, true, JSON.stringify(end));
+  assert.deepEqual(un, { restoredTo: live('proj', E) });
+  assert.ok(fs.existsSync(live('proj', E)));
+  assert.equal(fs.existsSync(stowed('proj', E)), false);
+  assert.equal(fs.existsSync(marker(E)), false);
 });
 
 test.after(() => { delete process.env.SB_SHIM_AGENTS; fs.rmSync(tmp, { recursive: true, force: true }); });

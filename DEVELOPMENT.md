@@ -10,7 +10,8 @@ pull request should bring. The user-facing pages are [README.md](README.md) (rep
 - Windows for the full feature set. The window mapping and ending a session use
   `Win32_Process` and `taskkill`; on macOS and Linux the list, the search and the usage strip
   work, and a click copies the resume command instead of jumping.
-- Node 22 or newer (the page tests use the global `WebSocket`).
+- Node 22.13 or newer (the page tests use the global `WebSocket`; the board reads VS Code's
+  state database with `node:sqlite`).
 - VS Code 1.100 or newer with the Claude Code extension installed, and the `claude` command
   line on the PATH VS Code sees.
 - ripgrep (`rg`) on PATH for content search; VS Code's bundled copy is found automatically.
@@ -52,7 +53,7 @@ There are two loops, and most work happens in the first.
 itself needs no reload, and the page is the same file the webview shows. Every `/api/*` route needs the
 per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON replies are
 `no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`,
-`POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>`,
+`POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
 `POST /api/retitle/<id>`.
 
@@ -92,8 +93,12 @@ fixture folders. Nothing in the suites touches your real sessions or needs Claud
 - `refresh-usage.test.cjs` and `archive-host.test.cjs`: `extension.js` booted by
   `tests/shim/host.cjs` against `tests/shim/vscode.js`, which records registered commands,
   status-bar messages, warnings and log lines so a test can assert on them.
-- `archive.test.cjs`: the archive marker store and the end path of `core.cjs`, with registry
-  records and processes faked through the shim's `stop` branch.
+- `archive.test.cjs`: the archive marker store, the end path of `core.cjs` (registry records
+  and processes faked through the shim's `stop` branch), and the transcript stow and restore
+  with their recovery paths (`link` and `unlink` failures injected).
+- `claude-archive.test.cjs`: Claude Code's archive read from a `state.vscdb` built in the test
+  (`SB_CODE_USER_DIR`), its cache and failure paths, and `archivedBy` on rows. Every suite
+  points `SB_CODE_USER_DIR` at a temp dir so none reads the real database.
 - `page.test.cjs`: `index.html` in headless Chrome over the DevTools protocol against an
   in-test HTTP server that plays scripted `/api` answers. Skipped when no Chromium is found.
 - `manifest.test.cjs`: pins `publisher`, `name` and `displayName`; see "Conventions".
@@ -147,10 +152,34 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   when the outcome is `ended`, `gone` or `unknown` (all "not running") as one marker file
   `%LOCALAPPDATA%\SessionBoard\archived\<id>.json` (no shared list, so windows and the
   browser page never overwrite each other); a marker write that fails after the kill comes
-  back as `ok` with `archived: false` and `archiveError`. `snapshot()` and `searchSessions()`
-  read the markers into `archived` on every row; the page hides archived rows unless they are
-  waiting, and ⤒ or a click on the row (or a pick in the command palette) unlinks the marker.
-  The flag is the board's own; Claude Code's archive is its private extension state.
+  back as `ok` with `archived: false` and `archiveError`. Then `stowTranscript()` moves
+  `~/.claude/projects/<slug>/<id>.jsonl` to `%LOCALAPPDATA%\SessionBoard\transcripts\<slug>\<id>.jsonl`
+  with `linkMove()` (a hard link, then the old name is unlinked; never a copy of a file a
+  resumed session may still be writing, so a stow across volumes is refused). That is what
+  makes Claude Code's sidebar drop the session: it lists the top-level `.jsonl` files of the
+  project folder (seen on 2.1.299; an implementation detail, so check it after a Claude Code
+  upgrade). The stowed location is the record and the marker stays `{at}`: a crash between
+  the link and the unlink leaves one file under two names, which the next stow or restore
+  completes. The move is refused, with `moveError` in the result and a warning, when the id
+  sits in two project folders, when a registry record names it under a live pid (checked
+  twice, the last time right before the link; a resume that starts after that keeps writing
+  the same file under its new name), when a different file already sits at the archived path,
+  or when the marker is gone (an unarchive in between; a marker that goes after the link is
+  honoured by moving the file back, and one that goes after that last check leaves the file
+  stowed until the next open restores it, since restoration keys on the stowed file, not the
+  marker). ⤒, a click on a live archived row,
+  `openPast` and ⧉ go through `unarchiveSession()`: it awaits a pending end of the id, runs
+  `restoreTranscript()` (`linkMove` back by slug, or `copyMove` through a `.part` file across
+  volumes) and unlinks the marker only after; a restore onto a different file throws with
+  both paths and keeps the marker, so ⤒ can retry. `snapshot()` and `searchSessions()` set
+  `archived` and `archivedBy` (`board`, `claude-code`, `both`) on every row from the markers
+  and from Claude Code's own `hiddenSessionIds`, read read-only from
+  `%APPDATA%\Code\User\globalStorage\state.vscdb` (row `Anthropic.claude-code` of
+  `ItemTable`, the default profile only, `node:sqlite`, one read per change of the file's stat
+  and at least every 30 s; a failed read keeps the previous ids and is logged once per change).
+  Only that row is read and nothing from it is logged beyond the ids. The page puts archived
+  rows away unless they are waiting and offers ⤒ only for the board's own flag; a move or
+  restore failure shows on the notice line above the groups.
 - **Search**: ripgrep reads the transcripts, whole files, as a child process: one pass for
   the newest `aiTitle` per file, one for the newest `customTitle`, one for the first `cwd`,
   all with constant patterns; the content pass is `rg -i -l -F` with the query and its

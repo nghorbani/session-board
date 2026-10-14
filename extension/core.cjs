@@ -27,6 +27,16 @@ const SESSIONS_DIR = process.env.SB_SESSIONS_DIR || path.join(CLAUDE_DIR, 'sessi
 const CODE_LOGS_DIR = path.join(
   process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Code', 'logs');
 const VSCODE_EXTENSIONS_JSON = path.join(os.homedir(), '.vscode', 'extensions', 'extensions.json');
+// VS Code's user dir of the default profile; its globalStorage/state.vscdb holds every extension's
+// globalState, Claude Code's archive among it. SB_CODE_USER_DIR points the tests at a temp dir.
+const CODE_USER_DIR = process.env.SB_CODE_USER_DIR || (process.platform === 'win32'
+  ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Code', 'User')
+  : process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'Code', 'User')
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'Code', 'User'));
+const CLAUDE_CODE_STATE_DB = path.join(CODE_USER_DIR, 'globalStorage', 'state.vscdb');
+const CLAUDE_CODE_STATE_KEYS = ['Anthropic.claude-code', 'anthropic.claude-code'];   // the Memento row of the extension
+const CLAUDE_ARCHIVE_TTL_MS = Number(process.env.SB_CLAUDE_ARCHIVE_TTL_MS) || 30000;
 
 const TAIL_BYTES = 512 * 1024;       // context-guard reads the same window
 const TITLE_TAIL_BYTES = 256 * 1024; // ai-title / last-prompt lines sit near the end
@@ -175,14 +185,15 @@ function transcriptIndex() {
   return map;
 }
 
-/** Top-level transcripts only; subagent transcripts live one level deeper. */
+/** Top-level transcripts of both roots (live first); subagent transcripts live one level deeper. */
 function listTranscripts() {
   const out = [];
-  let projectDirs = [];
-  try {
-    projectDirs = fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory()).map((d) => path.join(PROJECTS_DIR, d.name));
-  } catch (_) { return out; }
+  const projectDirs = [];
+  for (const root of transcriptRoots()) {
+    let names = [];
+    try { names = fs.readdirSync(root, { withFileTypes: true }); } catch (_) { continue; }
+    for (const d of names) if (d.isDirectory()) projectDirs.push(path.join(root, d.name));
+  }
   for (const dir of projectDirs) {
     let names = [];
     try { names = fs.readdirSync(dir); } catch (_) { continue; }
@@ -447,16 +458,26 @@ function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
 
 /*
  * One marker file per archived session id under DATA_DIR/archived/, so windows and the
- * browser page never rewrite a shared list:
+ * browser page never rewrite a shared list, and the transcript moves with the flag so that
+ * Claude Code's own session list drops the session too:
  *
- *   ⤓ on a row ──▶ endSession(id, { archive: true }) ──▶ doEndSession ──▶ applyArchive
- *                                       ended / gone / unknown ──▶ marker written, ok: true, archived: true
+ *   ⤓ on a row ──▶ endSession(id, { archive: true }) ──▶ doEndSession ──▶ applyArchive ──▶ stowTranscript
+ *                                       ended / gone / unknown ──▶ marker {at} written, ok: true, archived: true
  *                                       marker write fails    ──▶ ok: true, archived: false, archiveError
  *                                       anything else         ──▶ result untouched, archived: false
- *   snapshot() and searchSessions() read the markers and set `archived` on every row; the
- *   page hides archived rows unless they are waiting, and ⤒ or a click on the row unlinks.
+ *                                       archived              ──▶ projects/<slug>/<id>.jsonl linked to
+ *                                                                 DATA_DIR/transcripts/<slug>/<id>.jsonl and
+ *                                                                 unlinked (moved: true), or moveError
+ *   ⤒, a click or ⧉ ──▶ unarchiveSession ──▶ restoreTranscript (the slug folder names the way back)
+ *                                       ──▶ marker unlinked only after the file is back ──▶ { restoredTo }
+ *   snapshot() and searchSessions() read the markers and Claude Code's own hidden ids and set
+ *   `archived` and `archivedBy` on every row; the page hides archived rows unless they are waiting.
+ *
+ * The stowed location is the record: a marker is still {at}, so a crash between the two steps
+ * of a move leaves one file under two names, and the next stow or restore completes it.
  */
 const ARCHIVE_DIR = path.join(DATA_DIR, 'archived');
+const ARCHIVE_TRANSCRIPTS_DIR = path.join(DATA_DIR, 'transcripts');   // <slug>/<id>.jsonl, slug as under ~/.claude/projects
 const ARCHIVE_OK = new Set(['ended', 'gone', 'unknown']);   // outcomes that mean "not running"
 
 function archiveMarker(sessionId) { return path.join(ARCHIVE_DIR, sessionId + '.json'); }
@@ -482,10 +503,197 @@ function archiveSession(sessionId) {
   fs.writeFileSync(archiveMarker(sessionId), JSON.stringify({ at: Date.now() }));
 }
 
-function unarchiveSession(sessionId) {
+function unlinkMarker(sessionId) {
+  try { fs.unlinkSync(archiveMarker(sessionId)); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+}
+
+/**
+ * ⤒: bring the transcript back, then drop the marker. Returns a promise of { restoredTo }
+ * (the live path, or null when nothing was stowed). A marker without a stowed file is unlinked
+ * before the promise is even handed back, so a caller that does not await still sees it gone.
+ * A pending end of the same id (its stow included) is awaited first. A restore that fails keeps
+ * the marker so the row stays archived and ⤒ can retry; the error names both paths.
+ */
+function unarchiveSession(sessionId, fsx) {
   sessionId = String(sessionId || '');
   if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
-  try { fs.unlinkSync(archiveMarker(sessionId)); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+  const pending = ending.get(sessionId);
+  if (!pending && !stowedTranscripts(sessionId).length) {
+    unlinkMarker(sessionId);
+    return Promise.resolve({ restoredTo: null });
+  }
+  return (async () => {
+    if (pending) { try { await pending; } catch (_) { /* the end reported its own outcome */ } }
+    const { restored } = await restoreTranscript(sessionId, fsx);
+    unlinkMarker(sessionId);
+    return { restoredTo: restored[0] || null };
+  })();
+}
+
+// The transcript's two homes: projects/<slug>/<id>.jsonl while listed by Claude Code, and
+// DATA_DIR/transcripts/<slug>/<id>.jsonl while archived on the board.
+
+/** The roots that hold top-level transcripts, projects first so the live copy wins an index. */
+function transcriptRoots() {
+  return [PROJECTS_DIR, ARCHIVE_TRANSCRIPTS_DIR].filter((d) => { try { return fs.statSync(d).isDirectory(); } catch (_) { return false; } });
+}
+
+/** <root>/<slug>/<id>.jsonl for every slug folder that has one. */
+function transcriptsNamed(root, sessionId) {
+  let dirs = [];
+  try { dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch (_) { return []; }
+  const out = [];
+  for (const slug of dirs) {
+    const file = path.join(root, slug, sessionId + '.jsonl');
+    if (fs.existsSync(file)) out.push(file);
+  }
+  return out;
+}
+
+function liveTranscripts(sessionId) { return transcriptsNamed(PROJECTS_DIR, sessionId); }
+function stowedTranscripts(sessionId) { return transcriptsNamed(ARCHIVE_TRANSCRIPTS_DIR, sessionId); }
+
+/** Every registry record as { pid, sessionId }, pid from the file name. */
+function registryRecords() {
+  let names = [];
+  try { names = fs.readdirSync(SESSIONS_DIR); } catch (_) { return []; }
+  const out = [];
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const pid = Number(name.slice(0, -5));
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, name), 'utf8'));
+      if (rec && typeof rec.sessionId === 'string') out.push({ pid, sessionId: rec.sessionId });
+    } catch (_) { /* skip unreadable record */ }
+  }
+  return out;
+}
+
+/** Two names of one file (an interrupted move), by device and inode. */
+function sameFile(a, b) {
+  let sa, sb;
+  try { sa = fs.statSync(a); sb = fs.statSync(b); } catch (_) { return false; }
+  return Boolean(sa.ino && sb.ino) && sa.ino === sb.ino && sa.dev === sb.dev;
+}
+
+const MOVE_RETRIES = 3;
+const MOVE_RETRY_MS = 300;
+
+/** Unlink with a few retries for a name a reader still holds; a missing name counts as done. */
+async function unlinkWithRetries(file, unlink) {
+  for (let i = 0; ; i++) {
+    try { await unlink(file); return; } catch (e) {
+      if (e && e.code === 'ENOENT') return;
+      const busy = e && (e.code === 'EBUSY' || e.code === 'EPERM' || e.code === 'EACCES');
+      if (!busy || i >= MOVE_RETRIES) throw e;
+      await new Promise((res) => setTimeout(res, MOVE_RETRY_MS));
+    }
+  }
+}
+
+function conflictError(from, to) {
+  return Object.assign(new Error('a different file is already at ' + to + '; ' + from + ' stays'), { code: 'conflict' });
+}
+
+/**
+ * Move a file without ever overwriting: hard-link the new name, then unlink the old one. A
+ * new name that already exists is accepted only when it is the same file (an earlier move
+ * that stopped between the two steps), otherwise the move is refused with code 'conflict'.
+ * No hard links across volumes or on this filesystem: code 'no-hardlink', nothing changed.
+ * An old name that cannot be unlinked after the link: the new name is removed again and the
+ * error propagates, so the file stays where it was. `fsx.link` / `fsx.unlink` let a test
+ * inject failures.
+ */
+async function linkMove(from, to, fsx) {
+  fsx = Object.assign({ link: fs.promises.link, unlink: fs.promises.unlink }, fsx || {});
+  await fs.promises.mkdir(path.dirname(to), { recursive: true });
+  if (fs.existsSync(to)) {
+    if (!sameFile(from, to)) throw conflictError(from, to);
+  } else {
+    try { await fsx.link(from, to); } catch (e) {
+      const code = e && e.code;
+      if (code === 'EEXIST') { if (!sameFile(from, to)) throw conflictError(from, to); }
+      else if (code === 'EXDEV' || code === 'EPERM' || code === 'ENOTSUP' || code === 'ENOSYS' || code === 'EACCES') {
+        throw Object.assign(new Error('hard links are not available from ' + from + ' to ' + to), { code: 'no-hardlink', cause: e });
+      } else throw e;
+    }
+  }
+  try { await unlinkWithRetries(from, fsx.unlink); } catch (e) {
+    try { await fs.promises.unlink(to); } catch (_) { /* the undo failed too; both names remain, same file */ }   // a name nobody holds yet
+    throw e;
+  }
+  indexCache.at = 0;
+}
+
+/**
+ * Copy-then-unlink for a restore across volumes: the copy lands on <to>.part (a stale one is
+ * removed first) and is renamed into place, so no partial .jsonl is ever visible. Never used
+ * for a stow: a file a resumed session may still be writing is not copied.
+ */
+async function copyMove(from, to) {
+  await fs.promises.mkdir(path.dirname(to), { recursive: true });
+  const part = to + '.part';
+  try { await fs.promises.unlink(part); } catch (_) { /* no stale part */ }
+  try { await fs.promises.copyFile(from, part, fs.constants.COPYFILE_EXCL); } catch (e) {
+    try { await fs.promises.unlink(part); } catch (_) { /* nothing to clean */ }
+    throw e;
+  }
+  if (fs.existsSync(to)) { try { await fs.promises.unlink(part); } catch (_) { /* leave it */ } throw conflictError(from, to); }
+  await fs.promises.rename(part, to);
+  try { await unlinkWithRetries(from, fs.promises.unlink); } catch (e) {
+    try { await fs.promises.unlink(to); } catch (_) { /* both remain */ }
+    throw e;
+  }
+  indexCache.at = 0;
+}
+
+/**
+ * Move the archived session's transcript out of Claude Code's project folder. Only a marked
+ * session whose file is not being written moves: { moved: true, from, to } or
+ * { moved: false[, moveError] } (no transcript at all is not an error). Never throws.
+ */
+async function stowTranscript(sessionId, fsx) {
+  try {
+    const found = liveTranscripts(sessionId);
+    if (!found.length) return { moved: false };
+    if (found.length > 1) return { moved: false, moveError: 'transcript found in ' + found.length + ' project folders' };
+    const from = found[0];
+    const to = path.join(ARCHIVE_TRANSCRIPTS_DIR, path.basename(path.dirname(from)), sessionId + '.jsonl');
+    const runningPid = () => { const rec = registryRecords().find((r) => r.sessionId === sessionId && pidAlive(r.pid)); return rec ? rec.pid : 0; };
+    let pid = runningPid();
+    if (pid) return { moved: false, moveError: 'running again under pid ' + pid };
+    if (fs.existsSync(to) && !sameFile(from, to)) return { moved: false, moveError: 'archived copy already exists at ' + to };
+    if (!readArchived().has(sessionId)) return { moved: false, moveError: 'unarchived before the move' };
+    pid = runningPid();                                       // once more right before the link
+    if (pid) return { moved: false, moveError: 'running again under pid ' + pid };
+    try { await linkMove(from, to, fsx); } catch (e) {
+      if (e && e.code === 'no-hardlink') return { moved: false, moveError: 'the archive folder is on another volume; the transcript stays at ' + from };
+      return { moved: false, moveError: String((e && e.message) || e) };
+    }
+    if (!readArchived().has(sessionId)) {                      // another window unarchived while the link was made: undo
+      try { await linkMove(to, from, fsx); } catch (e) {
+        return { moved: true, from, to, moveError: 'unarchived during the move, and the transcript could not go back: ' + String((e && e.message) || e) };
+      }
+      return { moved: false, moveError: 'unarchived during the move' };
+    }
+    return { moved: true, from, to };
+  } catch (e) {
+    return { moved: false, moveError: String((e && e.message) || e) };
+  }
+}
+
+/** Bring every stowed <slug>/<id>.jsonl back to projects/<slug>/. { restored: [live paths] }; throws on a conflict. */
+async function restoreTranscript(sessionId, fsx) {
+  const restored = [];
+  for (const file of stowedTranscripts(sessionId)) {
+    const to = path.join(PROJECTS_DIR, path.basename(path.dirname(file)), sessionId + '.jsonl');
+    try { await linkMove(file, to, fsx); } catch (e) {
+      if (e && e.code === 'no-hardlink') await copyMove(file, to); else throw e;
+    }
+    restored.push(to);
+  }
+  return { restored };
 }
 
 /**
@@ -501,6 +709,74 @@ function applyArchive(sessionId, result, archive) {
   } catch (e) {
     return Object.assign({}, result, { ok: true, archived: false, archiveError: String((e && e.message) || e) });
   }
+}
+
+// ---------------------------------------------------------------------------------------
+// Claude Code's archive: hiddenSessionIds in VS Code's state database
+// ---------------------------------------------------------------------------------------
+
+/*
+ * Claude Code archives a session by adding its id to the Memento key `hiddenSessionIds` of its
+ * globalState. VS Code keeps that as one JSON blob in the row `Anthropic.claude-code` of table
+ * ItemTable in the default profile's globalStorage/state.vscdb, nowhere under ~/.claude. The
+ * board reads it read-only with node:sqlite (Node 22.13+; VS Code's extension host has it) and
+ * never writes it: the extension holds the blob in memory and rewrites it whole on its next
+ * update, so an outside write would vanish. One cached read per change of the file's stat, and
+ * a forced read every CLAUDE_ARCHIVE_TTL_MS in case a rewrite kept both mtime and size. A
+ * failed read keeps the previous ids, reports `error`, and retries on the next call.
+ */
+let claudeArchive = { key: null, at: 0, ids: new Set(), error: null };
+let sqliteModule;   // undefined until tried, null when this Node has no node:sqlite
+
+function loadSqlite() {
+  if (sqliteModule !== undefined) return sqliteModule;
+  try { sqliteModule = require('node:sqlite'); } catch (_) { sqliteModule = null; }
+  return sqliteModule;
+}
+
+function hiddenIdsFromBlob(value) {
+  const text = Buffer.isBuffer(value) || value instanceof Uint8Array ? Buffer.from(value).toString('utf8') : String(value);
+  const blob = JSON.parse(text);
+  const ids = new Set();
+  const list = blob && typeof blob === 'object' && Array.isArray(blob.hiddenSessionIds) ? blob.hiddenSessionIds : [];
+  for (const id of list) if (typeof id === 'string' && UUID_RE.test(id)) ids.add(id);
+  return ids;
+}
+
+/** Claude Code's archived ids: { ids: Set, error: string|null }. Never throws. */
+function readClaudeArchived() {
+  const now = Date.now();
+  let st;
+  try { st = fs.statSync(CLAUDE_CODE_STATE_DB); } catch (_) {
+    claudeArchive = { key: null, at: now, ids: new Set(), error: null };   // no VS Code state here: nothing archived
+    return { ids: claudeArchive.ids, error: null };
+  }
+  const key = st.mtimeMs + ':' + st.size;
+  if (claudeArchive.key === key && now - claudeArchive.at < CLAUDE_ARCHIVE_TTL_MS) return { ids: claudeArchive.ids, error: claudeArchive.error };
+  const sqlite = loadSqlite();
+  if (!sqlite) {
+    claudeArchive = { key, at: now, ids: claudeArchive.ids, error: 'node:sqlite unavailable (Node ' + process.versions.node + ')' };
+    return { ids: claudeArchive.ids, error: claudeArchive.error };
+  }
+  let db = null;
+  try {
+    db = new sqlite.DatabaseSync(CLAUDE_CODE_STATE_DB, { readOnly: true });
+    db.exec('PRAGMA busy_timeout = 100');
+    const row = db.prepare('SELECT value FROM ItemTable WHERE key IN (?, ?) LIMIT 1').get(CLAUDE_CODE_STATE_KEYS[0], CLAUDE_CODE_STATE_KEYS[1]);
+    claudeArchive = { key, at: now, ids: row ? hiddenIdsFromBlob(row.value) : new Set(), error: null };
+  } catch (e) {
+    claudeArchive = { key: null, at: now, ids: claudeArchive.ids, error: String((e && e.message) || e) };   // key null: the next call retries
+  } finally {
+    if (db) { try { db.close(); } catch (_) { /* already closed */ } }
+  }
+  return { ids: claudeArchive.ids, error: claudeArchive.error };
+}
+
+/** The union flag of a row and where it comes from: board, claude-code, both or null. */
+function archiveSource(sessionId, boardIds, claudeIds) {
+  const board = boardIds.has(sessionId);
+  const cc = claudeIds.has(sessionId);
+  return { archived: board || cc, archivedBy: board && cc ? 'both' : board ? 'board' : cc ? 'claude-code' : null };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -703,7 +979,8 @@ async function retitleSession(sessionId, opts) {
   sessionId = String(sessionId || '');
   if (!UUID_RE.test(sessionId)) return { ok: false, code: 'invalid', message: 'not a session id' };
   const row = lastSnapshotRows().find((s) => s.sessionId === sessionId) || null;
-  const file = (row && row.transcriptPath) || transcriptIndex().get(sessionId) || null;
+  let file = (row && row.transcriptPath) || transcriptIndex().get(sessionId) || null;
+  if (file && !fs.existsSync(file)) file = liveTranscripts(sessionId)[0] || stowedTranscripts(sessionId)[0] || null;   // moved since the snapshot
   const excerpt = file ? transcriptExcerpt(file) : '';
   if (!excerpt) return { ok: false, code: 'no-transcript', message: 'no prompts in the transcript yet' };
   ensureDataDir();
@@ -1111,6 +1388,7 @@ async function snapshot() {
   const index = transcriptIndex();
   const times = registryTimes();
   const archived = readArchived();
+  const claude = readClaudeArchived();
   const unseen = readUnseen();
   const seen = readSeen();
   const titles = readTitles();
@@ -1172,13 +1450,13 @@ async function snapshot() {
       pct: tokens == null || !limits.compact ? null : Math.min(100, Math.round((tokens / limits.compact) * 100)),
       hasTranscript: Boolean(file),
       needsAttention: r.status === 'waiting',
-      archived: archived.has(r.sessionId),
+      ...archiveSource(r.sessionId, archived, claude.ids),
       unseen: r.status === 'idle' && Boolean(u) && (!sn || Number(u.at) > Number(sn.at)),
     };
   });
 
   if (!stale) lastGood = { rows, at: now };
-  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, usage: safeUsage() };
+  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, usage: safeUsage(), claudeArchiveError: claude.error };
   return lastSnapshot;
 }
 
@@ -1217,16 +1495,20 @@ function identityMatches(rec, ident) {
   return false;                                    // no timestamp to compare: refuse
 }
 
-const ending = new Map(); // sessionId -> promise, one attempt at a time
+const ending = new Map(); // sessionId -> promise of the whole end (the stow included), one attempt at a time
 
 async function endSession(sessionId, opts) {
   sessionId = String(sessionId || '');
   const archive = Boolean(opts && opts.archive);
   if (!UUID_RE.test(sessionId)) return applyArchive(sessionId, { ok: false, code: 'invalid', message: 'Not a session id.' }, archive);
   if (ending.has(sessionId)) return applyArchive(sessionId, { ok: false, code: 'pending', message: 'Already ending this session.' }, archive);
-  const p = doEndSession(sessionId, Boolean(opts && opts.force));
+  const p = (async () => {
+    const result = applyArchive(sessionId, await doEndSession(sessionId, Boolean(opts && opts.force)), archive);
+    if (result.archived) Object.assign(result, await stowTranscript(sessionId));
+    return result;
+  })();
   ending.set(sessionId, p);
-  try { return applyArchive(sessionId, await p, archive); } finally { ending.delete(sessionId); }
+  try { return await p; } finally { ending.delete(sessionId); }
 }
 
 async function doEndSession(sessionId, force) {
@@ -1391,7 +1673,7 @@ async function sessionIndex(ctx) {
     // Patterns are constants, never user input; `-o` keeps output to the match, so a
     // multi-MB first line costs nothing.
     const titles = await run(rg.path, [...RG_BASE, '-H', '-N', '-o', '--no-heading',
-      '-e', '"aiTitle":"(?:[^"\\\\]|\\\\.)*"', PROJECTS_DIR],
+      '-e', '"aiTitle":"(?:[^"\\\\]|\\\\.)*"', ...transcriptRoots()],
     { timeout: 30000, maxBuffer: 64 * 1024 * 1024, signal: ctx && ctx.signal, onChild: ctx && ctx.track });
     for (const line of titles.stdout.split('\n')) {
       const pm = splitPathMatch(line, '"aiTitle":"');
@@ -1402,7 +1684,7 @@ async function sessionIndex(ctx) {
     }
     // /rename names (custom-title lines) win over generated titles; newest per file wins.
     const customs = await run(rg.path, [...RG_BASE, '-H', '-N', '-o', '--no-heading',
-      '-e', '"customTitle":"(?:[^"\\\\]|\\\\.)*"', PROJECTS_DIR],
+      '-e', '"customTitle":"(?:[^"\\\\]|\\\\.)*"', ...transcriptRoots()],
     { timeout: 30000, maxBuffer: 64 * 1024 * 1024, signal: ctx && ctx.signal, onChild: ctx && ctx.track });
     for (const line of customs.stdout.split('\n')) {
       const pm = splitPathMatch(line, '"customTitle":"');
@@ -1412,7 +1694,7 @@ async function sessionIndex(ctx) {
       try { row.title = JSON.parse('{' + pm.match + '}').customTitle || row.title; } catch (_) { /* keep previous */ }
     }
     const cwds = await run(rg.path, [...RG_BASE, '-H', '-N', '-o', '--no-heading', '-m', '1',
-      '-e', '"cwd":"(?:[^"\\\\]|\\\\.)*"', PROJECTS_DIR],
+      '-e', '"cwd":"(?:[^"\\\\]|\\\\.)*"', ...transcriptRoots()],
     { timeout: 30000, maxBuffer: 64 * 1024 * 1024, signal: ctx && ctx.signal, onChild: ctx && ctx.track });
     for (const line of cwds.stdout.split('\n')) {
       const pm = splitPathMatch(line, '"cwd":"');
@@ -1498,11 +1780,15 @@ async function searchSessions(query, opts) {
     const ql = q.toLowerCase();
     const has = (v) => typeof v === 'string' && v.toLowerCase().indexOf(ql) !== -1;
 
-    const hits = new Map(); // key path|sessionId -> row
+    const hits = new Map(); // sessionId -> row (one transcript per session, wherever it sits)
     const addRow = (row, source) => {
-      const key = row.path || ('live:' + row.sessionId);
+      const key = row.sessionId;
       const prev = hits.get(key);
-      if (prev) { prev.source = prev.source === source ? source : 'both'; return prev; }
+      if (prev) {
+        prev.source = prev.source === source ? source : 'both';
+        if (row.path && (!prev.path || !fs.existsSync(prev.path))) prev.path = row.path;   // the live row's path may predate a move
+        return prev;
+      }
       hits.set(key, Object.assign({ source }, row));
       return hits.get(key);
     };
@@ -1517,7 +1803,7 @@ async function searchSessions(query, opts) {
     }
 
     if (opts.content && rg.path) {
-      const listed = await run(rg.path, [...RG_BASE, '-i', '-l', '-F', '-e', q, '-e', jsonEscaped(q), PROJECTS_DIR],
+      const listed = await run(rg.path, [...RG_BASE, '-i', '-l', '-F', '-e', q, '-e', jsonEscaped(q), ...transcriptRoots()],
         { timeout: budgetLeft(), maxBuffer: 64 * 1024 * 1024, signal: opts.signal, onChild: track });
       if (runState.aborted) return Object.assign(base, { cancelled: true });
       if (listed.code === 2 || listed.timedOut) { base.partial = true; base.partialReason = listed.timedOut ? 'content search timed out' : (listed.stderr.trim().split('\n')[0] || 'ripgrep reported errors'); }
@@ -1533,11 +1819,12 @@ async function searchSessions(query, opts) {
     }
 
     const archivedSet = readArchived();
+    const claudeSet = readClaudeArchived().ids;
     const all = [...hits.values()].map((row) => {
       const s = live.get(row.sessionId);
       return Object.assign(row, {
         live: Boolean(s), status: s ? s.status : 'past', pid: s ? s.pid : null, window: s ? s.window : null,
-        archived: archivedSet.has(row.sessionId),
+      }, archiveSource(row.sessionId, archivedSet, claudeSet), {
         name: s ? s.name : null, folder: row.cwd ? String(row.cwd).split(/[\\/]/).filter(Boolean).pop() : null,
         ageMinutes: row.mtime ? Math.round((Date.now() - row.mtime) / 60000) : null, snippets: [],
       });
@@ -1606,6 +1893,20 @@ module.exports = {
   archivedIds,
   archiveSession,
   unarchiveSession,
+  readClaudeArchived,
+  archiveSource,
+  CODE_USER_DIR,
+  CLAUDE_CODE_STATE_DB,
+  ARCHIVE_TRANSCRIPTS_DIR,
+  transcriptRoots,
+  liveTranscripts,
+  stowedTranscripts,
+  registryRecords,
+  sameFile,
+  linkMove,
+  copyMove,
+  stowTranscript,
+  restoreTranscript,
   UNSEEN_DIR,
   SEEN_DIR,
   TITLES_DIR,

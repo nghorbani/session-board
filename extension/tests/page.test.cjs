@@ -38,7 +38,7 @@ function snapshotOf(sessions) {
 
 // -- fake API ----------------------------------------------------------------------------
 
-const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), search: { rows: [] }, calls: [] };
+const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), search: { rows: [] }, calls: [] };
 let PORT = 0;
 function json(res, code, body) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function serve(req, res) {
@@ -57,7 +57,7 @@ function serve(req, res) {
   if (u.pathname === '/api/sessions') return json(res, 200, fake.snapshot);
   fake.calls.push({ method: req.method, path: u.pathname, query: u.search });
   if (u.pathname.startsWith('/api/end/')) { const r = fake.end(u.pathname.slice('/api/end/'.length), u.searchParams); return json(res, r.status, r.body); }
-  if (u.pathname.startsWith('/api/unarchive/')) return json(res, 200, { ok: true });
+  if (u.pathname.startsWith('/api/unarchive/')) { const r = fake.unarchive(u.pathname.slice('/api/unarchive/'.length)); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/retitle/')) { const r = fake.retitle(u.pathname.slice('/api/retitle/'.length)); return json(res, r.status, r.body); }
@@ -121,6 +121,10 @@ const SAMPLE = `(function () {
     confirmText: text('.row .iconbtn.confirm'),
     errorText: text('.row.error .sub span'),
     chips: q('.row .chip.archived').length,
+    chipTexts: q('.row[data-session]').map(function (r) { var c = r.querySelector('.chip.archived'); return r.getAttribute('data-session') + '=' + (c ? c.textContent : ''); }),
+    unarchiveOn: q('.row[data-session]').filter(function (r) { return r.querySelector('.iconbtn.unarchive'); }).map(function (r) { return r.getAttribute('data-session'); }),
+    paths: q('.row[data-session]').map(function (r) { return r.getAttribute('data-session') + '=' + r.getAttribute('data-path'); }),
+    notice: (function () { var e = document.getElementById('notice'); return e && e.classList.contains('show') ? e.textContent : null; })(),
     dimmed: q('.row.archived').length,
     pendingEnd: JSON.parse(JSON.stringify(state.pendingEnd)),
     copied: window.__copied || null,
@@ -223,19 +227,60 @@ test('page: a resumed archived session comes back only when it waits; busy stays
   await page.close();
 });
 
-test('page: clicking an archived search row unarchives it first, then copies the resume command', opts, async () => {
+test('page: clicking a board-archived search row waits for the restore, then copies and shows the restored path', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([]);
-  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\x\\p.jsonl', ageMinutes: 5000, archived: true, snippets: [] }] };
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, archived: true, archivedBy: 'board', snippets: [] }] };
+  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: 'C:\\p\\x\\p.jsonl' }, delayMs: 600 });
   const page = await openPage();
   await page.search('Old');
   let s = await page.until((x) => x.results.includes(P), 'the search row');
   assert.ok(s.chips >= 1, 'the archived chip on the search row');
   await page.click(rowSel(P));
+  await sleep(250);
+  s = await page.sample();
+  assert.equal(s.copied, null, 'nothing copied while the restore is pending');
   s = await page.until((x) => x.chips === 0, 'the chip to go after the unarchive reply');
   assert.deepEqual(fake.calls.filter((c) => c.path.startsWith('/api/unarchive/')).map((c) => c.path), ['/api/unarchive/' + P]);
-  assert.equal(s.copied, 'claude --resume ' + P, 'the resume command was copied');
+  assert.equal(s.copied, 'claude --resume ' + P, 'the resume command was copied after the reply');
+  assert.ok(s.paths.includes(P + '=C:\\p\\x\\p.jsonl'), 'the row carries the restored path: ' + JSON.stringify(s.paths));
   fake.search = { rows: [] };
+  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: null } });
+  await page.close();
+});
+
+test('page: a failed restore on a search row click copies nothing and shows the notice', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([]);
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, archived: true, archivedBy: 'board', snippets: [] }] };
+  fake.unarchive = () => ({ status: 500, body: { ok: false, error: 'a different file is already at C:\\p\\x\\p.jsonl; C:\\t\\x\\p.jsonl stays' } });
+  const page = await openPage();
+  await page.search('Old');
+  await page.until((x) => x.results.includes(P), 'the search row');
+  await page.click(rowSel(P));
+  const s = await page.until((x) => x.notice !== null, 'the notice');
+  assert.match(s.notice, /unarchive failed: a different file is already at/);
+  assert.equal(s.copied, null, 'nothing copied');
+  assert.ok(s.chips >= 1, 'the row stays archived');
+  fake.search = { rows: [] };
+  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: null } });
+  await page.close();
+});
+
+test('page: ⧉ on a board-archived search row restores first, then copies', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([]);
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, archived: true, archivedBy: 'board', snippets: [] }] };
+  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: 'C:\\p\\x\\p.jsonl' } });
+  const page = await openPage();
+  await page.search('Old');
+  await page.until((x) => x.results.includes(P), 'the search row');
+  await page.click(rowSel(P) + ' .iconbtn.copy');
+  const s = await page.until((x) => x.copied === 'claude --resume ' + P, 'the copy after the restore');
+  assert.deepEqual(fake.calls.filter((c) => c.path.startsWith('/api/unarchive/')).map((c) => c.path), ['/api/unarchive/' + P]);
+  assert.equal(s.chips, 0, 'the chip went with the restore');
+  fake.search = { rows: [] };
+  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: null } });
   await page.close();
 });
 
@@ -295,7 +340,7 @@ test('page: an unseen answer sits in its own group with the unseen status, and o
   assert.ok(s.statusWords.includes(B + '=idle'));
   await page.click(rowSel(A));
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Old', 'idle')]);
-  s = await page.until((x) => x.idle.includes(A) && x.unseen.length === 0, 'the row in Idle after the click');
+  s = await page.until((x) => x.idle.includes(A) && x.unseen.length === 0 && fake.calls.some((c) => c.path === '/api/focus/' + A), 'the row in Idle after the click, and the open at the server');
   assert.ok(fake.calls.some((c) => c.method === 'POST' && c.path === '/api/focus/' + A), 'the open went to the server');
   assert.equal(s.counts, '0 need you · 0 working · 2 idle');
   await page.close();
@@ -327,5 +372,52 @@ test('page: ✎ asks for a new title and shows it when it arrives', opts, async 
   s = await page.until((x) => x.errorText !== null, 'the failure on the row');
   assert.equal(s.errorText, 'retitle failed: model not available');
   fake.retitle = () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } });
+  await page.close();
+});
+
+test('page: a row archived in Claude Code is put away without ⤒, its chip says so, and a click opens it without unarchiving', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { archived: true, archivedBy: 'claude-code' }), row(B, 'Board one', 'idle', { pid: 200, archived: true, archivedBy: 'board' })]);
+  const page = await openPage();
+  let s = await page.until((x) => x.toggleArchived === 'Show 2 archived', 'both rows put away');
+  await page.click('#toggleArchived');
+  s = await page.until((x) => x.archivedList.includes(A) && x.archivedList.includes(B), 'the revealed rows');
+  assert.ok(s.chipTexts.includes(A + '=archived in Claude Code'), JSON.stringify(s.chipTexts));
+  assert.ok(s.chipTexts.includes(B + '=archived'));
+  assert.deepEqual(s.unarchiveOn, [B], '⤒ only on the board-archived row');
+  await page.click(rowSel(A));
+  await page.until((x) => fake.calls.some((c) => c.path === '/api/focus/' + A), 'the open of the Claude Code row');
+  assert.ok(!fake.calls.some((c) => c.path.startsWith('/api/unarchive/')), 'no unarchive for a Claude Code archive');
+  await page.click(rowSel(B));
+  await page.until((x) => fake.calls.some((c) => c.path === '/api/unarchive/' + B), 'the live board-archived row still unarchives on a click');
+  await page.close();
+});
+
+test('page: ⤒ on a row archived in both places keeps the Claude Code chip and leaves the row put away', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { archived: true, archivedBy: 'both' })]);
+  const page = await openPage();
+  await page.until((x) => x.toggleArchived === 'Show 1 archived', 'the row put away');
+  await page.click('#toggleArchived');
+  let s = await page.until((x) => x.archivedList.includes(A), 'the revealed row');
+  assert.ok(s.chipTexts.includes(A + '=archived here and in Claude Code'), JSON.stringify(s.chipTexts));
+  await page.click(rowSel(A) + ' .iconbtn.unarchive');
+  s = await page.until((x) => x.chipTexts.includes(A + '=archived in Claude Code'), 'the chip after ⤒');
+  assert.ok(s.archivedList.includes(A), 'still put away: Claude Code holds its own flag');
+  assert.deepEqual(s.unarchiveOn, [], 'no ⤒ left');
+  await page.close();
+});
+
+test('page: an archive whose move failed shows the notice after the row has left', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
+  fake.end = () => { fake.snapshot = snapshotOf([]); return { status: 200, body: { ok: true, code: 'ended', archived: true, moved: false, moveError: 'running again under pid 5' } }; };
+  const page = await openPage();
+  await page.until((x) => x.idle.includes(A), 'the idle row');
+  await page.click(rowSel(A) + ' .iconbtn.archive');
+  await page.click(rowSel(A) + ' .iconbtn.confirm');
+  const s = await page.until((x) => x.notice !== null && !x.idle.includes(A), 'the notice with the row gone');
+  assert.equal(s.notice, 'archived; transcript not moved: running again under pid 5');
+  fake.end = () => ({ status: 200, body: { ok: true, code: 'ended' } });
   await page.close();
 });

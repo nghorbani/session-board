@@ -34,9 +34,11 @@ shows background agents only, not the sessions you talk to.
 - **A title that follows the work.** Claude Code titles a session from its first question;
   ✎ asks for a new title from the recent prompts and the last answer (one short haiku call).
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
-- **Archive a session.** ⤓ ends it the same way and keeps it off the board. It comes back on
-  its own only when it needs you; "Show N archived" lists the rest, and ⤒ or a click brings
-  one back. The board's archive is its own; Claude Code's picker keeps its own flag.
+- **Archive a session.** ⤓ ends it the same way and keeps it off the board. It also moves
+  the transcript out of Claude Code's project folder, so Claude Code's own session list drops
+  it too. It comes back on its own only when it needs you; "Show N archived" lists the rest,
+  and ⤒ or a click brings one back, transcript first. Sessions you archive in Claude Code's
+  sidebar are put away on the board as well (read from VS Code's default profile).
 - **Find any session, ever.** Type to narrow the list. Press Enter to search every session on
   this machine, current or past, by title or by what was said, and resume a past one in
   place.

@@ -90,8 +90,10 @@ async function handle(req, res) {
   if (route.startsWith('/api/unarchive/') && req.method === 'POST') {
     const sessionId = safeDecode(route.slice('/api/unarchive/'.length));
     if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
-    try { core.unarchiveSession(sessionId); return sendJson(res, 200, { ok: true }); }
-    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+    try {
+      const r = await core.unarchiveSession(sessionId);   // brings a stowed transcript back first
+      return sendJson(res, 200, { ok: true, restoredTo: (r && r.restoredTo) || null });
+    } catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
   }
 
   if (route.startsWith('/api/seen/') && req.method === 'POST') {

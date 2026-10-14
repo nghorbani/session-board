@@ -40,7 +40,7 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 - **Click a row**: the session opens where you keep Claude Code (sidebar or editor tab), in
   the window that owns it, and that window comes to the front. Without a mapped window the
   resume command is copied instead.
-- **⧉** copies `claude --resume <id>`.
+- **⧉** copies `claude --resume <id>` (a transcript the board stowed comes back first).
 - **✎ retitles the session** from its progress so far: one short haiku call over the recent
   prompts and the last answer (a few KB of the transcript, passed through your own `claude`
   command the way a prompt would be), hook-free and without tools. The title is the board's
@@ -49,18 +49,23 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   Click once, then click `End?` within 3 s. Busy or waiting sessions ask once more; in-flight
   work is lost. The transcript stays and Claude Code's picker still offers "Resume session".
 - **⤓ archives the session**: it ends it exactly like ✕ (same confirmations) and keeps it
-  off the board afterwards. If it runs again later (a resume), it comes back on its own only
-  when it is waiting for you; "Show N archived" lists the others, and ⤒ or a click on the
-  row brings one back. This flag is the board's own, kept in your profile; it does not touch
-  Claude Code's archive, which the board cannot reach.
+  off the board afterwards. It also moves the transcript from `~/.claude/projects` to
+  `%LOCALAPPDATA%\SessionBoard\transcripts`, so Claude Code's session list drops it at its
+  next refresh. If it runs again later (a resume), it comes back on its own only when it is
+  waiting for you; "Show N archived" lists the others, and ⤒, a click on the row or ⧉ brings
+  one back, transcript first. While a transcript is stowed, `claude --resume <id>` and
+  Claude Code's own picker do not find the session. A session archived in Claude Code's
+  sidebar is put away here too, with the chip "archived in Claude Code"; unarchive it there.
+  That flag is read from VS Code's default profile; other profiles, portable installs and
+  custom user-data folders are not seen.
 - **Search**: typing narrows the live list. Enter searches every session on disk by title,
   folder, id and transcript text (literal, case-insensitive, raw transcript text including
   tool output); Esc or an emptied box clears. Results show live or past, the folder, up to
   two snippets, and whether the pass was partial. Click a past session to resume it in this
   window when its folder is open here; otherwise the resume command is copied and you can
-  open the folder in a new window as the first step. Claude Code's own archive flag is
-  private to it and not shown; sessions archived from the board carry an `archived` chip,
-  and ⤒ or a click on such a row clears the flag.
+  open the folder in a new window as the first step. Archived sessions carry an `archived`
+  chip, or "archived in Claude Code"; a click on a board-archived row brings the transcript
+  back before it resumes.
 - Command palette: **Session Board: Open Session…**, **Session Board: Search Sessions…**,
   **Session Board: Refresh Usage Limits**, **Session Board: Refresh**. Output panel channel
   **Session Board** logs each decision.

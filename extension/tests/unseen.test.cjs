@@ -14,6 +14,7 @@ const path = require('path');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-unseen-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
+process.env.SB_CODE_USER_DIR = path.join(tmp, "User");   // never the real state.vscdb
 const sessionsDir = path.join(tmp, 'sessions');
 const projectsDir = path.join(tmp, 'projects');
 fs.mkdirSync(sessionsDir);

@@ -16,6 +16,7 @@ const Module = require('module');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-host-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
+process.env.SB_CODE_USER_DIR = path.join(tmp, "User");   // never the real state.vscdb
 
 // `require('vscode')` only resolves inside an extension host; point it at the stub.
 const resolveFilename = Module._resolveFilename;
@@ -26,6 +27,7 @@ Module._resolveFilename = function (request, ...rest) {
 const vscode = require('vscode');
 const core = require('../../core.cjs');
 const ext = require('../../extension.js');
+const pristine = Object.assign({}, core);   // every boot starts from the unpatched core
 
 /** Activate, stop the poll, patch core with `patches`, seed `provider.last`, attach a recording view. */
 function boot(patches, opts) {
@@ -39,6 +41,7 @@ function boot(patches, opts) {
   ext.activate(context);
   const provider = vscode.__providers[0];
   provider.stop();                                     // the test drives the provider; no poll
+  Object.assign(core, pristine);
   core.writeHeartbeat = () => {};
   core.snapshot = async () => ({ sessions: [], limits: {}, usage: null });
   Object.assign(core, patches || {});

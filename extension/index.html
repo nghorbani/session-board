@@ -188,6 +188,7 @@
   </div>
 
   <div class="banner" id="banner"></div>
+  <div class="notice" id="notice"><span id="noticeText"></span></div>
 
   <div class="notice" id="notifyNotice">
     <span>Desktop notifications are off, so you will only see waiting sessions when this tab is visible.</span>
@@ -232,6 +233,8 @@ var state = {
   retitling: Object.create(null),           // sessionId -> true while ✎ waits for the new title
   usageBusy: null,                          // { id, since, timer } while a ↻ refresh is in flight
   usageNote: null,                          // { text, until, warn } shown in the strip after a refresh
+  noticeTimer: null,                        // hides the notice line again
+  unarchiveWaiters: Object.create(null),    // sessionId -> callback for the unarchive reply (the browser copies after it)
 };
 
 function esc(s) {
@@ -424,13 +427,13 @@ function actionsHtml(s, opts) {
   var flash = state.flashes[s.sessionId];
   var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
   var html = '<span class="age">' + esc(age) + '</span>';
-  html += '<button class="iconbtn copy" title="copy: claude --resume …" data-act="copy">⧉</button>';
+  html += '<button class="iconbtn copy" title="copy: claude --resume …' + (boardArchived(s) ? ' (brings the transcript back first)' : '') + '" data-act="copy">⧉</button>';
   if (opts.endable) {
     html += state.retitling[s.sessionId]
       ? '<button class="iconbtn retitle" disabled title="asking for a title…">…</button>'
       : '<button class="iconbtn retitle" data-act="retitle" title="Retitle from the progress so far (one short model call)">✎</button>';
   }
-  if (s.archived) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: show this session on the board again">⤒</button>';
+  if (boardArchived(s)) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: bring the transcript back and show this session on the board again">⤒</button>';
   if (opts.endable) {
     if (pe && pe.kind === 'pending') html += '<button class="iconbtn end" disabled title="' + (pe.archive ? 'archiving' : 'ending') + '">…</button>';
     else if (pe && pe.kind === 'confirming' && pe.until > Date.now()) {
@@ -478,7 +481,10 @@ function rowHtml(s, limits, opts) {
   var h = heading(s);
   var chips = '';
   if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : 'past') + '</span>';
-  if (s.archived) chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
+  var by = archivedBy(s);
+  if (by === 'claude-code') chips += '<span class="chip archived" title="archived in Claude Code\'s sidebar; unarchive it there">archived in Claude Code</span>';
+  else if (by === 'both') chips += '<span class="chip archived" title="archived on the board and in Claude Code\'s sidebar; ⤒ clears the board\'s flag">archived here and in Claude Code</span>';
+  else if (by === 'board') chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
   if (s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';
   var sub = chips + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
@@ -491,7 +497,7 @@ function rowHtml(s, limits, opts) {
     snips = '<div class="snips">' + s.snippets.map(function (t) { return '<div>' + markQuery(t, opts.query) + '</div>'; }).join('') + '</div>';
   }
 
-  return '<div class="row ' + cls + '" data-session="' + esc(s.sessionId) + '" data-live="' + (isLive ? '1' : '0') + '" data-archived="' + (s.archived ? '1' : '0') + '"'
+  return '<div class="row ' + cls + '" data-session="' + esc(s.sessionId) + '" data-live="' + (isLive ? '1' : '0') + '" data-archived="' + (s.archived ? '1' : '0') + '" data-board-archived="' + (boardArchived(s) ? '1' : '0') + '"'
     + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
     + ' title="' + esc(s.cwd) + (s.name ? '\n' + esc(s.name) : '') + '\n' + esc(hint) + '">'
     + '<div><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div></div>'
@@ -507,6 +513,20 @@ function flash(sessionId, text, cls) {
   render();
   setTimeout(render, 1700);
 }
+
+/** A line above the groups for outcomes that outlive their row (a move or restore that failed). */
+function notice(text) {
+  var el = document.getElementById('notice');
+  document.getElementById('noticeText').textContent = text;
+  el.className = 'notice show';
+  clearTimeout(state.noticeTimer);
+  state.noticeTimer = setTimeout(function () { el.className = 'notice'; }, 8000);
+}
+
+// Where a row's archive flag comes from: 'board', 'claude-code', 'both' or null. Rows from an
+// older server carry only `archived`, which was always the board's.
+function archivedBy(s) { return s.archivedBy || (s.archived ? 'board' : null); }
+function boardArchived(s) { var by = archivedBy(s); return by === 'board' || by === 'both'; }
 
 // -- actions -------------------------------------------------------------------------------
 
@@ -538,9 +558,17 @@ function openLive(el, sid) {
   }).catch(function () { copyResume(sid, 'copied · server?'); });
 }
 
+/** A stowed transcript comes back before anything resumes it: the host does that itself, the browser asks first. */
 function openPast(el, sid) {
   if (vsapi) { flash(sid, 'resuming…', 'jumped'); send({ type: 'openPast', sessionId: sid, path: el.getAttribute('data-path'), cwd: el.getAttribute('data-cwd') }); return; }
+  if (el.getAttribute('data-board-archived') === '1') { requestUnarchive(sid, function (r) { if (r.ok) copyResume(sid, 'copied · resume in a terminal'); }); return; }
   copyResume(sid, 'copied · resume in a terminal');
+}
+
+/** ⧉: the same rule; the host brings a stowed transcript back on its own. */
+function copyBack(el, sid) {
+  if (!vsapi && el.getAttribute('data-board-archived') === '1') { requestUnarchive(sid, function (r) { if (r.ok) copyResume(sid); }); return; }
+  copyResume(sid);
 }
 
 /*
@@ -567,7 +595,7 @@ function requestEnd(sid, force, archive) {
   var qs = [force ? 'force=1' : '', archive ? 'archive=1' : ''].filter(Boolean).join('&');
   api('POST', '/api/end/' + encodeURIComponent(sid) + (qs ? '?' + qs : '')).then(function (res) {
     var b = res.body || {};
-    if (res.ok && b.ok) { onEndResult({ sessionId: sid, ok: true, code: b.code, archived: Boolean(b.archived), archiveError: b.archiveError || null }); return; }
+    if (res.ok && b.ok) { onEndResult({ sessionId: sid, ok: true, code: b.code, archived: Boolean(b.archived), archiveError: b.archiveError || null, moved: Boolean(b.moved), moveError: b.moveError || null }); return; }
     if (b.code === 'needs-force') {
       var name = (rowById(sid) || {}).title || sid.slice(0, 8);
       var question = archive ? '. Archive it? This ends it and everything it started; in-flight work is lost.' : '. End it and everything it started? In-flight work is lost.';
@@ -587,27 +615,53 @@ function endError(sid, message) {
 
 function onEndResult(r) {
   var pe = state.pendingEnd[r.sessionId] || {};
+  if (r.ok && r.archived && r.moveError) notice('archived; transcript not moved: ' + r.moveError);   // the row still leaves; Claude Code keeps listing the session
   if (r.ok && r.archiveError) { endError(r.sessionId, 'ended, not archived: ' + r.archiveError); return; }   // the process is gone; the row leaves with the next snapshot
   if (r.ok) { state.pendingEnd[r.sessionId] = { kind: 'ended', pid: pe.pid != null ? pe.pid : null }; flash(r.sessionId, r.archived ? 'archived' : 'ended', 'copied'); }
   else if (r.code === 'cancelled') { delete state.pendingEnd[r.sessionId]; render(); }
   else endError(r.sessionId, r.message || r.code);
 }
 
-function requestUnarchive(sid) {
+/*
+ * ⤒, a click on a live archived row, or (in the browser) a click or ⧉ on an archived past row:
+ * the host or server brings the transcript back and drops the board's flag. `done(r)` runs
+ * on the reply, so the browser copies a resume command only once the file is back.
+ */
+function requestUnarchive(sid, done) {
+  if (done) state.unarchiveWaiters[sid] = done;
   if (vsapi) { send({ type: 'unarchive', sessionId: sid }); return; }
   api('POST', '/api/unarchive/' + encodeURIComponent(sid)).then(function (res) {
     var b = res.body || {};
-    onUnarchiveResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), message: b.error || b.message || ('http ' + res.status) });
+    onUnarchiveResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), restoredTo: b.restoredTo || null, message: b.error || b.message || ('http ' + res.status) });
   }).catch(function () { onUnarchiveResult({ sessionId: sid, ok: false, message: 'server not reachable' }); });
 }
 
-function onUnarchiveResult(r) {
-  if (!r.ok) { flash(r.sessionId, 'unarchive failed: ' + (r.message || ''), 'error'); return; }
-  var live = rowById(r.sessionId);
-  if (live) live.archived = false;                       // the next snapshot says the same
+/** The board's flag is gone (Claude Code's may remain) and the transcript is back at `restoredTo`. */
+function applyRestore(sid, restoredTo) {
+  var update = function (s) {
+    var by = archivedBy(s);
+    s.archivedBy = by === 'both' || by === 'claude-code' ? 'claude-code' : null;
+    s.archived = s.archivedBy !== null;
+    if (restoredTo) s.path = restoredTo;
+  };
+  var live = rowById(sid);
+  if (live) update(live);                                // the next snapshot says the same
   var rows = (state.search && state.search.result && state.search.result.rows) || [];
-  rows.forEach(function (s) { if (s.sessionId === r.sessionId) s.archived = false; });
+  rows.forEach(function (s) { if (s.sessionId === sid) update(s); });
+}
+
+function onUnarchiveResult(r) {
+  var done = state.unarchiveWaiters[r.sessionId];
+  delete state.unarchiveWaiters[r.sessionId];
+  if (!r.ok) {
+    notice('unarchive failed: ' + (r.message || ''));
+    flash(r.sessionId, 'unarchive failed', 'error');
+    if (done) done(r);
+    return;
+  }
+  applyRestore(r.sessionId, r.restoredTo || null);
   flash(r.sessionId, 'unarchived', 'copied');
+  if (done) done(r);
 }
 
 /*
@@ -648,14 +702,16 @@ function onRowClick(ev) {
   if (btn) {
     ev.stopPropagation();
     var act = btn.getAttribute('data-act');
-    if (act === 'copy') { copyResume(sid); return; }
+    if (act === 'copy') { copyBack(el, sid); return; }
     if (act === 'unarchive') { requestUnarchive(sid); return; }
     if (act === 'retitle') { requestRetitle(sid); return; }
     if (act === 'end' || act === 'archive') { startConfirm(sid, act === 'archive'); return; }
     return;
   }
-  if (el.getAttribute('data-archived') === '1') requestUnarchive(sid);   // an explicit open brings an archived session back
-  if (el.getAttribute('data-live') === '1') openLive(el, sid); else openPast(el, sid);
+  if (el.getAttribute('data-live') === '1') {
+    if (el.getAttribute('data-board-archived') === '1') requestUnarchive(sid);   // an explicit open brings a live archived session back
+    openLive(el, sid);
+  } else openPast(el, sid);                                                        // a past row: the host restores inside openPast
 }
 
 // -- search -------------------------------------------------------------------------------
@@ -829,7 +885,11 @@ if (vsapi) {
     else if (m.type === 'unarchiveResult') onUnarchiveResult(m);
     else if (m.type === 'retitleResult') onRetitleResult(m);
     else if (m.type === 'searchResult') onSearchResult(m.data);
-    else if (m.type === 'openResult') { if (m.ok) flash(m.sessionId, 'resumed', 'jumped'); else flash(m.sessionId, m.message || 'copied', 'copied'); }
+    else if (m.type === 'openResult') {
+      if (m.restoredTo) applyRestore(m.sessionId, m.restoredTo);
+      if (m.ok) flash(m.sessionId, 'resumed', 'jumped');
+      else { if (m.message && m.message !== 'copied resume command' && m.message !== 'transcript no longer exists') notice('open failed: ' + m.message); flash(m.sessionId, m.message || 'copied', m.ok === false && /already at|failed/.test(m.message || '') ? 'error' : 'copied'); }
+    }
     else if (m.type === 'usageResult') onUsageResult(m);
     else if (m.type === 'focusSearch') qEl.focus();
   });
