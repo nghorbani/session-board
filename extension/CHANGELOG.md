@@ -1,10 +1,15 @@
 # Changelog
 
+## 0.9.1
+
+- The board deletes heartbeat records older than a day from `%TEMP%\claude-sessions-board` while it reads them. Before, one record per window start stayed behind for good and every poll in every window parsed all of them (213 files on one machine after five weeks). A record over 45 s old was and is ignored; it now also goes after a day, as does a `.tmp` file a dying writer left behind
+- The 0.9.0 entry below names the blind marker path correctly again (a stray control character had eaten a letter)
+
 ## 0.9.0
 
 - Live sessions are grouped by VS Code window: one collapsible section per window, named after its workspace (the window's folder, or the name of a multi-root workspace), the window this board runs in first, the rest by activity; sessions started outside VS Code sit under Elsewhere. The Needs you, Working, Unseen and Idle groups are gone; inside a section the rows keep that order, and "Show N idle over 2h" folds per section
 - Every section heading carries a number: the sessions in it that wait for you (amber) or are unseen (green)
-- ⊘ on a row blinds the session: it moves under the folded Blinded section at the bottom and stays there, waiting or not, until ⊙ brings it back. Blinded sessions count on the Blinded heading only; the counts line, the tab title, the activity-bar badge, the toast and the browser notification leave them out. The flag lives in `%LOCALAPPDATA%\SessionBoardlinded\<id>.json`, is shared by every window and the browser page, and goes once the session can no longer be resumed
+- ⊘ on a row blinds the session: it moves under the folded Blinded section at the bottom and stays there, waiting or not, until ⊙ brings it back. Blinded sessions count on the Blinded heading only; the counts line, the tab title, the activity-bar badge, the toast and the browser notification leave them out. The flag lives in `%LOCALAPPDATA%\SessionBoard\blinded\<id>.json`, is shared by every window and the browser page, and goes once the session can no longer be resumed
 - A typed filter shows blinded and archived matches in their window section, every section unfolded
 - A window names its section through the heartbeat its board writes; a window still running an older board keeps the folder name until it reloads
 - Browser page: `POST /api/blind/<id>` and `POST /api/unblind/<id>`

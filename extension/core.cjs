@@ -26,7 +26,7 @@ const PROJECTS_DIR = process.env.SB_PROJECTS_DIR || path.join(CLAUDE_DIR, 'proje
 const SESSIONS_DIR = process.env.SB_SESSIONS_DIR || path.join(CLAUDE_DIR, 'sessions');   // overridable for the tests
 const CODE_LOGS_DIR = path.join(
   process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Code', 'logs');
-const VSCODE_EXTENSIONS_JSON = path.join(os.homedir(), '.vscode', 'extensions', 'extensions.json');
+const VSCODE_EXTENSIONS_JSON = process.env.SB_VSCODE_EXTENSIONS_JSON || path.join(os.homedir(), '.vscode', 'extensions', 'extensions.json');   // overridable for the tests
 // VS Code's user dir of the default profile; its globalStorage/state.vscdb holds every extension's
 // globalState, Claude Code's archive among it. SB_CODE_USER_DIR points the tests at a temp dir.
 const CODE_USER_DIR = process.env.SB_CODE_USER_DIR || (process.platform === 'win32'
@@ -399,6 +399,7 @@ function windowIdForExthost(pid) {
 
 const HEARTBEAT_DIR = process.env.SB_HEARTBEAT_DIR || path.join(os.tmpdir(), 'claude-sessions-board');   // overridable for the tests
 const HEARTBEAT_FRESH_MS = 45000;
+const HEARTBEAT_KEEP_MS = 24 * 60 * 60 * 1000;   // an older record belongs to a window long closed; the readers delete it
 
 /** One record per host and extension id; `name` is the window's workspace name, so other boards can label its section. */
 function writeHeartbeat(exthostPid, extensionId, name) {
@@ -414,23 +415,55 @@ function writeHeartbeat(exthostPid, extensionId, name) {
   } catch (_) { /* best effort */ }
 }
 
+/**
+ * Every record under HEARTBEAT_DIR as { name, rec }. On the way the reader deletes what no board
+ * will read again: a record a day old or older (by its `at`, else by the file's mtime) and a
+ * `.tmp.<pid>` file a writer left behind when it died between write and rename. Without that the
+ * folder grew by one file per window start and every poll in every window parsed all of them. A
+ * deletion that fails (another window got there first, or the name is still held) is retried on
+ * the next read.
+ */
+function readHeartbeats() {
+  let names = [];
+  try { names = fs.readdirSync(HEARTBEAT_DIR); } catch (_) { return []; }
+  const now = Date.now();
+  const out = [];
+  for (const name of names) {
+    if (!name.startsWith('board-')) continue;
+    const file = path.join(HEARTBEAT_DIR, name);
+    if (!name.endsWith('.json')) {
+      if (name.includes('.json.tmp.')) dropIfOld(file, now, null);
+      continue;
+    }
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
+    const at = rec && Number.isFinite(Number(rec.at)) ? Number(rec.at) : null;
+    if (dropIfOld(file, now, at)) continue;
+    if (rec && typeof rec === 'object') out.push({ name, rec });
+  }
+  return out;
+}
+
+/** Unlink `file` when `at` (else its mtime) lies HEARTBEAT_KEEP_MS or more in the past; true when it is gone or going. */
+function dropIfOld(file, now, at) {
+  let then = at;
+  if (then === null) { try { then = fs.statSync(file).mtimeMs; } catch (_) { return true; } }
+  if (now - then < HEARTBEAT_KEEP_MS) return false;
+  try { fs.unlinkSync(file); } catch (_) { /* retried on the next read */ }
+  return true;
+}
+
 /** Workspace names of the hosts with a fresh heartbeat, by extension-host pid (the freshest record per pid). */
 function heartbeatNames() {
   const out = new Map();
   const seenAt = new Map();
-  let names = [];
-  try { names = fs.readdirSync(HEARTBEAT_DIR); } catch (_) { return out; }
-  for (const name of names) {
-    if (!name.startsWith('board-') || !name.endsWith('.json')) continue;
-    try {
-      const rec = JSON.parse(fs.readFileSync(path.join(HEARTBEAT_DIR, name), 'utf8'));
-      const pid = Number(rec && rec.pid);
-      if (!pid || typeof rec.name !== 'string' || !rec.name) continue;
-      if (Date.now() - Number(rec.at) >= HEARTBEAT_FRESH_MS) continue;
-      if (seenAt.has(pid) && seenAt.get(pid) >= Number(rec.at)) continue;
-      seenAt.set(pid, Number(rec.at));
-      out.set(pid, rec.name);
-    } catch (_) { /* skip */ }
+  for (const { rec } of readHeartbeats()) {
+    const pid = Number(rec.pid);
+    if (!pid || typeof rec.name !== 'string' || !rec.name) continue;
+    if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;   // a missing `at` is never fresh
+    if (seenAt.has(pid) && seenAt.get(pid) >= Number(rec.at)) continue;
+    seenAt.set(pid, Number(rec.at));
+    out.set(pid, rec.name);
   }
   return out;
 }
@@ -454,21 +487,16 @@ function installedExtensionIds() {
 
 /** The extension id of the freshest installed board in that window, or null. */
 function boardAlive(exthostPid) {
-  let names = [];
-  try { names = fs.readdirSync(HEARTBEAT_DIR); } catch (_) { return null; }
   const prefix = 'board-' + exthostPid + '-';
   const installed = installedExtensionIds();
   let best = null;
-  for (const name of names) {
-    if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
-    try {
-      const rec = JSON.parse(fs.readFileSync(path.join(HEARTBEAT_DIR, name), 'utf8'));
-      const id = String(rec.id || '');
-      if (!EXTENSION_ID_RE.test(id)) continue;
-      if (Date.now() - Number(rec.at) >= HEARTBEAT_FRESH_MS) continue;
-      if (installed && !installed.has(id.toLowerCase())) continue;
-      if (!best || Number(rec.at) > best.at) best = { id, at: Number(rec.at) };
-    } catch (_) { /* skip */ }
+  for (const { name, rec } of readHeartbeats()) {
+    if (!name.startsWith(prefix)) continue;
+    const id = String(rec.id || '');
+    if (!EXTENSION_ID_RE.test(id)) continue;
+    if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;   // a missing `at` is never fresh
+    if (installed && !installed.has(id.toLowerCase())) continue;
+    if (!best || Number(rec.at) > best.at) best = { id, at: Number(rec.at) };
   }
   return best ? best.id : null;
 }

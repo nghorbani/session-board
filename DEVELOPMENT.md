@@ -85,8 +85,9 @@ Every suite isolates the board's data directory by setting `LOCALAPPDATA` and `X
 before it requires `core.cjs`; `SB_PROJECTS_DIR` and `SB_SESSIONS_DIR` point the data layer at
 fixture folders, `SB_HEARTBEAT_DIR` moves the board heartbeats out of the OS temp dir, and
 `SB_WINDOW_MAP` (`{"<pid>": {"windowId": N, "exthostPid": P}}`) gives rows a window without
-PowerShell or `exthost.log`. Nothing in the suites touches your real sessions or needs Claude
-Code installed.
+PowerShell or `exthost.log`, and `SB_VSCODE_EXTENSIONS_JSON` stands in for the list of extensions
+VS Code has installed. Nothing in the suites touches your real sessions or needs Claude Code
+installed.
 
 - `usage.test.cjs`: the usage and account path of `core.cjs` against `tests/shim/claude-shim.js`,
   which stands in for the CLI. `SB_SHIM_MODE` picks the usage reply (`ok`, `hang`, `garbage`,
@@ -118,6 +119,9 @@ Code installed.
 - `blinded-host.test.cjs`: the `blind` and `unblind` messages, muting of the badge and the
   toast, and `thisWindowId` on the posted snapshot.
 - `server-blind.test.cjs`: `server.cjs` as a child process answering the blind routes.
+- `heartbeats.test.cjs`: the heartbeat readers delete records older than a day and leftover
+  `.tmp` files, keep fresh and merely stale ones, and `boardAlive()` answers against a temp
+  installed-extension list.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -142,7 +146,8 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   opens an editor tab and rewrites `claudeCode.preferredLocation` to `panel`. Other window
   → `code --open-url "vscode://<board id>/open?session=<id>&windowId=<N>"` when that window
   runs the board (heartbeats in `%TEMP%\claude-sessions-board\board-<exthostPid>-<id>.json`,
-  filtered to ids VS Code lists as installed), else Claude Code's own handler, which always
+  filtered to ids VS Code lists as installed; a record older than a day is deleted by the next
+  board that reads it), else Claude Code's own handler, which always
   opens an editor tab. VS Code's `URLHandlerRouter` routes on `windowId=<N>` and the handling
   window force-focuses itself.
 - **End**: registry record `~/.claude/sessions/<pid>.json` must name the session, its status
