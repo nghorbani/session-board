@@ -37,7 +37,7 @@ fs.mkdirSync(projectsDir);
 process.env.SB_SESSIONS_DIR = sessionsDir;
 process.env.SB_PROJECTS_DIR = projectsDir;
 process.env.SB_CODE_USER_DIR = userDir;
-process.env.SB_CLAUDE_ARCHIVE_TTL_MS = '150';
+process.env.SB_CLAUDE_ARCHIVE_TTL_MS = '2000';   // wide enough for a loaded runner between two reads; the TTL case sleeps past it
 process.env.PATH = path.join(__dirname, 'shim') + path.delimiter + process.env.PATH;
 const core = require('../core.cjs');
 
@@ -92,7 +92,7 @@ test('readClaudeArchived: unchanged stat within the TTL is served from cache; a 
   writeDb([C]);
   fs.utimesSync(DB, later, later);
   assert.deepEqual(ids(core.readClaudeArchived()), [B], 'cached again');
-  await sleep(200);                                         // past SB_CLAUDE_ARCHIVE_TTL_MS
+  await sleep(2200);                                        // past SB_CLAUDE_ARCHIVE_TTL_MS
   assert.deepEqual(ids(core.readClaudeArchived()), [C], 'the TTL forces a read');
 });
 
