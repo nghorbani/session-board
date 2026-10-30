@@ -19,12 +19,16 @@ shows background agents only, not the sessions you talk to.
 
 ## What Session Board does
 
-- **Needs you comes first.** Sessions waiting on a permission prompt, a question or a dialog
-  sit at the top, highlighted, with what they are waiting for. Working and idle sessions
-  follow. The activity-bar badge counts the waiting ones and a toast tells you when a new
-  session starts waiting.
-- **Unseen answers stand out.** A session whose answer ended while the board was running sits
-  in its own group until you open it or send it a new prompt.
+- **One section per window.** Sessions are grouped by the VS Code window they run in, the
+  window you are in first, and each heading carries the number of sessions in it that need
+  you. Inside a section the ones waiting on a permission prompt, a question or a dialog come
+  first, highlighted, with what they are waiting for; working and idle sessions follow. The
+  activity-bar badge counts the waiting ones and a toast tells you when a new session starts
+  waiting.
+- **Unseen answers stand out.** A session whose answer ended while the board was running
+  shows as unseen and counts on its heading until you open it or send it a new prompt.
+- **Blind what can wait.** ⊘ moves a session under a folded Blinded section where it counts
+  nowhere else, even while it waits; ⊙ brings it back.
 - **One click to the session.** A row opens its session where you keep Claude Code, sidebar
   or editor tab, and brings the right VS Code window to the front.
 - **Context at a glance.** Each row shows how much of the context window the session has

@@ -5,8 +5,8 @@
  * data layer run inside VS Code via the extension.
  *
  * Every /api route requires the per-run token the server embeds into the page, and a Host
- * of 127.0.0.1:<port> (Origin, when sent, must match too): the end, unarchive, seen and
- * retitle routes change state, the usage and retitle routes start a CLI process, and the
+ * of 127.0.0.1:<port> (Origin, when sent, must match too): the end, unarchive, seen, blind,
+ * unblind and retitle routes change state, the usage and retitle routes start a CLI process, and the
  * search route returns private transcript text.
  */
 
@@ -101,6 +101,18 @@ async function handle(req, res) {
     if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
     try { core.markSeen(sessionId); return sendJson(res, 200, { ok: true }); }
     catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  }
+
+  for (const [prefix, blinded] of [['/api/blind/', true], ['/api/unblind/', false]]) {
+    if (route.startsWith(prefix) && req.method === 'POST') {
+      // âŠ˜ / âŠ™: the shared marker under the data dir; the next poll moves the row.
+      const sessionId = safeDecode(route.slice(prefix.length));
+      if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
+      try {
+        if (blinded) core.blindSession(sessionId); else core.unblindSession(sessionId);
+        return sendJson(res, 200, { ok: true, blinded });
+      } catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+    }
   }
 
   if (route.startsWith('/api/retitle/') && req.method === 'POST') {

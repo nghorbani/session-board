@@ -55,7 +55,7 @@ per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON
 `no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`,
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
-`POST /api/retitle/<id>`.
+`POST /api/retitle/<id>`, `POST /api/blind/<id>`, `POST /api/unblind/<id>`.
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
 it (`-NoInstall` stops after packaging). What to expect from VS Code (seen on 1.138): a first
@@ -83,7 +83,10 @@ node tools/screenshot.cjs       # refresh extension/media/board.png and search.p
 
 Every suite isolates the board's data directory by setting `LOCALAPPDATA` and `XDG_DATA_HOME`
 before it requires `core.cjs`; `SB_PROJECTS_DIR` and `SB_SESSIONS_DIR` point the data layer at
-fixture folders. Nothing in the suites touches your real sessions or needs Claude Code installed.
+fixture folders, `SB_HEARTBEAT_DIR` moves the board heartbeats out of the OS temp dir, and
+`SB_WINDOW_MAP` (`{"<pid>": {"windowId": N, "exthostPid": P}}`) gives rows a window without
+PowerShell or `exthost.log`. Nothing in the suites touches your real sessions or needs Claude
+Code installed.
 
 - `usage.test.cjs`: the usage and account path of `core.cjs` against `tests/shim/claude-shim.js`,
   which stands in for the CLI. `SB_SHIM_MODE` picks the usage reply (`ok`, `hang`, `garbage`,
@@ -110,6 +113,11 @@ fixture folders. Nothing in the suites touches your real sessions or needs Claud
   tool output), the cleaning of the model's reply and `retitleSession()` against the shim.
 - `unseen-host.test.cjs`: opening marks a session seen, the `seen` message, and the
   `retitle` message's replies.
+- `blinded.test.cjs`: the blinded marker store (existence is the flag), pruning by liveness
+  and transcript presence, the `blinded` flag on rows, heartbeat names and the window label.
+- `blinded-host.test.cjs`: the `blind` and `unblind` messages, muting of the badge and the
+  toast, and `thisWindowId` on the posted snapshot.
+- `server-blind.test.cjs`: `server.cjs` as a child process answering the blind routes.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -228,8 +236,25 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   `/api/seen`) writes `seen\<id>.json` with the current time. A row is `unseen` while it is
   idle and its unseen time is newer than its seen time; a session first observed idle is never
   flagged, and a new prompt makes it busy, so the flag only returns with the next answer.
-  Markers older than two weeks are dropped on read. The page keeps those rows in their own
-  group, never folds them, and flips the flag at once on a click.
+  Markers older than two weeks are dropped on read. The page shows those rows with the
+  unseen status inside their window's section, counts them on its badge, and flips the flag
+  at once on a click.
+- **Sections and Blinded**: the page groups live rows with `groupSessions()` (index.html):
+  one section per `window.id` (`Elsewhere` for rows without one), this window first
+  (`thisWindowId`, set by the host from `windowIdForExthost(process.pid)`), then by waiting
+  and unseen rows and label; inside a section waiting, busy, unseen, idle, then age. A
+  section's label is the workspace name the board in that window writes into its heartbeat
+  (`writeHeartbeat(pid, id, vscode.workspace.name)`, read back with `heartbeatNames()`), else
+  the most common folder name of its sessions. ⊘ writes
+  `%LOCALAPPDATA%\SessionBoard\blinded\<id>.json` (`blindSession()`; existence is the flag,
+  the content is never parsed, so a half-written file seen by another window is never
+  deleted); ⊙ unlinks it. `snapshot()` sets `blinded` on every row and drops a marker whose
+  session is neither live nor has a transcript under either root, so a blind lasts as long as
+  a resume is possible. The page keeps blinded rows under the folded Blinded section (waiting
+  or not), holds a ⊘/⊙ click in `state.pendingBlind` until a snapshot agrees (10 s at most),
+  and leaves blinded rows out of the counts line, the title and the browser notification; the
+  host leaves them out of the activity-bar badge and the toast. A typed filter shows every
+  match in place, sections unfolded.
 - **Titles**: ✎ sends `retitle`; `retitleSession()` collects the last six prompts and the
   newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB
   steps until it has them (a long tool run can push the last prompt megabytes back; after

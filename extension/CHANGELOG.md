@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+
+- Live sessions are grouped by VS Code window: one collapsible section per window, named after its workspace (the window's folder, or the name of a multi-root workspace), the window this board runs in first, the rest by activity; sessions started outside VS Code sit under Elsewhere. The Needs you, Working, Unseen and Idle groups are gone; inside a section the rows keep that order, and "Show N idle over 2h" folds per section
+- Every section heading carries a number: the sessions in it that wait for you (amber) or are unseen (green)
+- ⊘ on a row blinds the session: it moves under the folded Blinded section at the bottom and stays there, waiting or not, until ⊙ brings it back. Blinded sessions count on the Blinded heading only; the counts line, the tab title, the activity-bar badge, the toast and the browser notification leave them out. The flag lives in `%LOCALAPPDATA%\SessionBoardlinded\<id>.json`, is shared by every window and the browser page, and goes once the session can no longer be resumed
+- A typed filter shows blinded and archived matches in their window section, every section unfolded
+- A window names its section through the heartbeat its board writes; a window still running an older board keeps the folder name until it reloads
+- Browser page: `POST /api/blind/<id>` and `POST /api/unblind/<id>`
+
 ## 0.8.0
 
 - Sessions archived in Claude Code's own sidebar are put away on the board too. The board reads Claude Code's archive list from VS Code's state database (read-only, through Node's built-in SQLite) and marks those rows "archived in Claude Code"; they return when Claude Code unarchives them, and ⤒ is not offered for them

@@ -89,6 +89,8 @@ class BoardProvider {
         case 'cancelSearch': return this.cancelSearch();
         case 'openPast': if (core.UUID_RE.test(sid)) return await this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
         case 'seen': if (core.UUID_RE.test(sid)) this.markSeen(sid); return;
+        case 'blind': if (core.UUID_RE.test(sid)) return this.setBlinded(sid, true); return;
+        case 'unblind': if (core.UUID_RE.test(sid)) return this.setBlinded(sid, false); return;
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
         case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
         default: return;
@@ -179,10 +181,11 @@ class BoardProvider {
     if (this.inFlight) { this.queued = true; return; }
     this.inFlight = true;
     const mySeq = ++this.seq;
-    core.writeHeartbeat(process.pid, (this.context.extension && this.context.extension.id) || core.EXTENSION_ID);
+    core.writeHeartbeat(process.pid, (this.context.extension && this.context.extension.id) || core.EXTENSION_ID, vscode.workspace.name || null);
     try {
       const snap = await core.snapshot();
       if (mySeq === this.seq) {          // an older result never overwrites a newer one
+        snap.thisWindowId = core.windowIdForExthost(process.pid) || null;   // the page lists this window's section first
         this.last = snap;
         this.noteClaudeArchiveError(snap);
         this.push();
@@ -208,13 +211,13 @@ class BoardProvider {
 
   updateBadge() {
     if (!this.view || !this.last) return;
-    const waiting = this.last.sessions.filter((s) => s.status === 'waiting').length;
+    const waiting = this.last.sessions.filter((s) => s.status === 'waiting' && !s.blinded).length;   // blinded sessions are muted
     this.view.badge = waiting
       ? { value: waiting, tooltip: waiting + ' Claude Code session' + (waiting === 1 ? '' : 's') + ' need input' }
       : undefined;
   }
 
-  /** Toast on a new waiting session; only the focused window speaks, the badge counts everywhere. */
+  /** Toast on a new waiting session; only the focused window speaks, the badge counts everywhere. A blinded session is tracked but never announced, so unblinding it raises no toast either. */
   notifyNewlyWaiting() {
     if (!this.last) return;
     const now = new Set();
@@ -222,7 +225,7 @@ class BoardProvider {
     for (const s of this.last.sessions) {
       if (s.status !== 'waiting') continue;
       now.add(s.sessionId);
-      if (this.primed && !this.prevWaiting.has(s.sessionId)) fresh.push(s);
+      if (this.primed && !this.prevWaiting.has(s.sessionId) && !s.blinded) fresh.push(s);
     }
     this.prevWaiting = now;
     this.primed = true;
@@ -397,6 +400,22 @@ class BoardProvider {
       this.log.error('unarchive ' + sessionId + ' failed: ' + message);
       this.post({ type: 'unarchiveResult', sessionId, ok: false, message });
     }
+    this.schedule(0);
+  }
+
+  /** âŠ˜ and âŠ™ on a row: the shared marker is written or removed, the page hears the outcome, the next snapshot moves the row. */
+  setBlinded(sessionId, blinded) {
+    let ok = true;
+    let message = '';
+    try {
+      if (blinded) core.blindSession(sessionId); else core.unblindSession(sessionId);
+      this.log.info((blinded ? 'blind ' : 'unblind ') + sessionId);
+    } catch (e) {
+      ok = false;
+      message = String((e && e.message) || e);
+      this.log.error((blinded ? 'blind ' : 'unblind ') + sessionId + ' failed: ' + message);
+    }
+    this.post({ type: 'blindResult', sessionId, ok, blinded: ok ? blinded : false, message });
     this.schedule(0);
   }
 

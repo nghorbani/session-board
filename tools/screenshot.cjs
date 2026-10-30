@@ -55,10 +55,11 @@ const sessions = [
   session('a4', 'Refactor CSV importer', 'busy', { contextTokens: 872000, pct: 95, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' } }),
   session('a5', 'Explore vector databases', 'idle', { ageMinutes: 48, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' }, unseen: true }),
   session('a6', 'Spike: streaming parser', 'idle', { ageMinutes: 95, contextTokens: 210000, pct: 23, archived: true }),
+  session('a7', 'Nightly dependency bump', 'idle', { ageMinutes: 140, contextTokens: 76000, pct: 8, cwd: 'C:\code\acme\api', window: { id: 3, label: 'api' }, blinded: true }),
 ];
 
 const snapshot = {
-  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions,
+  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1,
   usage: {
     state: 'ok', at: now - 2 * 60000, ageSeconds: 120, subscriptionType: 'max', available: true,
     windows: {
@@ -133,7 +134,7 @@ module.exports = { browser };   // tests/page.test.cjs reuses the browser discov
 if (require.main === module) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   // Heights fit the fixtures above; adjust when they change (SCREENSHOT_*_HEIGHT override).
-  const heights = { board: Number(process.env.SCREENSHOT_BOARD_HEIGHT) || 1010, search: Number(process.env.SCREENSHOT_SEARCH_HEIGHT) || 870 };
+  const heights = { board: Number(process.env.SCREENSHOT_BOARD_HEIGHT) || 1040, search: Number(process.env.SCREENSHOT_SEARCH_HEIGHT) || 870 };
   render('board', path.join(OUT_DIR, 'board.png'), heights.board);
   render('search', path.join(OUT_DIR, 'search.png'), heights.search);
 }

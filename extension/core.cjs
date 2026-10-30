@@ -355,7 +355,15 @@ async function exthostForPid(pid) {
   return null;
 }
 
+// SB_WINDOW_MAP = {"<pid>": {"windowId": N, "exthostPid": P}} gives a test's rows a window
+// without PowerShell or exthost.log.
+const WINDOW_MAP = (() => { try { return process.env.SB_WINDOW_MAP ? JSON.parse(process.env.SB_WINDOW_MAP) : null; } catch (_) { return null; } })();
+
 async function windowForPid(pid) {
+  if (WINDOW_MAP) {
+    const w = WINDOW_MAP[String(pid)];
+    return w && Number(w.windowId) ? { windowId: Number(w.windowId), exthostPid: Number(w.exthostPid) || 0 } : null;
+  }
   const exthost = await exthostForPid(pid);
   if (!exthost) return null;
   if (!windowByExthost.has(exthost)) refreshWindowLog();
@@ -363,22 +371,68 @@ async function windowForPid(pid) {
   return windowId ? { windowId, exthostPid: exthost } : null;
 }
 
+const WINDOW_LOG_RETRY_MS = 60000;
+let windowLogMissAt = 0;
+
+/**
+ * The window number of an extension host, for the host asking about itself. A pid the log
+ * does not name yet (the line is written a moment after the host starts) is looked up again
+ * at most once a minute, so a host missing from the log does not re-read every window's log
+ * on every poll.
+ */
+function windowIdForExthost(pid) {
+  pid = Number(pid);
+  if (WINDOW_MAP) {
+    for (const k of Object.keys(WINDOW_MAP)) if (Number(WINDOW_MAP[k].exthostPid) === pid) return Number(WINDOW_MAP[k].windowId) || null;
+    return null;
+  }
+  if (!windowByExthost.has(pid) && Date.now() - windowLogMissAt > WINDOW_LOG_RETRY_MS) {
+    windowLogMissAt = Date.now();
+    refreshWindowLog();
+  }
+  return windowByExthost.get(pid) || null;
+}
+
 // ---------------------------------------------------------------------------------------
 // Board heartbeats: which windows run this extension, under which id
 // ---------------------------------------------------------------------------------------
 
-const HEARTBEAT_DIR = path.join(os.tmpdir(), 'claude-sessions-board');
+const HEARTBEAT_DIR = process.env.SB_HEARTBEAT_DIR || path.join(os.tmpdir(), 'claude-sessions-board');   // overridable for the tests
 const HEARTBEAT_FRESH_MS = 45000;
 
-function writeHeartbeat(exthostPid, extensionId) {
+/** One record per host and extension id; `name` is the window's workspace name, so other boards can label its section. */
+function writeHeartbeat(exthostPid, extensionId, name) {
   const id = EXTENSION_ID_RE.test(String(extensionId || '')) ? extensionId : EXTENSION_ID;
   try {
     fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });
     const target = path.join(HEARTBEAT_DIR, 'board-' + exthostPid + '-' + id + '.json');
     const tmp = target + '.tmp.' + process.pid;
-    fs.writeFileSync(tmp, JSON.stringify({ pid: exthostPid, at: Date.now(), id }));
+    const rec = { pid: exthostPid, at: Date.now(), id };
+    if (typeof name === 'string' && name.trim()) rec.name = name.trim().slice(0, 200);
+    fs.writeFileSync(tmp, JSON.stringify(rec));
     fs.renameSync(tmp, target);
   } catch (_) { /* best effort */ }
+}
+
+/** Workspace names of the hosts with a fresh heartbeat, by extension-host pid (the freshest record per pid). */
+function heartbeatNames() {
+  const out = new Map();
+  const seenAt = new Map();
+  let names = [];
+  try { names = fs.readdirSync(HEARTBEAT_DIR); } catch (_) { return out; }
+  for (const name of names) {
+    if (!name.startsWith('board-') || !name.endsWith('.json')) continue;
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(HEARTBEAT_DIR, name), 'utf8'));
+      const pid = Number(rec && rec.pid);
+      if (!pid || typeof rec.name !== 'string' || !rec.name) continue;
+      if (Date.now() - Number(rec.at) >= HEARTBEAT_FRESH_MS) continue;
+      if (seenAt.has(pid) && seenAt.get(pid) >= Number(rec.at)) continue;
+      seenAt.set(pid, Number(rec.at));
+      out.set(pid, rec.name);
+    } catch (_) { /* skip */ }
+  }
+  return out;
 }
 
 let installedCache = { at: 0, ids: null };
@@ -482,10 +536,10 @@ const ARCHIVE_OK = new Set(['ended', 'gone', 'unknown']);   // outcomes that mea
 
 function archiveMarker(sessionId) { return path.join(ARCHIVE_DIR, sessionId + '.json'); }
 
-/** The archived ids: the UUID-named marker files. Existence is the flag; the content is informational. */
-function readArchived() {
+/** The UUID-named .json files of one marker dir as a Set of ids: existence is the flag, the content is not read. */
+function idSet(dir) {
   let names = [];
-  try { names = fs.readdirSync(ARCHIVE_DIR); } catch (_) { return new Set(); }
+  try { names = fs.readdirSync(dir); } catch (_) { return new Set(); }
   const ids = new Set();
   for (const name of names) {
     const id = name.endsWith('.json') ? name.slice(0, -5) : null;
@@ -493,6 +547,9 @@ function readArchived() {
   }
   return ids;
 }
+
+/** The archived ids: the UUID-named marker files. Existence is the flag; the content is informational. */
+function readArchived() { return idSet(ARCHIVE_DIR); }
 
 function archivedIds() { return [...readArchived()]; }
 
@@ -849,6 +906,44 @@ function noteAnswer(sessionId, status, statusUpdatedAt) {
 /** Forget sessions that are no longer listed, so a resumed id starts fresh. */
 function forgetStatuses(liveIds) {
   for (const id of [...observedStatus.keys()]) if (!liveIds.has(id)) observedStatus.delete(id);
+}
+
+// ---------------------------------------------------------------------------------------
+// Blinded sessions: kept under the folded Blinded group until brought back
+// ---------------------------------------------------------------------------------------
+
+/*
+ * ⊘ on a row ──▶ blindSession(id) ──▶ DATA_DIR/blinded/<id>.json. Existence is the flag, as for
+ *                 the archive marker; the content {at} is informational and never parsed, so a
+ *                 half-written file seen by another window still counts and is never deleted
+ *                 as garbage.
+ * ⊙ on a row ──▶ unblindSession(id) ──▶ the marker is unlinked (a missing one is fine).
+ * snapshot() ──▶ readBlinded() ──▶ `blinded` on every live row. A marker whose session is
+ *                 neither live nor has a transcript under either root is unlinked: that session
+ *                 cannot be resumed, so its blind has nothing left to hide. No clock: a blind
+ *                 lasts as long as `claude --resume` can bring the session back.
+ * The page keeps blinded rows under Blinded, waiting or not; the host and the page leave them
+ * out of the activity-bar badge, the title, the counts strip, the toast and the notification.
+ */
+const BLINDED_DIR = path.join(DATA_DIR, 'blinded');
+
+function readBlinded() { return idSet(BLINDED_DIR); }
+
+function blindSession(sessionId) { writeMarker(BLINDED_DIR, sessionId, { at: Date.now() }); }
+
+function unblindSession(sessionId) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
+  try { fs.unlinkSync(path.join(BLINDED_DIR, sessionId + '.json')); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+}
+
+/** Drop the markers of sessions that are neither live nor resumable (no transcript in the index). */
+function pruneBlinded(blinded, liveIds, transcripts) {
+  for (const id of [...blinded]) {
+    if (liveIds.has(id) || transcripts.has(id)) continue;
+    try { fs.unlinkSync(path.join(BLINDED_DIR, id + '.json')); } catch (_) { /* gone already */ }
+    blinded.delete(id);
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1392,8 +1487,11 @@ async function snapshot() {
   const unseen = readUnseen();
   const seen = readSeen();
   const titles = readTitles();
+  const blinded = readBlinded();
   const now = Date.now();
-  forgetStatuses(new Set(rows.map((r) => r.sessionId)));
+  const liveIds = new Set(rows.map((r) => r.sessionId));
+  forgetStatuses(liveIds);
+  pruneBlinded(blinded, liveIds, index);
 
   const windows = new Map();
   for (const r of rows) {
@@ -1411,6 +1509,13 @@ async function snapshot() {
   }
   const windowLabel = new Map();
   for (const [win, votes] of labelVotes) windowLabel.set(win, [...votes.entries()].sort((a, b) => b[1] - a[1])[0][0]);
+  // A board running in that window names it after its workspace; an unsaved multi-root window
+  // reports "Untitled (Workspace)", which says nothing, so the folder vote stays for it.
+  const hostNames = heartbeatNames();
+  const labelOf = (w) => {
+    const name = hostNames.get(w.exthostPid);
+    return name && !/^Untitled\b/.test(name) ? name : (windowLabel.get(w.windowId) || null);
+  };
 
   const sessions = rows.map((r) => {
     const file = index.get(r.sessionId) || null;
@@ -1430,7 +1535,7 @@ async function snapshot() {
     return {
       sessionId: r.sessionId,
       pid: Number(r.pid),
-      window: w ? { id: w.windowId, exthostPid: w.exthostPid, label: windowLabel.get(w.windowId) || null } : null,
+      window: w ? { id: w.windowId, exthostPid: w.exthostPid, label: labelOf(w) } : null,
       name: r.name || String(r.sessionId).slice(0, 8),
       nameSource: t.nameSource || null,
       title: boardTitle || renamed || facts.title,
@@ -1452,6 +1557,7 @@ async function snapshot() {
       needsAttention: r.status === 'waiting',
       ...archiveSource(r.sessionId, archived, claude.ids),
       unseen: r.status === 'idle' && Boolean(u) && (!sn || Number(u.at) > Number(sn.at)),
+      blinded: blinded.has(r.sessionId),
     };
   });
 
@@ -1884,7 +1990,10 @@ module.exports = {
   windowForPid,
   focusSession,
   writeHeartbeat,
+  heartbeatNames,
+  HEARTBEAT_DIR,
   boardAlive,
+  windowIdForExthost,
   pidAlive,
   readRegistry,
   endSession,
@@ -1895,6 +2004,10 @@ module.exports = {
   unarchiveSession,
   readClaudeArchived,
   archiveSource,
+  BLINDED_DIR,
+  readBlinded,
+  blindSession,
+  unblindSession,
   CODE_USER_DIR,
   CLAUDE_CODE_STATE_DB,
   ARCHIVE_TRANSCRIPTS_DIR,

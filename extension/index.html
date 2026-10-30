@@ -104,12 +104,39 @@
     font-size: 11px; text-transform: uppercase; letter-spacing: .9px;
     color: var(--faint); font-weight: 600; margin: 0 0 8px 2px;
   }
-  .group.waiting h2 { color: var(--wait); }
-  .group.unseen h2 { color: var(--ok); }
   .group.results h2 { color: var(--busy); }
 
+  /* one section per VS Code window, plus Blinded; the heading is a button that folds the body */
+  .section { margin-bottom: 18px; }
+  .section-head { margin: 0 0 8px; }
+  .section-head .fold {
+    display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+    background: none; border: none; border-radius: 4px; padding: 2px 2px; margin: 0; color: var(--faint);
+    font-size: 11px; text-transform: uppercase; letter-spacing: .9px; font-weight: 600; cursor: pointer;
+  }
+  .section-head .fold:hover { color: var(--text); border: none; background: var(--panel-2); }
+  .section-head .caret { width: 10px; color: var(--faint); }
+  .section.waiting .section-head .label { color: var(--wait); }
+  .section.unseen .section-head .label { color: var(--ok); }
+  .section-head .n { color: var(--faint); font-weight: 500; letter-spacing: 0; text-transform: none; }
+  .section.folded .section-body { display: none; }
+  .badge {
+    display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 9px; text-align: center;
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0; line-height: 16px; font-variant-numeric: tabular-nums;
+    background: var(--panel-2); color: var(--dim);
+  }
+  .badge.wait { background: color-mix(in srgb, var(--wait) 28%, var(--panel-2)); color: var(--wait); }
+  .badge.unseen { background: color-mix(in srgb, var(--ok) 22%, var(--panel-2)); color: var(--ok); }
+  .chip.here { color: var(--busy); border-color: var(--busy); text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .chip.blinded { color: var(--faint); border-style: dotted; }
+  .subhead {
+    display: flex; align-items: center; gap: 7px; margin: 10px 0 6px 2px;
+    font-size: 11px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: .9px;
+  }
+  .subhead .n { font-weight: 500; letter-spacing: 0; text-transform: none; }
+
   .row {
-    display: grid; grid-template-columns: 1fr 128px 150px 96px;
+    display: grid; grid-template-columns: 1fr 128px 150px 160px;
     gap: 12px; align-items: center; padding: 9px 12px; margin-bottom: 5px;
     background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--idle);
     border-radius: 6px; cursor: pointer;
@@ -148,6 +175,7 @@
   .iconbtn.end:hover { color: var(--crit); }
   .iconbtn.archive:hover, .iconbtn.unarchive:hover { color: var(--busy); }
   .iconbtn.retitle:hover { color: var(--ok); }
+  .iconbtn.blind:hover, .iconbtn.unblind:hover { color: var(--busy); }
   .iconbtn.confirm { color: var(--crit); font-size: 12px; font-weight: 600; background: color-mix(in srgb, var(--crit) 15%, transparent); }
   .status { font-size: 12px; white-space: nowrap; }
   .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--idle); }
@@ -196,10 +224,8 @@
   </div>
 
   <div class="group results" id="g-results" style="display:none"><h2 id="h-results">Search results</h2><div id="l-results"></div></div>
-  <div class="group waiting" id="g-waiting"><h2>Needs you</h2><div id="l-waiting"></div></div>
-  <div class="group" id="g-busy"><h2>Working</h2><div id="l-busy"></div></div>
-  <div class="group unseen" id="g-unseen"><h2>Unseen</h2><div id="l-unseen"></div></div>
-  <div class="group" id="g-idle"><h2>Idle</h2><div id="l-idle"></div></div>
+  <div id="sections"></div>
+  <div id="g-blinded"></div>
   <div class="group" id="g-archived" style="display:none"><h2>Archived</h2><div id="l-archived"></div></div>
 </div>
 
@@ -219,11 +245,14 @@ var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
 var POLL_MS = 4000;
 var IDLE_HIDE_MINUTES = 120;
 var CONFIRM_MS = 3000;
+var BLIND_PENDING_MS = 10000;   // ⊘/⊙ keep the row where it was clicked to until a snapshot agrees, at most this long
 
 var state = {
   data: null,
-  showStale: false,
+  showStale: Object.create(null),           // section key -> true while its "Show N idle over 2h" is open
   showArchived: false,                      // "Show N archived" toggle
+  folded: { blinded: true },                // section key -> true while folded; Blinded starts folded
+  pendingBlind: Object.create(null),        // sessionId -> { blinded, until } from ⊘/⊙ until a snapshot agrees
   filter: '',                               // typed text, re-applied on every render
   search: null,                             // { requestId, query, content, pending, result }
   pendingEnd: Object.create(null),          // sessionId -> { kind: 'confirming'|'pending'|'ended'|'error', archive, pid, until, message }
@@ -433,6 +462,13 @@ function actionsHtml(s, opts) {
       ? '<button class="iconbtn retitle" disabled title="asking for a title…">…</button>'
       : '<button class="iconbtn retitle" data-act="retitle" title="Retitle from the progress so far (one short model call)">✎</button>';
   }
+  if (opts.endable) {
+    var pb = state.pendingBlind[s.sessionId];
+    var dis = pb && pb.until > Date.now() ? ' disabled' : '';
+    html += isBlinded(s)
+      ? '<button class="iconbtn unblind" data-act="unblind"' + dis + ' title="Unblind: show this session in its window section again">⊙</button>'
+      : '<button class="iconbtn blind" data-act="blind"' + dis + ' title="Blind: keep this session under Blinded, out of every count, until you bring it back">⊘</button>';
+  }
   if (boardArchived(s)) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: bring the transcript back and show this session on the board again">⤒</button>';
   if (opts.endable) {
     if (pe && pe.kind === 'pending') html += '<button class="iconbtn end" disabled title="' + (pe.archive ? 'archiving' : 'ending') + '">…</button>';
@@ -485,7 +521,8 @@ function rowHtml(s, limits, opts) {
   if (by === 'claude-code') chips += '<span class="chip archived" title="archived in Claude Code\'s sidebar; unarchive it there">archived in Claude Code</span>';
   else if (by === 'both') chips += '<span class="chip archived" title="archived on the board and in Claude Code\'s sidebar; ⤒ clears the board\'s flag">archived here and in Claude Code</span>';
   else if (by === 'board') chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
-  if (s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';
+  if (opts.past && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
+  if (!opts.past && isBlinded(s) && state.filter) chips += '<span class="chip blinded" title="blinded: shown here because it matches the filter">blinded</span>';
   var sub = chips + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
@@ -498,7 +535,7 @@ function rowHtml(s, limits, opts) {
   }
 
   return '<div class="row ' + cls + '" data-session="' + esc(s.sessionId) + '" data-live="' + (isLive ? '1' : '0') + '" data-archived="' + (s.archived ? '1' : '0') + '" data-board-archived="' + (boardArchived(s) ? '1' : '0') + '"'
-    + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
+    + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-blinded="' + (isBlinded(s) ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
     + ' title="' + esc(s.cwd) + (s.name ? '\n' + esc(s.name) : '') + '\n' + esc(hint) + '">'
     + '<div><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div></div>'
     + '<div class="status"><span class="dot"></span>' + statusText + '</div>'
@@ -688,6 +725,37 @@ function onRetitleResult(r) {
   flash(r.sessionId, 'retitled', 'copied');
 }
 
+/*
+ * ⊘ and ⊙: click ──▶ state.pendingBlind[sid] = { blinded, until: now + 10 s } ──▶ render: the row moves
+ *    under Blinded (or back) at once and both buttons are disabled ──▶ host or POST /api/blind|unblind/<id>
+ *    result ok ──▶ the row keeps its flag; the entry stays until a snapshot agrees or the 10 s pass
+ *    result not ok ──▶ the entry goes, the row returns, the notice line says why
+ */
+function requestBlind(sid, blinded) {
+  var pb = state.pendingBlind[sid];
+  if (pb && pb.until > Date.now()) return;                 // one request at a time; a second click is ignored
+  state.pendingBlind[sid] = { blinded: Boolean(blinded), until: Date.now() + BLIND_PENDING_MS };
+  render();
+  setTimeout(render, BLIND_PENDING_MS + 50);              // the guard's expiry needs a repaint
+  if (vsapi) { send({ type: blinded ? 'blind' : 'unblind', sessionId: sid }); return; }
+  api('POST', '/api/' + (blinded ? 'blind' : 'unblind') + '/' + encodeURIComponent(sid)).then(function (res) {
+    var b = res.body || {};
+    onBlindResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), blinded: Boolean(blinded), message: b.error || b.message || ('http ' + res.status) });
+  }).catch(function () { onBlindResult({ sessionId: sid, ok: false, blinded: Boolean(blinded), message: 'server not reachable' }); });
+}
+
+function onBlindResult(r) {
+  if (!r.ok) {
+    delete state.pendingBlind[r.sessionId];
+    notice((r.blinded ? 'blind' : 'unblind') + ' failed: ' + (r.message || 'unknown'));
+    render();
+    return;
+  }
+  var live = rowById(r.sessionId);
+  if (live) live.blinded = Boolean(r.blinded);             // the next snapshot carries the same flag
+  flash(r.sessionId, r.blinded ? 'blinded' : 'back', 'copied');
+}
+
 function rowById(sid) {
   var all = (state.data && state.data.sessions) || [];
   for (var i = 0; i < all.length; i++) if (all[i].sessionId === sid) return all[i];
@@ -695,6 +763,15 @@ function rowById(sid) {
 }
 
 function onRowClick(ev) {
+  var ctl = ev.target.closest ? ev.target.closest('button[data-act="fold"], button[data-act="stale"]') : null;
+  if (ctl) {                                               // section controls live outside the rows
+    ev.stopPropagation();
+    var key = ctl.getAttribute('data-section');
+    if (ctl.getAttribute('data-act') === 'fold') state.folded[key] = !state.folded[key];
+    else state.showStale[key] = !state.showStale[key];
+    render();
+    return;
+  }
   var el = ev.target.closest ? ev.target.closest('.row[data-session]') : null;
   if (!el) return;
   var sid = el.getAttribute('data-session');
@@ -705,6 +782,7 @@ function onRowClick(ev) {
     if (act === 'copy') { copyBack(el, sid); return; }
     if (act === 'unarchive') { requestUnarchive(sid); return; }
     if (act === 'retitle') { requestRetitle(sid); return; }
+    if (act === 'blind' || act === 'unblind') { requestBlind(sid, act === 'blind'); return; }
     if (act === 'end' || act === 'archive') { startConfirm(sid, act === 'archive'); return; }
     return;
   }
@@ -750,6 +828,100 @@ function matchesFilter(s) {
   return [s.title, s.lastPrompt, s.name, s.cwd, s.sessionId].some(function (v) { return typeof v === 'string' && v.toLowerCase().indexOf(f) !== -1; });
 }
 
+// -- sections ---------------------------------------------------------------------------
+
+function putAway(s) { return Boolean(s.archived) && s.status !== 'waiting'; }   // an archived session is put away until it needs you
+function byAge(a, b) { return (a.ageMinutes == null ? 1e9 : a.ageMinutes) - (b.ageMinutes == null ? 1e9 : b.ageMinutes); }
+function statusRank(s) { return s.status === 'waiting' ? 0 : s.status === 'busy' ? 1 : s.unseen ? 2 : 3; }
+function sectionKey(s) { return s.window ? 'w' + s.window.id : 'none'; }
+function sectionLabel(s) { return s.window ? (s.window.label || ('window ' + s.window.id)) : 'Elsewhere'; }
+function isStale(s) { return statusRank(s) === 3 && !(s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES); }
+/** The row's blind flag as the page shows it: a fresh ⊘/⊙ click wins over the last snapshot. */
+function isBlinded(s) { var p = state.pendingBlind[s.sessionId]; return p && p.until > Date.now() ? p.blinded : Boolean(s.blinded); }
+
+/*
+ * Sections: one per VS Code window, "Elsewhere" for rows without one, Blinded (the same
+ * per-window groups, for blinded rows) and the archived rows that are put away. Precedence
+ * per row: an ended row is dropped, archived-and-not-waiting goes to Archived, blinded goes
+ * under Blinded (waiting or not), the rest to its window. A typed filter shows archived and
+ * blinded matches in place. The badge of a section counts its rows that wait or are unseen.
+ * Order: this window first, then by waiting rows, unseen rows and label; Elsewhere last.
+ */
+function groupSessions(rows, thisWindowId) {
+  var filter = Boolean(state.filter);
+  var byKey = Object.create(null), blindByKey = Object.create(null), archived = [];
+  var add = function (map, s) {
+    var key = sectionKey(s);
+    if (!map[key]) map[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [] };
+    map[key].rows.push(s);
+  };
+  rows.forEach(function (s) {
+    if (!matchesFilter(s)) return;
+    var pe = state.pendingEnd[s.sessionId];
+    if (pe && pe.kind === 'ended') return;
+    if (putAway(s) && !filter) { archived.push(s); return; }
+    if (isBlinded(s) && !filter) { add(blindByKey, s); return; }
+    add(byKey, s);
+  });
+  var finish = function (sec, foldStale) {
+    sec.rows.sort(function (a, b) { return statusRank(a) - statusRank(b) || byAge(a, b); });
+    sec.waiting = sec.rows.filter(function (s) { return s.status === 'waiting'; }).length;
+    sec.unseen = sec.rows.filter(function (s) { return s.status !== 'waiting' && s.status !== 'busy' && s.unseen; }).length;
+    sec.badge = sec.waiting + sec.unseen;
+    sec.stale = foldStale && !filter ? sec.rows.filter(isStale) : [];
+    sec.shown = state.showStale[sec.key] ? sec.rows : sec.rows.filter(function (s) { return sec.stale.indexOf(s) === -1; });
+    return sec;
+  };
+  var sortSections = function (list) {
+    return list.sort(function (a, b) {
+      if (a.thisWindow !== b.thisWindow) return a.thisWindow ? -1 : 1;
+      if ((a.key === 'none') !== (b.key === 'none')) return a.key === 'none' ? 1 : -1;
+      return (b.waiting - a.waiting) || (b.unseen - a.unseen) || a.label.localeCompare(b.label);
+    });
+  };
+  var sections = sortSections(Object.keys(byKey).map(function (k) { return finish(byKey[k], true); }));
+  var groups = sortSections(Object.keys(blindByKey).map(function (k) { return finish(blindByKey[k], false); }));
+  var blinded = { key: 'blinded', groups: groups, rows: [], count: 0, badge: 0, waiting: 0, unseen: 0 };
+  groups.forEach(function (gr) { blinded.count += gr.rows.length; blinded.badge += gr.badge; blinded.waiting += gr.waiting; blinded.unseen += gr.unseen; });
+  archived.sort(byAge);
+  return { sections: sections, blinded: blinded, archived: archived };
+}
+
+function badgeHtml(sec) {
+  if (!sec.badge) return '';
+  var hint = [sec.waiting ? sec.waiting + ' need' + (sec.waiting === 1 ? 's' : '') + ' you' : '', sec.unseen ? sec.unseen + ' unseen' : ''].filter(Boolean).join(', ');
+  return '<span class="badge ' + (sec.waiting ? 'wait' : 'unseen') + '" title="' + esc(hint) + '">' + sec.badge + '</span>';
+}
+
+/** The heading of a section: a button that folds the body, with the label, the badge and the row count. */
+function sectionHead(sec, label, count, thisWindow) {
+  var folded = Boolean(state.folded[sec.key]) && !state.filter;   // a filter shows every match, folded or not
+  return '<h2 class="section-head"><button class="fold" data-act="fold" data-section="' + esc(sec.key) + '" aria-expanded="' + (folded ? 'false' : 'true') + '" title="' + (folded ? 'unfold' : 'fold') + '">'
+    + '<span class="caret">' + (folded ? '▸' : '▾') + '</span><span class="label">' + esc(label) + '</span>'
+    + (thisWindow ? '<span class="chip here" title="the VS Code window this board runs in">this window</span>' : '')
+    + badgeHtml(sec) + '<span class="n">' + count + '</span></button></h2>';
+}
+
+function sectionHtml(sec, limits) {
+  var folded = Boolean(state.folded[sec.key]) && !state.filter;
+  var cls = 'group section' + (folded ? ' folded' : '') + (sec.waiting ? ' waiting' : sec.unseen ? ' unseen' : '') + (sec.thisWindow ? ' here' : '');
+  var body = sec.shown.map(function (s) { return rowHtml(s, limits); }).join('');
+  if (sec.stale.length) body += '<div class="empty"><button data-act="stale" data-section="' + esc(sec.key) + '">' + (state.showStale[sec.key] ? 'Hide' : 'Show') + ' ' + sec.stale.length + ' idle over 2h</button></div>';
+  return '<div class="' + cls + '" data-section="' + esc(sec.key) + '">' + sectionHead(sec, sec.label, sec.rows.length, sec.thisWindow) + '<div class="section-body">' + body + '</div></div>';
+}
+
+/** Blinded: folded by default, its header carries the sum of its groups; unfolded, one sub-heading per window. */
+function blindedHtml(b, limits) {
+  if (!b.count) return '';
+  var folded = Boolean(state.folded.blinded);
+  var cls = 'group section blinded' + (folded ? ' folded' : '') + (b.waiting ? ' waiting' : b.unseen ? ' unseen' : '');
+  var body = b.groups.map(function (gr) {
+    return '<h3 class="subhead"><span class="label">' + esc(gr.label) + '</span>' + badgeHtml(gr) + '<span class="n">' + gr.rows.length + '</span></h3>'
+      + gr.rows.map(function (s) { return rowHtml(s, limits); }).join('');
+  }).join('');
+  return '<div class="' + cls + '" data-section="blinded">' + sectionHead(b, 'Blinded', b.count, false) + '<div class="section-body">' + body + '</div></div>';
+}
+
 function render() {
   var data = state.data;
   var limits = (data && data.limits) || { compact: null, save: null };
@@ -773,23 +945,11 @@ function render() {
     document.getElementById('l-results').innerHTML = html;
   } else gr.style.display = 'none';
 
-  // An archived session is put away until it needs you; a typed filter or the toggle shows it.
-  var putAway = function (s) { return Boolean(s.archived) && s.status !== 'waiting'; };
-  var waiting = [], busy = [], unseen = [], idle = [], archived = [];
-  all.forEach(function (s) {
-    if (!matchesFilter(s)) return;
-    if (state.pendingEnd[s.sessionId] && state.pendingEnd[s.sessionId].kind === 'ended') return;
-    if (putAway(s) && !state.filter) { archived.push(s); return; }
-    if (s.status === 'waiting') waiting.push(s); else if (s.status === 'busy') busy.push(s); else if (s.unseen) unseen.push(s); else idle.push(s);
-  });
-  var byAge = function (a, b) { return (a.ageMinutes == null ? 1e9 : a.ageMinutes) - (b.ageMinutes == null ? 1e9 : b.ageMinutes); };
-  waiting.sort(byAge); busy.sort(byAge); unseen.sort(byAge); idle.sort(byAge); archived.sort(byAge);
-  var freshIdle = idle.filter(function (s) { return s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES; });
-  var staleIdle = idle.filter(function (s) { return !(s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES); });
-  var shownIdle = state.showStale || state.filter ? idle : freshIdle;
-
-  var allWaiting = all.filter(function (s) { return s.status === 'waiting'; });
-  var visible = all.filter(function (s) { return !putAway(s); });
+  // Blinded sessions are muted: they count nowhere but on the Blinded header.
+  var g = groupSessions(all, data ? data.thisWindowId : null);
+  var counted = all.filter(function (s) { return !isBlinded(s); });
+  var allWaiting = counted.filter(function (s) { return s.status === 'waiting'; });
+  var visible = counted.filter(function (s) { return !putAway(s); });
   var isIdle = function (s) { return s.status !== 'waiting' && s.status !== 'busy'; };
   var unseenCount = visible.filter(function (s) { return isIdle(s) && s.unseen; }).length;
   document.getElementById('counts').innerHTML = '<b>' + allWaiting.length + '</b> need you · <b>' + visible.filter(function (s) { return s.status === 'busy'; }).length + '</b> working · '
@@ -802,18 +962,11 @@ function render() {
 
   renderUsage(data ? data.usage : null);
 
-  document.getElementById('l-waiting').innerHTML = waiting.length ? waiting.map(function (s) { return rowHtml(s, limits); }).join('') : '<div class="empty">' + (state.filter ? 'No waiting session matches.' : 'Nothing is waiting on you.') + '</div>';
-  document.getElementById('g-busy').style.display = busy.length ? '' : 'none';
-  document.getElementById('l-busy').innerHTML = busy.map(function (s) { return rowHtml(s, limits); }).join('');
-  document.getElementById('g-unseen').style.display = unseen.length ? '' : 'none';
-  document.getElementById('l-unseen').innerHTML = unseen.map(function (s) { return rowHtml(s, limits); }).join('');
-  var idleHtml = shownIdle.map(function (s) { return rowHtml(s, limits); }).join('');
-  if (staleIdle.length && !state.filter) idleHtml += '<div class="empty"><button id="toggleStale">' + (state.showStale ? 'Hide' : 'Show') + ' ' + staleIdle.length + ' idle over 2h</button></div>';
-  document.getElementById('g-idle').style.display = idle.length ? '' : 'none';
-  document.getElementById('l-idle').innerHTML = idleHtml;
-  var toggle = document.getElementById('toggleStale');
-  if (toggle) toggle.addEventListener('click', function (ev) { ev.stopPropagation(); state.showStale = !state.showStale; render(); });
+  var emptyText = state.filter ? 'No live session matches.' : g.blinded.count ? 'Every live session is under Blinded.' : 'No live sessions.';
+  document.getElementById('sections').innerHTML = g.sections.length ? g.sections.map(function (sec) { return sectionHtml(sec, limits); }).join('') : '<div class="group"><div class="empty">' + emptyText + '</div></div>';
+  document.getElementById('g-blinded').innerHTML = blindedHtml(g.blinded, limits);
 
+  var archived = g.archived;
   var archivedHtml = '';
   if (archived.length) {
     if (state.showArchived) archivedHtml += archived.map(function (s) { return rowHtml(s, limits); }).join('');
@@ -835,13 +988,19 @@ function onSnapshot(data) {
     var row = (data.sessions || []).filter(function (s) { return s.sessionId === sid; })[0];
     if (!row || (pe.pid != null && row.pid !== pe.pid)) delete state.pendingEnd[sid];
   });
+  // a ⊘/⊙ click holds its row in place until a snapshot agrees with it, or the guard expires
+  Object.keys(state.pendingBlind).forEach(function (sid) {
+    var pb = state.pendingBlind[sid];
+    var live = (data.sessions || []).filter(function (s) { return s.sessionId === sid; })[0];
+    if (!live || Boolean(live.blinded) === pb.blinded || pb.until <= Date.now()) delete state.pendingBlind[sid];
+  });
   render();
   notifyNewlyWaiting((data.sessions || []).filter(function (s) { return s.status === 'waiting'; }));
 }
 
 function notifyNewlyWaiting(waiting) {
   var now = Object.create(null), fresh = [];
-  waiting.forEach(function (s) { now[s.sessionId] = true; if (!state.prevWaiting[s.sessionId]) fresh.push(s); });
+  waiting.forEach(function (s) { now[s.sessionId] = true; if (!state.prevWaiting[s.sessionId] && !isBlinded(s)) fresh.push(s); });   // a blinded session is tracked, never announced
   if (!vsapi && !state.firstLoad && fresh.length && window.Notification && Notification.permission === 'granted') {
     fresh.forEach(function (f) {
       try { new Notification((f.title || f.name) + ' needs you', { body: (f.waitingFor || 'waiting') + ' · ' + shortCwd(f.cwd), tag: 'cc-' + f.sessionId }); } catch (e) { /* unavailable */ }
@@ -884,6 +1043,7 @@ if (vsapi) {
     else if (m.type === 'endResult') onEndResult(m);
     else if (m.type === 'unarchiveResult') onUnarchiveResult(m);
     else if (m.type === 'retitleResult') onRetitleResult(m);
+    else if (m.type === 'blindResult') onBlindResult(m);
     else if (m.type === 'searchResult') onSearchResult(m.data);
     else if (m.type === 'openResult') {
       if (m.restoredTo) applyRestore(m.sessionId, m.restoredTo);

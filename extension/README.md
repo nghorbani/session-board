@@ -25,15 +25,27 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 
 ## What you see
 
-- **Needs you** on top with what each session is blocked on (`permission prompt`,
-  `input needed`, `dialog open`), then **Working**, then **Unseen** (the answer ended while
-  the board was running and you have not opened the session since; opening it or sending a
-  new prompt moves it to Idle), then **Idle**; idle rows over 2 h fold behind a toggle.
+- **One section per VS Code window**, named after that window's workspace (its folder, or
+  the name of a multi-root workspace). The window this board runs in comes first, marked
+  "this window"; the others follow by activity, and sessions started outside VS Code sit
+  under **Elsewhere**. Inside a section the rows sort by what they need from you: waiting
+  (`permission prompt`, `input needed`, `dialog open`), then working, then unseen (the
+  answer ended while the board was running and you have not opened the session since;
+  opening it or sending a new prompt clears it), then idle. Idle rows over 2 h fold behind a
+  toggle per section, and a click on the heading folds the whole section.
+- **The number on a heading** counts the sessions in that section that wait for you (amber)
+  or are unseen (green). It goes down as you answer or open them.
 - Each row: the session's name (`/rename` wins over the generated title; a session with
-  neither shows its last prompt), the VS Code window it lives in, its folder, status, a
-  context bar, and time in that state. Hover for the folder and the internal agent name.
-- The badge on the activity-bar icon is the number of sessions waiting on you. When a
-  session newly starts waiting, the focused window shows a toast with an Open button.
+  neither shows its last prompt), its folder, status, a context bar, and time in that state.
+  Hover for the folder and the internal agent name.
+- **Blinded**: ⊘ on a row puts the session under the folded **Blinded** section at the
+  bottom, grouped by window, where it stays, waiting or not, until ⊙ brings it back. Blinded
+  sessions count on the Blinded heading only: not in the counts line, the title, the
+  activity-bar badge or the toast. The flag is shared by every window and the browser page,
+  survives restarts, and lasts as long as the session can still be resumed.
+- The badge on the activity-bar icon is the number of sessions waiting on you, blinded ones
+  excepted. When a session newly starts waiting, the focused window shows a toast with an
+  Open button.
 
 ## Actions
 
@@ -45,6 +57,8 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   prompts and the last answer (a few KB of the transcript, passed through your own `claude`
   command the way a prompt would be), hook-free and without tools. The title is the board's
   own; Claude Code's files are not written, and a later `/rename` wins again.
+- **⊘ blinds the session** and **⊙** brings it back (see Blinded above). No confirmation;
+  the row moves at once.
 - **✕ ends the session** and everything it started (its subagents and tool processes).
   Click once, then click `End?` within 3 s. Busy or waiting sessions ask once more; in-flight
   work is lost. The transcript stays and Claude Code's picker still offers "Resume session".
@@ -95,7 +109,10 @@ logged in", and a Claude Code release without that command shows no account.
 ## Limits
 
 - Sessions started outside the VS Code extension (a terminal, a background agent) have no
-  window; click copies the resume command.
+  window and sit under Elsewhere; click copies the resume command.
+- A window still running an older Session Board names its section after the most common
+  folder of its sessions until that window reloads; its own badge and toast also still count
+  blinded sessions until then.
 - The window mapping reads the newest VS Code log run, so a second VS Code instance
   (Insiders, portable) is outside it.
 - Each window polls independently (5 s while the view is visible, 15 s hidden).

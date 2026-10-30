@@ -1,12 +1,13 @@
 'use strict';
 /*
- * The page's archive flow, driven in a headless Chromium over the DevTools protocol against
- * an in-test HTTP server that serves index.html and plays scripted /api answers. Skipped
- * with a reason when no Chromium is found (tools/screenshot.cjs knows the usual paths).
+ * The page's archive, section and Blinded flows, driven in a headless Chromium over the
+ * DevTools protocol against an in-test HTTP server that serves index.html and plays scripted
+ * /api answers. Skipped with a reason when no Chromium is found (tools/screenshot.cjs knows
+ * the usual paths).
  *
  *   node:test ──▶ fake API (http) ◀── index.html in headless Chrome ◀── CDP over Node's WebSocket
- *                   scripted /api/sessions, /api/end, /api/unarchive, /api/search, /api/focus
- *                   every call except the poll is recorded for the assertions
+ *                   scripted /api/sessions, /api/end, /api/unarchive, /api/blind, /api/unblind,
+ *                   /api/search, /api/focus; every call except the poll is recorded for the assertions
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -32,13 +33,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function row(sessionId, title, status, extra) {
   return Object.assign({ sessionId, title, status, waitingFor: status === 'waiting' ? 'permission prompt' : null, name: null, lastPrompt: null, cwd: 'C:\\code\\x', window: { id: 1, label: 'x' }, ageMinutes: 1, contextTokens: 1000, pct: 1, transcriptPath: null, kind: 'interactive', pid: 100, archived: false }, extra);
 }
-function snapshotOf(sessions) {
-  return { at: Date.now(), stale: false, error: null, limits: { compact: 100000, save: 90000 }, platform: 'win32', sessions, usage: { state: 'ok', at: Date.now(), ageSeconds: 0, subscriptionType: 'x', windows: { five_hour: { label: '5h', usedPct: 1, resetsAt: null, expired: false } }, account: { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'x' }, accountError: null } };
+function snapshotOf(sessions, extra) {
+  return Object.assign({ at: Date.now(), stale: false, error: null, limits: { compact: 100000, save: 90000 }, platform: 'win32', sessions, usage: { state: 'ok', at: Date.now(), ageSeconds: 0, subscriptionType: 'x', windows: { five_hour: { label: '5h', usedPct: 1, resetsAt: null, expired: false } }, account: { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'x' }, accountError: null } }, extra || {});
 }
 
 // -- fake API ----------------------------------------------------------------------------
 
-const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), search: { rows: [] }, calls: [] };
+const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), blind: () => ({ status: 200, body: { ok: true, blinded: true } }), unblind: () => ({ status: 200, body: { ok: true, blinded: false } }), search: { rows: [] }, calls: [] };
 let PORT = 0;
 function json(res, code, body) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function serve(req, res) {
@@ -58,6 +59,8 @@ function serve(req, res) {
   fake.calls.push({ method: req.method, path: u.pathname, query: u.search });
   if (u.pathname.startsWith('/api/end/')) { const r = fake.end(u.pathname.slice('/api/end/'.length), u.searchParams); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unarchive/')) { const r = fake.unarchive(u.pathname.slice('/api/unarchive/'.length)); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
+  if (u.pathname.startsWith('/api/blind/')) { const r = fake.blind(u.pathname.slice('/api/blind/'.length)); return json(res, r.status, r.body); }
+  if (u.pathname.startsWith('/api/unblind/')) { const r = fake.unblind(u.pathname.slice('/api/unblind/'.length)); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/retitle/')) { const r = fake.retitle(u.pathname.slice('/api/retitle/'.length)); return json(res, r.status, r.body); }
@@ -112,7 +115,15 @@ const SAMPLE = `(function () {
   var ids = function (sel) { return q(sel + ' .row[data-session]').map(function (r) { return r.getAttribute('data-session'); }); };
   var text = function (sel) { var e = document.querySelector(sel); return e ? e.textContent : null; };
   return {
-    waiting: ids('#l-waiting'), busy: ids('#l-busy'), unseen: ids('#l-unseen'), idle: ids('#l-idle'), archivedList: ids('#l-archived'), results: ids('#l-results'),
+    rows: ids('#sections'), archivedList: ids('#l-archived'), results: ids('#l-results'),
+    sections: q('#sections .section').map(function (sec) { var h = sec.querySelector('.fold'); var b = sec.querySelector('.section-head .badge'); var t = sec.querySelector('button[data-act="stale"]'); return { key: sec.getAttribute('data-section'), label: h.querySelector('.label').textContent, here: !!h.querySelector('.chip.here'), expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, rows: ids('#sections .section[data-section="' + sec.getAttribute('data-section') + '"]'), stale: t ? t.textContent : null }; }),
+    blinded: (function () { var sec = document.querySelector('#g-blinded .section'); if (!sec) return null; var h = sec.querySelector('.fold'); var b = sec.querySelector('.section-head .badge'); return { expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, waitingHead: sec.classList.contains('waiting'), groups: q('#g-blinded .subhead').map(function (sh) { var gb = sh.querySelector('.badge'); return { label: sh.querySelector('.label').textContent, badge: gb ? gb.textContent : null, n: sh.querySelector('.n').textContent }; }), rows: ids('#g-blinded') }; })(),
+    title: document.title,
+    blindBusy: q('.iconbtn.blind:disabled, .iconbtn.unblind:disabled').length,
+    unblindOn: q('.row[data-session]').filter(function (r) { return r.querySelector('.iconbtn.unblind'); }).map(function (r) { return r.getAttribute('data-session'); }),
+    blindedChips: q('.row .chip.blinded').length,
+    actionsOverflow: q('.row .actions').filter(function (a) { return a.scrollWidth > a.clientWidth; }).length,
+    notes: window.__notes || null,
     titles: q('.row[data-session]').map(function (r) { var t = r.querySelector('.title'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
     statusWords: q('.row[data-session]').map(function (r) { var t = r.querySelector('.status span:last-child'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
     retitleBusy: q('.iconbtn.retitle:disabled').length,
@@ -146,6 +157,8 @@ async function openPage() {
     sample: () => ev(SAMPLE),
     click: (sel) => ev('(function () { var e = document.querySelector(' + JSON.stringify(sel) + '); if (!e) throw new Error("no element " + ' + JSON.stringify(sel) + '); e.click(); return true; })()'),
     search: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); q.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); return true; })()'),
+    type: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); return true; })()'),
+    eval: (expr) => ev(expr),
     until: async (pred, what) => {
       const start = Date.now();
       let s = null;
@@ -166,12 +179,12 @@ test('page: ⤓ asks Archive?, posts archive=1, and the row leaves', opts, async
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Busy one', 'busy', { pid: 200 })]);
   fake.end = () => ({ status: 200, body: { ok: true, code: 'ended', archived: true } });
   const page = await openPage();
-  await page.until((s) => s.idle.includes(A) && s.busy.includes(B), 'both rows');
+  await page.until((s) => s.rows.includes(A) && s.rows.includes(B), 'both rows');
   await page.click(rowSel(A) + ' .iconbtn.archive');
   let s = await page.sample();
   assert.equal(s.confirmText, 'Archive?');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
-  s = await page.until((x) => !x.idle.includes(A), 'the archived row to leave');
+  s = await page.until((x) => !x.rows.includes(A), 'the archived row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['?archive=1']);
   assert.deepEqual(s.pendingEnd[A], { kind: 'ended', pid: 100 });
   assert.equal(s.counts, '0 need you · 1 working · 1 idle');
@@ -187,10 +200,10 @@ test('page: needs-force asks once more and retries with force and archive', opts
   let n = 0;
   fake.end = () => (++n === 1 ? { status: 409, body: { ok: false, code: 'needs-force', status: 'busy' } } : { status: 200, body: { ok: true, code: 'ended', archived: true } });
   const page = await openPage();
-  await page.until((s) => s.busy.includes(B), 'the busy row');
+  await page.until((s) => s.rows.includes(B), 'the busy row');
   await page.click(rowSel(B) + ' .iconbtn.archive');
   await page.click(rowSel(B) + ' .iconbtn.confirm');
-  await page.until((s) => !s.busy.includes(B), 'the row to leave after the retry');
+  await page.until((s) => !s.rows.includes(B), 'the row to leave after the retry');
   assert.deepEqual(endCalls(B).map((c) => c.query), ['?archive=1', '?force=1&archive=1']);
   await page.close();
 });
@@ -200,14 +213,14 @@ test('page: a resumed archived session comes back only when it waits; busy stays
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
   fake.end = () => ({ status: 200, body: { ok: true, code: 'ended', archived: true } });
   const page = await openPage();
-  await page.until((s) => s.idle.includes(A), 'the idle row');
+  await page.until((s) => s.rows.includes(A), 'the idle row');
   await page.click(rowSel(A) + ' .iconbtn.archive');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   await page.until((s) => s.pendingEnd[A] && s.pendingEnd[A].kind === 'ended', 'the ended marker');
 
   // the same id resumes with a new pid before any snapshot dropped it: waiting shows up
   fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { pid: 101, archived: true })]);
-  let s = await page.until((x) => x.waiting.includes(A), 'the resumed waiting row');
+  let s = await page.until((x) => x.rows.includes(A) && x.statusWords.includes(A + '=permission prompt'), 'the resumed waiting row');
   assert.equal(s.pendingEnd[A], undefined, 'the ended marker cleared on the pid change');
   assert.ok(s.chips >= 1, 'the archived chip shows');
   assert.equal(s.counts, '1 need you · 0 working · 0 idle');
@@ -215,13 +228,13 @@ test('page: a resumed archived session comes back only when it waits; busy stays
   // busy again: put away, listed under the toggle
   fake.snapshot = snapshotOf([row(A, 'Spike', 'busy', { pid: 101, archived: true })]);
   s = await page.until((x) => x.toggleArchived === 'Show 1 archived', 'the archived toggle');
-  assert.ok(!s.busy.includes(A), 'busy archived row is hidden');
+  assert.ok(!s.rows.includes(A), 'busy archived row is hidden');
   assert.equal(s.counts, '0 need you · 0 working · 0 idle');
   await page.click('#toggleArchived');
   s = await page.until((x) => x.archivedList.includes(A), 'the revealed archived row');
   assert.ok(s.dimmed >= 1, 'the revealed row is dimmed');
   await page.click(rowSel(A) + ' .iconbtn.unarchive');
-  s = await page.until((x) => x.busy.includes(A), 'the row back in Working after ⤒');
+  s = await page.until((x) => x.rows.includes(A), 'the row back in its section after ⤒');
   assert.deepEqual(fake.calls.filter((c) => c.path.startsWith('/api/unarchive/')).map((c) => c.path), ['/api/unarchive/' + A]);
   assert.equal(s.toggleArchived, null);
   await page.close();
@@ -289,7 +302,7 @@ test('page: a failed marker write shows ended, not archived on the row', opts, a
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
   fake.end = () => ({ status: 200, body: { ok: true, code: 'ended', archived: false, archiveError: 'EACCES' } });
   const page = await openPage();
-  await page.until((s) => s.idle.includes(A), 'the idle row');
+  await page.until((s) => s.rows.includes(A), 'the idle row');
   await page.click(rowSel(A) + ' .iconbtn.archive');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   const s = await page.until((x) => x.errorText !== null, 'the error text');
@@ -302,12 +315,12 @@ test('page: ✕ is unchanged and posts without archive', opts, async () => {
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
   fake.end = () => ({ status: 200, body: { ok: true, code: 'ended' } });
   const page = await openPage();
-  await page.until((s) => s.idle.includes(A), 'the idle row');
+  await page.until((s) => s.rows.includes(A), 'the idle row');
   await page.click(rowSel(A) + ' .iconbtn.end');
   let s = await page.sample();
   assert.equal(s.confirmText, 'End?');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
-  s = await page.until((x) => !x.idle.includes(A), 'the ended row to leave');
+  s = await page.until((x) => !x.rows.includes(A), 'the ended row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['']);
   await page.close();
 });
@@ -330,19 +343,21 @@ test('page: the usage strip names the signed-in account, org and plan on hover',
   await page.close();
 });
 
-test('page: an unseen answer sits in its own group with the unseen status, and opening it moves it to Idle', opts, async () => {
+test('page: an unseen answer shows the unseen status and counts on its section badge; opening it clears both', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { unseen: true }), row(B, 'Old', 'idle')]);
   const page = await openPage();
-  let s = await page.until((x) => x.unseen.includes(A) && x.idle.includes(B), 'the unseen row');
+  let s = await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
   assert.equal(s.counts, '0 need you · 0 working · 1 unseen · 1 idle');
   assert.ok(s.statusWords.includes(A + '=unseen'), JSON.stringify(s.statusWords));
   assert.ok(s.statusWords.includes(B + '=idle'));
+  assert.deepEqual([s.sections[0].badge, s.sections[0].tone, s.sections[0].rows], ['1', 'unseen', [A, B]], 'the unseen row sorts first and counts on the badge');
   await page.click(rowSel(A));
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Old', 'idle')]);
-  s = await page.until((x) => x.idle.includes(A) && x.unseen.length === 0 && fake.calls.some((c) => c.path === '/api/focus/' + A), 'the row in Idle after the click, and the open at the server');
+  s = await page.until((x) => x.statusWords.includes(A + '=idle') && fake.calls.some((c) => c.path === '/api/focus/' + A), 'the row idle after the click, and the open at the server');
   assert.ok(fake.calls.some((c) => c.method === 'POST' && c.path === '/api/focus/' + A), 'the open went to the server');
   assert.equal(s.counts, '0 need you · 0 working · 2 idle');
+  assert.equal(s.sections[0].badge, null, 'the badge is gone');
   await page.close();
 });
 
@@ -350,7 +365,7 @@ test('page: a click on an unseen row without a window copies the command and sti
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { unseen: true, window: null })]);
   const page = await openPage();
-  await page.until((x) => x.unseen.includes(A), 'the unseen row');
+  await page.until((x) => x.rows.includes(A), 'the unseen row');
   await page.click(rowSel(A));
   await page.until((x) => fake.calls.some((c) => c.path === '/api/seen/' + A), 'the seen call');
   const s = await page.sample();
@@ -362,7 +377,7 @@ test('page: ✎ asks for a new title and shows it when it arrives', opts, async 
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
   const page = await openPage();
-  await page.until((x) => x.idle.includes(A), 'the row');
+  await page.until((x) => x.rows.includes(A), 'the row');
   await page.click(rowSel(A) + ' .iconbtn.retitle');
   let s = await page.until((x) => x.titles.includes(A + '=Renamed by model'), 'the new title');
   assert.ok(fake.calls.some((c) => c.method === 'POST' && c.path === '/api/retitle/' + A));
@@ -413,11 +428,151 @@ test('page: an archive whose move failed shows the notice after the row has left
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
   fake.end = () => { fake.snapshot = snapshotOf([]); return { status: 200, body: { ok: true, code: 'ended', archived: true, moved: false, moveError: 'running again under pid 5' } }; };
   const page = await openPage();
-  await page.until((x) => x.idle.includes(A), 'the idle row');
+  await page.until((x) => x.rows.includes(A), 'the idle row');
   await page.click(rowSel(A) + ' .iconbtn.archive');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
-  const s = await page.until((x) => x.notice !== null && !x.idle.includes(A), 'the notice with the row gone');
+  const s = await page.until((x) => x.notice !== null && !x.rows.includes(A), 'the notice with the row gone');
   assert.equal(s.notice, 'archived; transcript not moved: running again under pid 5');
   fake.end = () => ({ status: 200, body: { ok: true, code: 'ended' } });
+  await page.close();
+});
+
+// -- sections, Blinded, badges and muting ---------------------------------------------------
+
+const C = 'dddddddd-4444-4444-8444-444444444444';
+const D = 'eeeeeeee-5555-4555-8555-555555555555';
+const E = 'ffffffff-6666-4666-8666-666666666666';
+const win = (id, label) => ({ window: { id, label } });
+const blindCalls = () => fake.calls.filter((c) => /^\/api\/(un)?blind\//.test(c.path)).map((c) => c.path);
+
+test('page: one section per window, this window first, then by activity, Elsewhere last; the badge counts waiting and unseen', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([
+    row(A, 'Alpha idle', 'idle', win(1, 'alpha')),
+    row(B, 'Beta unseen', 'idle', Object.assign({ unseen: true }, win(2, 'beta'))),
+    row(C, 'Gamma waits', 'waiting', win(3, 'gamma')),
+    row(E, 'Gamma old idle', 'idle', Object.assign({ ageMinutes: 30 }, win(3, 'gamma'))),
+    row(D, 'Nowhere', 'idle', { window: null }),
+  ], { thisWindowId: 2 });
+  const page = await openPage();
+  const s = await page.until((x) => x.sections.length === 4, 'four sections');
+  assert.deepEqual(s.sections.map((sec) => sec.key), ['w2', 'w3', 'w1', 'none']);
+  assert.deepEqual(s.sections.map((sec) => sec.label), ['beta', 'gamma', 'alpha', 'Elsewhere']);
+  assert.deepEqual(s.sections.map((sec) => sec.here), [true, false, false, false]);
+  assert.deepEqual(s.sections.map((sec) => [sec.badge, sec.tone]), [['1', 'unseen'], ['1', 'wait'], [null, null], [null, null]]);
+  assert.deepEqual(s.sections[1].rows, [C, E], 'waiting before idle inside a section');
+  assert.deepEqual(s.sections.map((sec) => sec.expanded), ['true', 'true', 'true', 'true']);
+  assert.equal(s.blinded, null, 'no Blinded section without blinded rows');
+  assert.equal(s.counts, '1 need you · 0 working · 1 unseen · 3 idle');
+  assert.equal(s.title, '(1) Sessions');
+  assert.equal(s.actionsOverflow, 0, 'five icons and the age fit the actions cell');
+  await page.close();
+});
+
+test('page: ⊘ moves the row under folded Blinded at once and posts /api/blind; the header unfolds it; ⊙ brings it back', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
+  const page = await openPage();
+  await page.until((x) => x.rows.includes(A), 'the row');
+  await page.click(rowSel(A) + ' .iconbtn.blind');
+  let s = await page.until((x) => x.blinded !== null, 'the Blinded section');
+  assert.deepEqual([s.rows, s.blinded.folded, s.blinded.expanded, s.blinded.badge, s.blinded.rows], [[B], true, 'false', null, [A]], 'moved at once, folded, no badge for an idle row');
+  assert.equal(s.blindBusy, 1, 'both buttons wait for the reply');
+  await page.until(() => blindCalls().length === 1, 'the POST');
+  assert.deepEqual(blindCalls(), ['/api/blind/' + A]);
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
+  s = await page.until((x) => x.blindBusy === 0, 'the snapshot agrees and the buttons are free');
+  assert.deepEqual(s.blinded.rows, [A]);
+  await page.click('#g-blinded .fold');
+  s = await page.until((x) => x.blinded && !x.blinded.folded, 'unfolded');
+  assert.deepEqual([s.blinded.expanded, s.blinded.groups, s.unblindOn], ['true', [{ label: 'x', badge: null, n: '1' }], [A]]);
+  await page.click(rowSel(A) + ' .iconbtn.unblind');
+  s = await page.until((x) => x.rows.includes(A), 'the row back in its section at once');
+  assert.equal(s.blinded, null);
+  await page.until(() => blindCalls().length === 2, 'the second POST');
+  assert.deepEqual(blindCalls(), ['/api/blind/' + A, '/api/unblind/' + A]);
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
+  await page.until((x) => x.blindBusy === 0 && x.rows.includes(A), 'settled');
+  await page.close();
+});
+
+test('page: a failed /api/blind drops the pending state, the row returns and the notice says why', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
+  fake.blind = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
+  const page = await openPage();
+  await page.until((x) => x.rows.includes(A), 'the row');
+  await page.click(rowSel(A) + ' .iconbtn.blind');
+  const s = await page.until((x) => x.notice !== null && x.rows.includes(A), 'the row back with the notice');
+  assert.equal(s.notice, 'blind failed: EACCES: permission denied');
+  assert.deepEqual([s.blinded, s.blindBusy], [null, 0]);
+  fake.blind = () => ({ status: 200, body: { ok: true, blinded: true } });
+  await page.close();
+});
+
+test('page: a waiting blinded row stays under Blinded and turns its header amber; an archived blinded row stays under Archived', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { blinded: true }), row(B, 'Old', 'idle', { pid: 200, blinded: true, archived: true, archivedBy: 'board' }), row(C, 'Plain', 'idle', { pid: 300 })]);
+  const page = await openPage();
+  const s = await page.until((x) => x.blinded !== null && x.toggleArchived !== null, 'Blinded and the archived toggle');
+  assert.deepEqual([s.blinded.rows, s.blinded.badge, s.blinded.tone, s.blinded.waitingHead, s.blinded.folded], [[A], '1', 'wait', true, true]);
+  assert.equal(s.toggleArchived, 'Show 1 archived', 'archived wins over blinded');
+  assert.deepEqual(s.rows, [C]);
+  assert.equal(s.counts, '0 need you · 0 working · 1 idle', 'the waiting blinded row counts nowhere');
+  assert.equal(s.title, 'Sessions');
+  await page.close();
+});
+
+test('page: muted: no Notification for a blinded row that starts waiting, none when it is unblinded, one for a new waiting row', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
+  const page = await openPage();
+  await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
+  await page.eval('window.__notes = []; window.Notification = function (t) { window.__notes.push(t); }; window.Notification.permission = "granted"; true');
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
+  let s = await page.until((x) => x.blinded !== null, 'the blinded waiting row');
+  await sleep(600);                                          // two more polls
+  s = await page.sample();
+  assert.deepEqual(s.notes, [], 'blinded: silent');
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting'), row(B, 'Other', 'idle', { pid: 200 })]);
+  s = await page.until((x) => x.rows.includes(A), 'unblinded');
+  await sleep(600);
+  s = await page.sample();
+  assert.deepEqual(s.notes, [], 'unblinded while waiting: still silent');
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting'), row(B, 'Other', 'waiting', { pid: 200 })]);
+  s = await page.until((x) => x.notes && x.notes.length === 1, 'one Notification for the new waiting row');
+  assert.deepEqual(s.notes, ['Other needs you']);
+  await page.close();
+});
+
+test('page: a typed filter shows a blinded row in its section with a chip and unfolds a folded section for the match', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike blinded', 'idle', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
+  const page = await openPage();
+  let s = await page.until((x) => x.blinded !== null && x.rows.includes(B), 'Blinded and the section');
+  await page.click('#sections .section[data-section="w1"] .fold');
+  s = await page.until((x) => x.sections[0].folded, 'the section folded');
+  assert.equal(s.sections[0].expanded, 'false');
+  await page.type('blinded');
+  s = await page.until((x) => x.rows.includes(A), 'the blinded match in its section');
+  assert.deepEqual([s.sections[0].folded, s.sections[0].expanded, s.blindedChips, s.blinded, s.rows], [false, 'true', 1, null, [A]]);
+  await page.type('');
+  s = await page.until((x) => x.blinded !== null, 'Blinded again');
+  assert.deepEqual([s.sections[0].folded, s.rows], [true, [B]], 'the fold state survived the filter');
+  await page.close();
+});
+
+test('page: stale idle rows fold per section behind their own button, and a header folds its section', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Fresh', 'idle', win(1, 'alpha')), row(B, 'Old', 'idle', Object.assign({ pid: 200, ageMinutes: 300 }, win(1, 'alpha'))), row(C, 'Older', 'idle', Object.assign({ pid: 300, ageMinutes: 400 }, win(2, 'beta')))]);
+  const page = await openPage();
+  let s = await page.until((x) => x.sections.length === 2, 'two sections');
+  assert.deepEqual(s.sections.map((sec) => [sec.rows, sec.stale]), [[[A], 'Show 1 idle over 2h'], [[], 'Show 1 idle over 2h']]);
+  await page.click('#sections .section[data-section="w1"] button[data-act="stale"]');
+  s = await page.until((x) => x.sections[0].rows.length === 2, 'the stale row shown');
+  assert.deepEqual(s.sections.map((sec) => [sec.rows, sec.stale]), [[[A, B], 'Hide 1 idle over 2h'], [[], 'Show 1 idle over 2h']], 'the other section keeps its own toggle');
+  await page.click('#sections .section[data-section="w1"] .fold');
+  s = await page.until((x) => x.sections[0].folded, 'folded');
+  assert.deepEqual([s.sections[0].expanded, s.sections[1].folded], ['false', false]);
   await page.close();
 });
