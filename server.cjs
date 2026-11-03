@@ -115,6 +115,25 @@ async function handle(req, res) {
     }
   }
 
+  if (route === '/api/order' && req.method === 'POST') {
+    // A move on the page: the group's complete order, ids comma-joined in the query (this file
+    // parses no bodies). 8000 characters is about 216 ids, the cap the page mirrors; core caps
+    // the list at 500 for the host transport.
+    const raw = parsed.searchParams.get('ids') || '';
+    if (raw.length > 8000) return sendJson(res, 400, { ok: false, error: 'too many ids' });
+    const ids = raw.split(',').filter(Boolean).map(safeDecode);
+    if (!ids.length || ids.some((id) => !id || !core.UUID_RE.test(id))) return sendJson(res, 400, { ok: false, error: 'not a session id' });
+    try { return sendJson(res, 200, { ok: true, count: core.setOrder(ids) }); }
+    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  }
+
+  if (route === '/api/order/mode' && req.method === 'POST') {
+    const mode = parsed.searchParams.get('mode') || '';
+    if (mode !== 'activity' && mode !== 'manual') return sendJson(res, 400, { ok: false, error: 'mode must be activity or manual' });
+    try { core.setSortMode(mode); return sendJson(res, 200, { ok: true, mode }); }
+    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  }
+
   if (route.startsWith('/api/retitle/') && req.method === 'POST') {
     // One short model call over the transcript; the reply is stored as the board's title.
     const sessionId = safeDecode(route.slice('/api/retitle/'.length));

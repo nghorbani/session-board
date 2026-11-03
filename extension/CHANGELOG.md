@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0
+
+- Blinded is per window section: ⊘ keeps the session in its own section, under a folded Blinded group at the bottom of that section, where it stays, waiting or not, until ⊙ brings it back. The group carries its own number (amber when one of its sessions waits); the global Blinded section at the bottom of the board is gone
+- A switch in the header picks the order inside the sections: by activity (waiting, working, unseen, idle, then age, as before) or manual. In manual mode every live row gets a ⋮⋮ handle: drag it onto another row of the same section, or focus a row and press Alt+Up or Alt+Down. Waiting and unseen rows keep their colour and their count but stay where you put them; a session you have not placed yet sits on top. The order and the switch are shared by every window and the browser page and survive restarts
+- Browser page: `POST /api/order?ids=<comma-joined ids>` and `POST /api/order/mode?mode=activity|manual`
+- A window still running 0.9.x keeps the old Blinded section and the activity order until it reloads
+
 ## 0.9.1
 
 - The board deletes heartbeat records older than a day from `%TEMP%\claude-sessions-board` while it reads them. Before, one record per window start stayed behind for good and every poll in every window parsed all of them (213 files on one machine after five weeks). A record over 45 s old was and is ignored; it now also goes after a day, as does a `.tmp` file a dying writer left behind

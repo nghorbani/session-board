@@ -40,6 +40,8 @@ function snapshotOf(sessions, extra) {
 // -- fake API ----------------------------------------------------------------------------
 
 const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), blind: () => ({ status: 200, body: { ok: true, blinded: true } }), unblind: () => ({ status: 200, body: { ok: true, blinded: false } }), search: { rows: [] }, calls: [] };
+fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
+fake.mode = (m) => ({ status: 200, body: { ok: true, mode: m } });
 let PORT = 0;
 function json(res, code, body) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function serve(req, res) {
@@ -61,6 +63,8 @@ function serve(req, res) {
   if (u.pathname.startsWith('/api/unarchive/')) { const r = fake.unarchive(u.pathname.slice('/api/unarchive/'.length)); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/blind/')) { const r = fake.blind(u.pathname.slice('/api/blind/'.length)); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unblind/')) { const r = fake.unblind(u.pathname.slice('/api/unblind/'.length)); return json(res, r.status, r.body); }
+  if (u.pathname === '/api/order') { const r = fake.order(u.searchParams.get('ids') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
+  if (u.pathname === '/api/order/mode') { const r = fake.mode(u.searchParams.get('mode') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/retitle/')) { const r = fake.retitle(u.pathname.slice('/api/retitle/'.length)); return json(res, r.status, r.body); }
@@ -115,10 +119,13 @@ const SAMPLE = `(function () {
   var ids = function (sel) { return q(sel + ' .row[data-session]').map(function (r) { return r.getAttribute('data-session'); }); };
   var text = function (sel) { var e = document.querySelector(sel); return e ? e.textContent : null; };
   return {
-    rows: ids('#sections'), archivedList: ids('#l-archived'), results: ids('#l-results'),
-    sections: q('#sections .section').map(function (sec) { var h = sec.querySelector('.fold'); var b = sec.querySelector('.section-head .badge'); var t = sec.querySelector('button[data-act="stale"]'); return { key: sec.getAttribute('data-section'), label: h.querySelector('.label').textContent, here: !!h.querySelector('.chip.here'), expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, rows: ids('#sections .section[data-section="' + sec.getAttribute('data-section') + '"]'), stale: t ? t.textContent : null }; }),
-    blinded: (function () { var sec = document.querySelector('#g-blinded .section'); if (!sec) return null; var h = sec.querySelector('.fold'); var b = sec.querySelector('.section-head .badge'); return { expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, waitingHead: sec.classList.contains('waiting'), groups: q('#g-blinded .subhead').map(function (sh) { var gb = sh.querySelector('.badge'); return { label: sh.querySelector('.label').textContent, badge: gb ? gb.textContent : null, n: sh.querySelector('.n').textContent }; }), rows: ids('#g-blinded') }; })(),
+    rows: q('#sections .row[data-session]').filter(function (r) { return !r.closest('.section.blinded'); }).map(function (r) { return r.getAttribute('data-session'); }), archivedList: ids('#l-archived'), results: ids('#l-results'),
+    sections: q('#sections > .section').map(function (sec) { var rowsOf = function (el) { return Array.prototype.slice.call(el.querySelectorAll(':scope > .section-body > .row[data-session]')).map(function (r) { return r.getAttribute('data-session'); }); }; var h = sec.querySelector(':scope > .section-head .fold'); var b = h.querySelector('.badge'); var t = sec.querySelector(':scope > .section-body > .empty > button[data-act="stale"]'); var g = sec.querySelector(':scope > .section-body > .section.blinded'); var gh = g ? g.querySelector('.fold') : null; var gb = gh ? gh.querySelector('.badge') : null; return { key: sec.getAttribute('data-section'), label: h.querySelector('.label').textContent, here: !!h.querySelector('.chip.here'), expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, n: h.querySelector('.n').textContent, rows: rowsOf(sec), stale: t ? t.textContent : null, blinded: g ? { key: g.getAttribute('data-section'), expanded: gh.getAttribute('aria-expanded'), folded: g.classList.contains('folded'), badge: gb ? gb.textContent : null, tone: gb ? (gb.classList.contains('wait') ? 'wait' : 'unseen') : null, waitingHead: g.classList.contains('waiting'), n: gh.querySelector('.n').textContent, rows: rowsOf(g) } : null }; }),
     title: document.title,
+    mode: (function () { var b = document.querySelector('#sortMode button[aria-pressed="true"]'); return b && document.getElementById('sortMode').style.display !== 'none' ? b.getAttribute('data-mode') : null; })(),
+    handles: q('.row .handle').length,
+    focused: document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-session') : null,
+    dropMarks: q('.row.drop-before, .row.drop-after').length,
     blindBusy: q('.iconbtn.blind:disabled, .iconbtn.unblind:disabled').length,
     unblindOn: q('.row[data-session]').filter(function (r) { return r.querySelector('.iconbtn.unblind'); }).map(function (r) { return r.getAttribute('data-session'); }),
     blindedChips: q('.row .chip.blinded').length,
@@ -159,6 +166,16 @@ async function openPage() {
     search: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); q.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); return true; })()'),
     type: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); return true; })()'),
     eval: (expr) => ev(expr),
+    key: (sid, k) => ev('(function () { var r = document.querySelector(' + JSON.stringify(rowSel(sid)) + '); if (!r) throw new Error("no row"); r.focus(); r.dispatchEvent(new KeyboardEvent("keydown", { key: ' + JSON.stringify(k) + ', altKey: true, bubbles: true, cancelable: true })); return true; })()'),
+    drag: (sid, target, before) => ev('(function () { var h = document.querySelector(' + JSON.stringify(rowSel(sid) + ' .handle') + '); if (!h) return { error: "no handle" };'
+      + ' var t = document.querySelector(' + JSON.stringify(rowSel(target)) + '); if (!t) return { error: "no target" };'
+      + ' var dt = new DataTransfer(); h.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));'
+      + ' var rect = t.getBoundingClientRect(); var y = ' + (before ? 'rect.top + 1' : 'rect.bottom - 1') + ';'
+      + ' var over = new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }); t.dispatchEvent(over); var allowed = over.defaultPrevented;'
+      + ' var marks = document.querySelectorAll(".row.drop-before, .row.drop-after").length;'
+      + ' t.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));'
+      + ' h.dispatchEvent(new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer: dt }));'
+      + ' return { allowed: allowed, marks: marks }; })()'),
     until: async (pred, what) => {
       const start = Date.now();
       let s = null;
@@ -462,33 +479,35 @@ test('page: one section per window, this window first, then by activity, Elsewhe
   assert.deepEqual(s.sections.map((sec) => [sec.badge, sec.tone]), [['1', 'unseen'], ['1', 'wait'], [null, null], [null, null]]);
   assert.deepEqual(s.sections[1].rows, [C, E], 'waiting before idle inside a section');
   assert.deepEqual(s.sections.map((sec) => sec.expanded), ['true', 'true', 'true', 'true']);
-  assert.equal(s.blinded, null, 'no Blinded section without blinded rows');
+  assert.deepEqual(s.sections.map((sec) => sec.blinded), [null, null, null, null], 'no Blinded group without blinded rows');
   assert.equal(s.counts, '1 need you · 0 working · 1 unseen · 3 idle');
   assert.equal(s.title, '(1) Sessions');
   assert.equal(s.actionsOverflow, 0, 'five icons and the age fit the actions cell');
   await page.close();
 });
 
-test('page: ⊘ moves the row under folded Blinded at once and posts /api/blind; the header unfolds it; ⊙ brings it back', opts, async () => {
+test('page: ⊘ moves the row under the folded Blinded group of its own section at once and posts /api/blind; the group head unfolds it; ⊙ brings it back', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
   const page = await openPage();
   await page.until((x) => x.rows.includes(A), 'the row');
   await page.click(rowSel(A) + ' .iconbtn.blind');
-  let s = await page.until((x) => x.blinded !== null, 'the Blinded section');
-  assert.deepEqual([s.rows, s.blinded.folded, s.blinded.expanded, s.blinded.badge, s.blinded.rows], [[B], true, 'false', null, [A]], 'moved at once, folded, no badge for an idle row');
+  let s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null, 'the Blinded group');
+  const g = s.sections[0].blinded;
+  assert.deepEqual([s.rows, g.key, g.folded, g.expanded, g.badge, g.n, g.rows], [[B], 'w1:blinded', true, 'false', null, '1', [A]], 'moved at once, folded, no badge for an idle row');
+  assert.equal(s.sections[0].n, '1', 'the section head counts its own rows only');
   assert.equal(s.blindBusy, 1, 'both buttons wait for the reply');
   await page.until(() => blindCalls().length === 1, 'the POST');
   assert.deepEqual(blindCalls(), ['/api/blind/' + A]);
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
   s = await page.until((x) => x.blindBusy === 0, 'the snapshot agrees and the buttons are free');
-  assert.deepEqual(s.blinded.rows, [A]);
-  await page.click('#g-blinded .fold');
-  s = await page.until((x) => x.blinded && !x.blinded.folded, 'unfolded');
-  assert.deepEqual([s.blinded.expanded, s.blinded.groups, s.unblindOn], ['true', [{ label: 'x', badge: null, n: '1' }], [A]]);
+  assert.deepEqual(s.sections[0].blinded.rows, [A]);
+  await page.click('#sections .section.blinded .fold');
+  s = await page.until((x) => x.sections[0].blinded && !x.sections[0].blinded.folded, 'unfolded');
+  assert.deepEqual([s.sections[0].blinded.expanded, s.unblindOn], ['true', [A]]);
   await page.click(rowSel(A) + ' .iconbtn.unblind');
   s = await page.until((x) => x.rows.includes(A), 'the row back in its section at once');
-  assert.equal(s.blinded, null);
+  assert.equal(s.sections[0].blinded, null);
   await page.until(() => blindCalls().length === 2, 'the second POST');
   assert.deepEqual(blindCalls(), ['/api/blind/' + A, '/api/unblind/' + A]);
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
@@ -505,17 +524,19 @@ test('page: a failed /api/blind drops the pending state, the row returns and the
   await page.click(rowSel(A) + ' .iconbtn.blind');
   const s = await page.until((x) => x.notice !== null && x.rows.includes(A), 'the row back with the notice');
   assert.equal(s.notice, 'blind failed: EACCES: permission denied');
-  assert.deepEqual([s.blinded, s.blindBusy], [null, 0]);
+  assert.deepEqual([s.sections[0].blinded, s.blindBusy], [null, 0]);
   fake.blind = () => ({ status: 200, body: { ok: true, blinded: true } });
   await page.close();
 });
 
-test('page: a waiting blinded row stays under Blinded and turns its header amber; an archived blinded row stays under Archived', opts, async () => {
+test('page: a waiting blinded row stays under its section Blinded group and turns the group head amber, not the section badge; an archived blinded row stays under Archived', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { blinded: true }), row(B, 'Old', 'idle', { pid: 200, blinded: true, archived: true, archivedBy: 'board' }), row(C, 'Plain', 'idle', { pid: 300 })]);
   const page = await openPage();
-  const s = await page.until((x) => x.blinded !== null && x.toggleArchived !== null, 'Blinded and the archived toggle');
-  assert.deepEqual([s.blinded.rows, s.blinded.badge, s.blinded.tone, s.blinded.waitingHead, s.blinded.folded], [[A], '1', 'wait', true, true]);
+  const s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null && x.toggleArchived !== null, 'the Blinded group and the archived toggle');
+  const g = s.sections[0].blinded;
+  assert.deepEqual([g.rows, g.badge, g.tone, g.waitingHead, g.folded], [[A], '1', 'wait', true, true]);
+  assert.deepEqual([s.sections[0].badge, s.sections[0].tone], [null, null], 'the section badge leaves the blinded row out');
   assert.equal(s.toggleArchived, 'Show 1 archived', 'archived wins over blinded');
   assert.deepEqual(s.rows, [C]);
   assert.equal(s.counts, '0 need you · 0 working · 1 idle', 'the waiting blinded row counts nowhere');
@@ -530,7 +551,7 @@ test('page: muted: no Notification for a blinded row that starts waiting, none w
   await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
   await page.eval('window.__notes = []; window.Notification = function (t) { window.__notes.push(t); }; window.Notification.permission = "granted"; true');
   fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
-  let s = await page.until((x) => x.blinded !== null, 'the blinded waiting row');
+  let s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null, 'the blinded waiting row');
   await sleep(600);                                          // two more polls
   s = await page.sample();
   assert.deepEqual(s.notes, [], 'blinded: silent');
@@ -549,15 +570,15 @@ test('page: a typed filter shows a blinded row in its section with a chip and un
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike blinded', 'idle', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
   const page = await openPage();
-  let s = await page.until((x) => x.blinded !== null && x.rows.includes(B), 'Blinded and the section');
-  await page.click('#sections .section[data-section="w1"] .fold');
+  let s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null && x.rows.includes(B), 'the Blinded group and the section');
+  await page.click('#sections > .section[data-section="w1"] > .section-head .fold');
   s = await page.until((x) => x.sections[0].folded, 'the section folded');
   assert.equal(s.sections[0].expanded, 'false');
   await page.type('blinded');
   s = await page.until((x) => x.rows.includes(A), 'the blinded match in its section');
-  assert.deepEqual([s.sections[0].folded, s.sections[0].expanded, s.blindedChips, s.blinded, s.rows], [false, 'true', 1, null, [A]]);
+  assert.deepEqual([s.sections[0].folded, s.sections[0].expanded, s.blindedChips, s.sections[0].blinded, s.rows], [false, 'true', 1, null, [A]]);
   await page.type('');
-  s = await page.until((x) => x.blinded !== null, 'Blinded again');
+  s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null, 'the Blinded group again');
   assert.deepEqual([s.sections[0].folded, s.rows], [true, [B]], 'the fold state survived the filter');
   await page.close();
 });
@@ -571,8 +592,205 @@ test('page: stale idle rows fold per section behind their own button, and a head
   await page.click('#sections .section[data-section="w1"] button[data-act="stale"]');
   s = await page.until((x) => x.sections[0].rows.length === 2, 'the stale row shown');
   assert.deepEqual(s.sections.map((sec) => [sec.rows, sec.stale]), [[[A, B], 'Hide 1 idle over 2h'], [[], 'Show 1 idle over 2h']], 'the other section keeps its own toggle');
-  await page.click('#sections .section[data-section="w1"] .fold');
+  await page.click('#sections > .section[data-section="w1"] > .section-head .fold');
   s = await page.until((x) => x.sections[0].folded, 'folded');
   assert.deepEqual([s.sections[0].expanded, s.sections[1].folded], ['false', false]);
+  await page.close();
+});
+
+// -- manual order -------------------------------------------------------------------------
+
+const orderCalls = () => fake.calls.filter((c) => c.path === '/api/order').map((c) => decodeURIComponent(c.query.slice('?ids='.length)).split(','));
+const modeCalls = () => fake.calls.filter((c) => c.path === '/api/order/mode').map((c) => c.query);
+const manualRows = () => [
+  row(A, 'Alpha ranked idle', 'idle', { rank: 2, ageMinutes: 10 }),
+  row(B, 'Beta ranked waits', 'waiting', { pid: 200, rank: 0, ageMinutes: 20 }),
+  row(C, 'Gamma new idle', 'idle', { pid: 300, ageMinutes: 5 }),
+  row(D, 'Delta new busy', 'busy', { pid: 400, ageMinutes: 1 }),
+  row(E, 'Eps blinded', 'idle', { pid: 500, rank: 1, blinded: true, ageMinutes: 3 }),
+  row(P, 'Pi blinded', 'idle', { pid: 600, rank: 0, blinded: true, ageMinutes: 9 }),
+];
+
+test('page: the header switch posts /api/order/mode, the rows follow the pending mode at once, and the snapshot confirms it', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.mode === 'activity', 'the switch');
+  assert.deepEqual([s.sections[0].rows, s.sections[0].blinded.rows, s.handles], [[B, D, C, A], [E, P], 0], 'by activity: waiting, busy, idle by age; no handles');
+  await page.click('#sortMode button[data-mode="manual"]');
+  s = await page.until((x) => x.mode === 'manual', 'manual at once');
+  assert.deepEqual([s.sections[0].rows, s.sections[0].blinded.rows, s.handles], [[D, C, B, A], [P, E], 6], 'manual: unranked on top newest first, then by rank, the waiting row stays put; a handle per live row');
+  await page.until(() => modeCalls().length === 1, 'the POST');
+  assert.deepEqual(modeCalls(), ['?mode=manual']);
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  await sleep(600);
+  s = await page.sample();
+  assert.deepEqual([s.mode, s.sections[0].rows], ['manual', [D, C, B, A]], 'the snapshot agrees');
+  await page.click('#sortMode button[data-mode="activity"]');
+  s = await page.until((x) => x.mode === 'activity', 'back to activity at once');
+  assert.deepEqual([s.sections[0].rows, s.handles], [[B, D, C, A], 0]);
+  await page.until(() => modeCalls().length === 2, 'the second POST');
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
+  await page.until((x) => x.mode === 'activity', 'settled');
+  await page.close();
+});
+
+test('page: a failed /api/order/mode drops the pending mode, the order returns and the notice says why; an old server without order hides the switch', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
+  fake.mode = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
+  const page = await openPage();
+  await page.until((x) => x.mode === 'activity', 'the switch');
+  await page.click('#sortMode button[data-mode="manual"]');
+  let s = await page.until((x) => x.notice !== null, 'the notice');
+  assert.equal(s.notice, 'order mode failed: EACCES: permission denied');
+  assert.deepEqual([s.mode, s.sections[0].rows, s.handles], ['activity', [B, D, C, A], 0]);
+  fake.mode = (m) => ({ status: 200, body: { ok: true, mode: m } });
+  const old = snapshotOf(manualRows());
+  delete old.order;
+  fake.snapshot = old;
+  s = await page.until((x) => x.mode === null, 'no switch without an order field');
+  assert.deepEqual(s.sections[0].rows, [B, D, C, A], 'activity order without the field');
+  await page.close();
+});
+
+const F = '99999999-7777-4777-8777-777777777777';
+const secOf = (s, key) => s.sections.find((sec) => sec.key === key);
+
+test('page: Alt+Down on a focused row posts /api/order with the complete list of its group, the row moves at once and keeps focus; Alt+Up at the top is a no-op', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]), { order: { mode: 'manual' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 4, 'manual rows');
+  assert.deepEqual([s.sections[0].rows, s.sections[0].stale], [[D, C, B, A], 'Show 1 idle over 2h']);
+  await page.key(C, 'ArrowDown');
+  s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
+  assert.deepEqual([s.sections[0].rows, s.focused], [[D, B, C, A], C], 'the row moved and kept the focus');
+  await page.until(() => orderCalls().length === 1, 'the POST');
+  assert.deepEqual(orderCalls(), [[D, B, C, A, F]], 'the whole group: the shown rows in their new order, then the folded stale row');
+  await page.key(D, 'ArrowUp');
+  await sleep(300);
+  s = await page.sample();
+  assert.deepEqual([s.sections[0].rows, orderCalls().length], [[D, B, C, A], 1], 'the top row and Alt+Up: nothing happens');
+  fake.snapshot = snapshotOf([
+    row(D, 'Delta new busy', 'busy', { pid: 400, rank: 0, ageMinutes: 1 }), row(B, 'Beta ranked waits', 'waiting', { pid: 200, rank: 1, ageMinutes: 20 }),
+    row(C, 'Gamma new idle', 'idle', { pid: 300, rank: 2, ageMinutes: 5 }), row(A, 'Alpha ranked idle', 'idle', { rank: 3, ageMinutes: 10 }),
+    row(F, 'Phi old idle', 'idle', { pid: 700, rank: 4, ageMinutes: 300 }),
+  ], { order: { mode: 'manual' } });
+  await sleep(600);
+  s = await page.sample();
+  assert.deepEqual(s.sections[0].rows, [D, B, C, A], 'the snapshot agrees');
+  await page.close();
+});
+
+test('page: a drag by the handle moves the row inside its group and posts the order; a drop on another group is refused', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.mode === 'manual' && x.handles === 6, 'manual with handles');
+  let r = await page.drag(A, D, true);
+  assert.deepEqual([r.allowed, r.marks], [true, 1], 'the drop was allowed and the target marked');
+  s = await page.until((x) => x.sections[0].rows[0] === A, 'moved at once');
+  assert.deepEqual([s.sections[0].rows, s.dropMarks], [[A, D, C, B], 0]);
+  await page.until(() => orderCalls().length === 1, 'the POST');
+  assert.deepEqual(orderCalls(), [[A, D, C, B]]);
+  r = await page.drag(B, P, false);
+  assert.deepEqual([r.allowed, r.marks], [false, 0], 'a section row onto the Blinded group: refused');
+  await sleep(300);
+  s = await page.sample();
+  assert.deepEqual([s.sections[0].rows, s.sections[0].blinded.rows, orderCalls().length], [[A, D, C, B], [P, E], 1]);
+  await page.close();
+});
+
+test('page: a Blinded group reorders on its own list', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.mode === 'manual' && x.sections[0].blinded !== null, 'the group');
+  await page.click('#sections .section.blinded .fold');
+  s = await page.until((x) => x.sections[0].blinded && !x.sections[0].blinded.folded, 'unfolded');
+  assert.deepEqual(s.sections[0].blinded.rows, [P, E]);
+  await page.key(E, 'ArrowUp');
+  s = await page.until((x) => x.sections[0].blinded.rows[0] === E, 'moved at once');
+  assert.deepEqual([s.sections[0].blinded.rows, s.sections[0].rows, s.focused], [[E, P], [D, C, B, A], E]);
+  await page.until(() => orderCalls().length === 1, 'the POST');
+  assert.deepEqual(orderCalls(), [[E, P]]);
+  await page.close();
+});
+
+test('page: a failed /api/order drops the pending order, the row returns and the notice says why', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  fake.order = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
+  const page = await openPage();
+  await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 4, 'manual rows');
+  await page.key(C, 'ArrowDown');
+  const s = await page.until((x) => x.notice !== null, 'the notice');
+  assert.equal(s.notice, 'reorder failed: EACCES: permission denied');
+  assert.deepEqual(s.sections[0].rows, [D, C, B, A], 'the row returned');
+  fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
+  await page.close();
+});
+
+test('page: a stale snapshot that lands before the /api/order reply does not snap the row back', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 }, delayMs: 900 });
+  const page = await openPage();
+  await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 4, 'manual rows');
+  await page.key(C, 'ArrowDown');
+  let s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
+  await sleep(700);                                          // two or three polls with the old ranks, the reply still pending
+  s = await page.sample();
+  assert.deepEqual(s.sections[0].rows, [D, B, C, A], 'the pending order holds under the stale polls');
+  await page.until(() => orderCalls().length === 1, 'the POST');
+  await sleep(400);
+  s = await page.sample();
+  assert.deepEqual(s.sections[0].rows, [D, B, C, A], 'and after the reply');
+  fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
+  await page.close();
+});
+
+test('page: two moves in two groups inside the guard both hold', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([
+    row(A, 'A first', 'idle', { rank: 0, ageMinutes: 2 }), row(B, 'B second', 'idle', { pid: 200, rank: 1, ageMinutes: 3 }),
+    row(C, 'C first', 'idle', Object.assign({ pid: 300, rank: 0, ageMinutes: 2 }, win(2, 'beta'))), row(D, 'D second', 'idle', Object.assign({ pid: 400, rank: 1, ageMinutes: 3 }, win(2, 'beta'))),
+  ], { order: { mode: 'manual' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.mode === 'manual' && x.sections.length === 2, 'two sections');
+  await page.key(B, 'ArrowUp');
+  s = await page.until((x) => secOf(x, 'w1').rows[0] === B, 'the first move');
+  await page.key(D, 'ArrowUp');
+  s = await page.until((x) => secOf(x, 'w2').rows[0] === D, 'the second move');
+  await sleep(600);                                          // polls with the old ranks keep coming
+  s = await page.sample();
+  assert.deepEqual([secOf(s, 'w1').rows, secOf(s, 'w2').rows], [[B, A], [D, C]], 'both groups hold their new order');
+  await page.until(() => orderCalls().length === 2, 'both POSTs');
+  assert.deepEqual(orderCalls(), [[B, A], [D, C]]);
+  await page.close();
+});
+
+test('page: in activity mode there are no handles and Alt+arrows do nothing; with a filter typed, moving is disabled', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.mode === 'activity', 'activity');
+  await page.key(C, 'ArrowDown');
+  await sleep(300);
+  s = await page.sample();
+  assert.deepEqual([s.sections[0].rows, s.handles, orderCalls().length], [[B, D, C, A], 0, 0], 'inert in activity mode');
+  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  s = await page.until((x) => x.mode === 'manual', 'manual from the snapshot');
+  await page.type('ranked');
+  s = await page.until((x) => x.sections[0].rows.length === 2, 'the filter');
+  assert.deepEqual([s.sections[0].rows, s.handles], [[B, A], 0], 'a filter: no handles');
+  await page.key(B, 'ArrowDown');
+  await sleep(300);
+  assert.equal(orderCalls().length, 0, 'a filter: the keys do nothing');
+  await page.type('');
+  s = await page.until((x) => x.sections[0].rows.length === 4 && x.handles === 6, 'the filter cleared');
+  await page.key(C, 'ArrowDown');
+  await page.until(() => orderCalls().length === 1, 'moving works again');
   await page.close();
 });

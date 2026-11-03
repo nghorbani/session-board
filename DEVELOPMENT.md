@@ -55,7 +55,8 @@ per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON
 `no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`,
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
-`POST /api/retitle/<id>`, `POST /api/blind/<id>`, `POST /api/unblind/<id>`.
+`POST /api/retitle/<id>`, `POST /api/blind/<id>`, `POST /api/unblind/<id>`,
+`POST /api/order?ids=<comma-joined ids>`, `POST /api/order/mode?mode=activity|manual`.
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
 it (`-NoInstall` stops after packaging). What to expect from VS Code (seen on 1.138): a first
@@ -122,6 +123,11 @@ installed.
 - `heartbeats.test.cjs`: the heartbeat readers delete records older than a day and leftover
   `.tmp` files, keep fresh and merely stale ones, and `boardAlive()` answers against a temp
   installed-extension list.
+- `order.test.cjs`: the order store (`setOrder()` checks the whole list before the first
+  write, `readOrder()`), the sort-mode file, pruning shared with the blinded store, and
+  `rank` and `order.mode` on the snapshot.
+- `order-host.test.cjs`: the `order` and `sortMode` messages and their replies.
+- `server-order.test.cjs`: `server.cjs` as a child process answering the order routes.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -247,19 +253,37 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
 - **Sections and Blinded**: the page groups live rows with `groupSessions()` (index.html):
   one section per `window.id` (`Elsewhere` for rows without one), this window first
   (`thisWindowId`, set by the host from `windowIdForExthost(process.pid)`), then by waiting
-  and unseen rows and label; inside a section waiting, busy, unseen, idle, then age. A
-  section's label is the workspace name the board in that window writes into its heartbeat
-  (`writeHeartbeat(pid, id, vscode.workspace.name)`, read back with `heartbeatNames()`), else
-  the most common folder name of its sessions. ⊘ writes
+  and unseen rows and label. A section's label is the workspace name the board in that
+  window writes into its heartbeat (`writeHeartbeat(pid, id, vscode.workspace.name)`, read
+  back with `heartbeatNames()`), else the most common folder name of its sessions. ⊘ writes
   `%LOCALAPPDATA%\SessionBoard\blinded\<id>.json` (`blindSession()`; existence is the flag,
   the content is never parsed, so a half-written file seen by another window is never
   deleted); ⊙ unlinks it. `snapshot()` sets `blinded` on every row and drops a marker whose
-  session is neither live nor has a transcript under either root, so a blind lasts as long as
-  a resume is possible. The page keeps blinded rows under the folded Blinded section (waiting
-  or not), holds a ⊘/⊙ click in `state.pendingBlind` until a snapshot agrees (10 s at most),
-  and leaves blinded rows out of the counts line, the title and the browser notification; the
-  host leaves them out of the activity-bar badge and the toast. A typed filter shows every
-  match in place, sections unfolded.
+  session is neither live nor has a transcript under either root (`pruneDead()`), so a blind
+  lasts as long as a resume is possible. The page keeps a blinded row under the folded Blinded
+  group of its own section (key `w<id>:blinded`, rendered by `blindedGroupHtml()`, folded by
+  default through `isFolded()`), waiting or not, with that group's own badge; it holds a ⊘/⊙
+  click in `state.pendingBlind` until a snapshot agrees (10 s at most), and leaves blinded rows
+  out of the section badge, the counts line, the title and the browser notification; the host
+  leaves them out of the activity-bar badge and the toast. A typed filter shows every match in
+  place, sections unfolded.
+- **Manual order**: the header switch (`#sortMode`, `applyMode()`) writes
+  `%LOCALAPPDATA%\SessionBoard\sort.json` through `setSortMode()` (tmp then rename); `snapshot()`
+  reads it back as `order.mode`. In manual mode `rowOrder()` sorts a section and its Blinded
+  group by `rank` (a row without one sits on top, newest first); by activity it is waiting,
+  busy, unseen, idle, then age. A move (the ⋮⋮ handle, HTML5 drag and drop on the handle
+  only, or Alt+Up/Down on the focused row) ends in `applyOrder(key, ids)`: the whole group's
+  ids (the shown rows in their new order, then the folded stale rows), held in
+  `state.pendingOrder[key]` until a snapshot agrees or 10 s pass, sent as `order` to the host
+  or `POST /api/order?ids=` (comma-joined, 8000 characters at most; core caps the list at
+  500). `setOrder()` checks every id before the first write, then writes
+  `order\<id>.json` = `{ rank: index, at }`; ids outside the list keep their ranks, and a marker is
+  pruned like a blind marker. Ranks are global by id and read inside whichever section the
+  row is in, so a session resumed in another window lands somewhere plausible there until its
+  next move; two windows reordering one group at once settle on the last write. A typed
+  filter disables moving, and so does the activity mode. The per-file read runs once per
+  snapshot like the other stores; revisit it when `order\` holds about 1000 files (a 90-day
+  expiry through `readMarkers()` is the cheap mitigation).
 - **Titles**: ✎ sends `retitle`; `retitleSession()` collects the last six prompts and the
   newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB
   steps until it has them (a long tool run can push the last prompt megabytes back; after

@@ -965,14 +965,71 @@ function unblindSession(sessionId) {
   try { fs.unlinkSync(path.join(BLINDED_DIR, sessionId + '.json')); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
 }
 
-/** Drop the markers of sessions that are neither live nor resumable (no transcript in the index). */
-function pruneBlinded(blinded, liveIds, transcripts) {
-  for (const id of [...blinded]) {
+/**
+ * Drop the markers in `dir` whose sessions are neither live nor resumable (no transcript in
+ * the index); `coll` is the Set or Map of their ids and loses them too. Shared by the blinded
+ * and the order stores.
+ */
+function pruneDead(dir, coll, liveIds, transcripts) {
+  for (const id of [...coll.keys()]) {
     if (liveIds.has(id) || transcripts.has(id)) continue;
-    try { fs.unlinkSync(path.join(BLINDED_DIR, id + '.json')); } catch (_) { /* gone already */ }
-    blinded.delete(id);
+    try { fs.unlinkSync(path.join(dir, id + '.json')); } catch (_) { /* gone already */ }
+    coll.delete(id);
   }
 }
+
+// ---------------------------------------------------------------------------------------
+// Manual order: a rank per session and the board-wide sort mode
+// ---------------------------------------------------------------------------------------
+
+/*
+ * a move on the page ──▶ setOrder(ids) ──▶ the whole list is checked, then DATA_DIR/order/<id>.json
+ *                         = { rank: index, at } for every id in it; ids outside the list keep theirs
+ * the header switch ──▶ setSortMode('activity' | 'manual') ──▶ DATA_DIR/sort.json, tmp then rename
+ * snapshot() ──▶ readOrder() ──▶ `rank` on every live row (null without a record or a finite rank)
+ *                 and `order: { mode }`; a record whose session is neither live nor has a transcript
+ *                 is pruned like a blind marker. Ranks are global by id and read inside whichever
+ *                 section the row is in; the page sorts unranked rows first (new work on top).
+ * The per-file read is the pattern of four stores; revisit when `order/` holds about 1000 files
+ * (a 90-day `at` expiry through readMarkers' maxAgeMs is the cheap mitigation).
+ */
+const ORDER_DIR = path.join(DATA_DIR, 'order');
+const SORT_FILE = path.join(DATA_DIR, 'sort.json');
+const ORDER_MAX_IDS = 500;   // the host transport's bound; the browser route caps the query at 8000 characters (about 216 ids)
+const SORT_MODES = ['activity', 'manual'];
+
+function readOrder() { return readMarkers(ORDER_DIR, 0); }
+
+/** Rank every id by its position in `ids`; the whole list is checked before the first write. */
+function setOrder(ids) {
+  if (!Array.isArray(ids)) throw new Error('order must be a list of session ids');
+  if (!ids.length) throw new Error('order list is empty');
+  if (ids.length > ORDER_MAX_IDS) throw new Error('too many ids (' + ids.length + ' over ' + ORDER_MAX_IDS + ')');
+  const clean = ids.map((id) => String(id || ''));
+  if (!clean.every((id) => UUID_RE.test(id))) throw new Error('not a session id');
+  const at = Date.now();
+  clean.forEach((id, rank) => writeMarker(ORDER_DIR, id, { rank, at }));
+  return clean.length;
+}
+
+function readSortMode() {
+  try {
+    const rec = JSON.parse(fs.readFileSync(SORT_FILE, 'utf8'));
+    return rec && rec.mode === 'manual' ? 'manual' : 'activity';
+  } catch (_) { return 'activity'; }   // missing, unreadable or unknown: today's order
+}
+
+function setSortMode(mode) {
+  if (!SORT_MODES.includes(mode)) throw new Error('unknown sort mode: ' + String(mode));
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = SORT_FILE + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify({ mode, at: Date.now() }));
+  fs.renameSync(tmp, SORT_FILE);   // another window never reads a half file
+  return mode;
+}
+
+/** The rank of an order record as the page reads it: a finite number, else null (unranked). */
+function rankOf(rec) { return rec && Number.isFinite(Number(rec.rank)) ? Number(rec.rank) : null; }
 
 // ---------------------------------------------------------------------------------------
 // Board titles: ✎ asks a small model for a title from the transcript so far
@@ -1516,10 +1573,13 @@ async function snapshot() {
   const seen = readSeen();
   const titles = readTitles();
   const blinded = readBlinded();
+  const order = readOrder();
+  const sortMode = readSortMode();
   const now = Date.now();
   const liveIds = new Set(rows.map((r) => r.sessionId));
   forgetStatuses(liveIds);
-  pruneBlinded(blinded, liveIds, index);
+  pruneDead(BLINDED_DIR, blinded, liveIds, index);
+  pruneDead(ORDER_DIR, order, liveIds, index);
 
   const windows = new Map();
   for (const r of rows) {
@@ -1586,11 +1646,12 @@ async function snapshot() {
       ...archiveSource(r.sessionId, archived, claude.ids),
       unseen: r.status === 'idle' && Boolean(u) && (!sn || Number(u.at) > Number(sn.at)),
       blinded: blinded.has(r.sessionId),
+      rank: rankOf(order.get(r.sessionId)),
     };
   });
 
   if (!stale) lastGood = { rows, at: now };
-  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, usage: safeUsage(), claudeArchiveError: claude.error };
+  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, order: { mode: sortMode }, usage: safeUsage(), claudeArchiveError: claude.error };
   return lastSnapshot;
 }
 
@@ -2036,6 +2097,12 @@ module.exports = {
   readBlinded,
   blindSession,
   unblindSession,
+  ORDER_DIR,
+  SORT_FILE,
+  readOrder,
+  setOrder,
+  readSortMode,
+  setSortMode,
   CODE_USER_DIR,
   CLAUDE_CODE_STATE_DB,
   ARCHIVE_TRANSCRIPTS_DIR,

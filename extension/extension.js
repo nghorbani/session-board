@@ -91,6 +91,8 @@ class BoardProvider {
         case 'seen': if (core.UUID_RE.test(sid)) this.markSeen(sid); return;
         case 'blind': if (core.UUID_RE.test(sid)) return this.setBlinded(sid, true); return;
         case 'unblind': if (core.UUID_RE.test(sid)) return this.setBlinded(sid, false); return;
+        case 'order': return this.setOrder(m.ids);
+        case 'sortMode': return this.setSortMode(m.mode);
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
         case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
         default: return;
@@ -416,6 +418,40 @@ class BoardProvider {
       this.log.error((blinded ? 'blind ' : 'unblind ') + sessionId + ' failed: ' + message);
     }
     this.post({ type: 'blindResult', sessionId, ok, blinded: ok ? blinded : false, message });
+    this.schedule(0);
+  }
+
+  /** A move on the page: the group's complete order becomes ranks; the page hears the outcome, the next snapshot carries it. */
+  setOrder(ids) {
+    let ok = true;
+    let count = 0;
+    let message = '';
+    try {
+      if (!Array.isArray(ids)) throw new Error('order must be a list of session ids');
+      count = core.setOrder(ids);
+      this.log.info('order ' + count + ' sessions');
+    } catch (e) {
+      ok = false;
+      message = String((e && e.message) || e);
+      this.log.error('order failed: ' + message);
+    }
+    this.post({ type: 'orderResult', ok, count: ok ? count : 0, message });
+    this.schedule(0);
+  }
+
+  /** The header switch: the board-wide mode file; every window follows with its next snapshot. */
+  setSortMode(mode) {
+    let ok = true;
+    let message = '';
+    try {
+      core.setSortMode(String(mode || ''));
+      this.log.info('sort mode ' + mode);
+    } catch (e) {
+      ok = false;
+      message = String((e && e.message) || e);
+      this.log.error('sort mode failed: ' + message);
+    }
+    this.post({ type: 'sortModeResult', ok, mode: ok ? String(mode) : null, message });
     this.schedule(0);
   }
 

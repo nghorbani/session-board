@@ -59,7 +59,7 @@ const sessions = [
 ];
 
 const snapshot = {
-  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1,
+  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1, order: { mode: 'activity' },
   usage: {
     state: 'ok', at: now - 2 * 60000, ageSeconds: 120, subscriptionType: 'max', available: true,
     windows: {
@@ -134,7 +134,7 @@ module.exports = { browser };   // tests/page.test.cjs reuses the browser discov
 if (require.main === module) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   // Heights fit the fixtures above; adjust when they change (SCREENSHOT_*_HEIGHT override).
-  const heights = { board: Number(process.env.SCREENSHOT_BOARD_HEIGHT) || 1040, search: Number(process.env.SCREENSHOT_SEARCH_HEIGHT) || 870 };
+  const heights = { board: Number(process.env.SCREENSHOT_BOARD_HEIGHT) || 1000, search: Number(process.env.SCREENSHOT_SEARCH_HEIGHT) || 870 };
   render('board', path.join(OUT_DIR, 'board.png'), heights.board);
   render('search', path.join(OUT_DIR, 'search.png'), heights.search);
 }
