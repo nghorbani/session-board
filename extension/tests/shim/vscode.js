@@ -13,6 +13,13 @@ const api = {
   __status: [],        // setStatusBarMessage texts
   __log: [],           // [level, message] from the output channel
   __warnings: [],      // showWarningMessage texts
+  __infos: [],         // showInformationMessage texts
+  __inputs: [],        // showInputBox options
+  __inputAnswer: undefined,   // what showInputBox resolves to (undefined = Escape)
+  __executed: [],      // executeCommand calls: [id, ...args]
+  __clipboard: [],     // clipboard writes
+  __config: Object.create(null),   // sessionBoard.* settings a test sets; absent keys take the code's default
+  __windowState: [],   // onDidChangeWindowState listeners
   __answer: undefined, // what showWarningMessage / showInformationMessage resolve to
   __pick: undefined,   // what showQuickPick resolves to (an index into the items, or undefined)
   __reset() {
@@ -20,6 +27,14 @@ const api = {
     api.__status.length = 0;
     api.__log.length = 0;
     api.__warnings.length = 0;
+    api.__infos.length = 0;
+    api.__inputs.length = 0;
+    api.__inputAnswer = undefined;
+    api.__executed.length = 0;
+    api.__clipboard.length = 0;
+    api.__windowState.length = 0;
+    for (const k of Object.keys(api.__config)) delete api.__config[k];
+    api.window.state.focused = true;
     api.__answer = undefined;
     api.__pick = undefined;
     for (const k of Object.keys(api.__commands)) delete api.__commands[k];
@@ -34,19 +49,24 @@ const api = {
     }),
     registerWebviewViewProvider: (id, provider) => { api.__providers.push(provider); return disposable(); },
     registerUriHandler: () => disposable(),
+    onDidChangeWindowState: (fn) => { api.__windowState.push(fn); return disposable(); },
     setStatusBarMessage: (text) => { api.__status.push(text); return disposable(); },
-    showInformationMessage: async () => api.__answer,
+    showInformationMessage: async (text) => { api.__infos.push(text); return api.__answer; },
     showWarningMessage: async (text) => { api.__warnings.push(text); return api.__answer; },
     showErrorMessage: async () => undefined,
     showQuickPick: async (items) => (api.__pick === undefined ? undefined : items[api.__pick]),
+    showInputBox: async (opts) => { api.__inputs.push(opts); return api.__inputAnswer; },
     withProgress: (opts, fn) => fn({ report() {} }, { isCancellationRequested: false, onCancellationRequested: () => disposable() }),
   },
   commands: {
     registerCommand: (id, fn) => { api.__commands[id] = fn; return disposable(); },
-    executeCommand: async () => undefined,
+    executeCommand: async (id, ...args) => { api.__executed.push([id, ...args]); return undefined; },
   },
-  env: { appRoot: '', clipboard: { writeText: async () => {} } },
-  workspace: { workspaceFolders: [] },
+  env: { appRoot: '', clipboard: { writeText: async (t) => { api.__clipboard.push(t); } } },
+  workspace: {
+    workspaceFolders: [],
+    getConfiguration: (section) => ({ get: (key, dflt) => { const k = section + '.' + key; return k in api.__config ? api.__config[k] : dflt; } }),
+  },
   ProgressLocation: { Notification: 15 },
   Uri: {
     file: (p) => ({ fsPath: p, toString: () => p }),

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.0
+
+- The board tells you when a session finishes its answer: the focused VS Code window shows a toast "<title>: done" with an Open button, next to the existing toast for a session that starts waiting
+- When no VS Code window has focus, one window shows a Windows notification instead, for both ("needs you" and "done"); a click on it opens the session in its window and clears its unseen mark. Several windows never show the same one twice, and a burst shows three and says how many more
+- Mute replaces Blind: the bell on a row mutes a session in place. A muted session raises no toast or notification and counts nowhere, but keeps its place, its colour and its order in its section, marked "muted". The folded Blinded groups are gone; sessions blinded under 0.10.0 come up muted
+- Settings: `sessionBoard.notifyOnDone` turns the done notifications off, `sessionBoard.systemNotifications` the Windows notifications
+- Browser page: a browser notification for a finished answer too; `POST /api/mute/<id>` and `POST /api/unmute/<id>` replace the blind routes
+- Every row shows its session id ("Session f8005c0d"); a click folds out the full id, start time, process, window and transcript path, with copy buttons for the id and the path. Search takes an id bare or as Claude Code shows it
+- Titles are Claude Code's own: the board keeps none of its own any more. ✎ suggests a title (one short haiku call) and you confirm or edit it; for a session that is not running the board writes it where Claude Code keeps titles, so its sidebar and `claude --resume` show it; for a running session the suggestion goes onto the clipboard and Claude Code's own rename box opens on it. ✎ also works on ended sessions in the search results. Titles set with ✎ in 0.10.x are no longer shown
+- Browser page: `POST /api/title/suggest/<id>` and `POST /api/title/<id>?title=` replace `/api/retitle/<id>`
+- A window still running 0.10.x shows the formerly blinded sessions unfolded until it reloads
+
 ## 0.10.0
 
 - Blinded is per window section: ⊘ keeps the session in its own section, under a folded Blinded group at the bottom of that section, where it stays, waiting or not, until ⊙ brings it back. The group carries its own number (amber when one of its sessions waits); the global Blinded section at the bottom of the board is gone

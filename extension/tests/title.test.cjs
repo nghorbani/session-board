@@ -1,8 +1,10 @@
 'use strict';
 /*
- * ✎ in core.cjs: the transcript excerpt the title call sees, the cleaning of the model's
- * reply, and retitleSession() against the shim (SB_SHIM_TITLE picks the reply). No real
- * model call: the shim stands in for the CLI.
+ * Titles in core.cjs: the transcript excerpt the suggestion call sees, the cleaning of the
+ * model's reply, suggestTitle() against the shim (SB_SHIM_TITLE picks the reply; nothing is
+ * stored), and renameSession(), which writes Claude Code's title (the custom-title line and the
+ * custom-title.json sidecar) of a session that is not running and refuses a running one. No
+ * real model call: the shim stands in for the CLI.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-retitle-'));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-title-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
 process.env.SB_CODE_USER_DIR = path.join(tmp, "User");   // never the real state.vscdb
@@ -20,6 +22,8 @@ fs.mkdirSync(sessionsDir);
 fs.mkdirSync(path.join(projectsDir, 'proj'), { recursive: true });
 process.env.SB_SESSIONS_DIR = sessionsDir;
 process.env.SB_PROJECTS_DIR = projectsDir;
+process.env.SB_HEARTBEAT_DIR = path.join(tmp, 'heartbeats');
+process.env.SB_WINDOW_MAP = JSON.stringify({ [process.pid]: { windowId: 7, exthostPid: 4242 } });
 process.env.PATH = path.join(__dirname, 'shim') + path.delimiter + process.env.PATH;
 const core = require('../core.cjs');
 
@@ -79,46 +83,95 @@ test('cleanTitle: the last line, quotes and a trailing period stripped, length c
   assert.equal(core.cleanTitle('x'.repeat(200)).length, 80);
 });
 
-test('retitleSession: the shim reply is cleaned and stored, and the prompt carries the excerpt', async () => {
+test('suggestTitle: the shim reply is cleaned, the prompt carries the excerpt, and nothing is stored', async () => {
   const promptFile = path.join(tmp, 'prompt.txt');
   process.env.SB_SHIM_TITLE_PROMPT_FILE = promptFile;
-  const r = await core.retitleSession(A, { timeoutMs: 20000 });
+  const before = fs.readFileSync(transcript, 'utf8');
+  const r = await core.suggestTitle(A, { timeoutMs: 20000 });
   delete process.env.SB_SHIM_TITLE_PROMPT_FILE;
   assert.deepEqual(r, { ok: true, title: 'Walnut threshold fix verified on Thor' });
-  const stored = core.readTitles().get(A);
-  assert.equal(stored.title, 'Walnut threshold fix verified on Thor');
-  assert.ok(stored.at > 0);
-  assert.equal(stored.seenCustomTitle, null);
+  assert.equal(fs.readFileSync(transcript, 'utf8'), before, 'the transcript is untouched');
+  assert.equal(fs.existsSync(core.titleSidecar(transcript, A)), false, 'no sidecar');
+  assert.equal(fs.existsSync(path.join(core.DATA_DIR, 'titles')), false, 'no board title store');
   const prompt = fs.readFileSync(promptFile, 'utf8');
   assert.match(prompt, /Reply with the title only/);
   assert.match(prompt, /Prompt 2: Now verify on Thor/);
   assert.match(prompt, /Last answer: Verified on Thor/);
 });
 
-test('retitleSession: failures are reported and nothing is stored', async () => {
-  fs.rmSync(core.TITLES_DIR, { recursive: true, force: true });
+test('suggestTitle: failures are reported', async () => {
   process.env.SB_SHIM_TITLE = 'fail';
-  let r = await core.retitleSession(A, { timeoutMs: 20000 });
-  assert.equal(r.ok, false);
-  assert.equal(r.code, 'failed');
+  let r = await core.suggestTitle(A, { timeoutMs: 20000 });
+  assert.deepEqual([r.ok, r.code], [false, 'failed']);
   assert.match(r.message, /model not available/);
   process.env.SB_SHIM_TITLE = 'empty';
-  r = await core.retitleSession(A, { timeoutMs: 20000 });
+  r = await core.suggestTitle(A, { timeoutMs: 20000 });
   assert.deepEqual([r.ok, r.code], [false, 'empty']);
   process.env.SB_SHIM_TITLE = 'hang';
   const t0 = Date.now();
-  r = await core.retitleSession(A, { timeoutMs: 1500 });
+  r = await core.suggestTitle(A, { timeoutMs: 1500 });
   delete process.env.SB_SHIM_TITLE;
   assert.deepEqual([r.ok, r.code], [false, 'timeout'], JSON.stringify(r));
   assert.match(r.message, /did not answer within 2 s/);
   assert.ok(Date.now() - t0 < 15000, 'returned after the timeout');
-  r = await core.retitleSession('nope', {});
+  r = await core.suggestTitle('nope', {});
   assert.deepEqual([r.ok, r.code], [false, 'invalid']);
-  r = await core.retitleSession(B, {});
+  r = await core.suggestTitle(B, {});
   assert.deepEqual([r.ok, r.code], [false, 'no-transcript'], 'a transcript without prompts');
-  r = await core.retitleSession('cccccccc-3333-4333-8333-333333333333', {});
+  r = await core.suggestTitle('cccccccc-3333-4333-8333-333333333333', {});
   assert.deepEqual([r.ok, r.code], [false, 'no-transcript'], 'no transcript at all');
-  assert.equal(core.readTitles().has(A), false);
+});
+
+const titleLines = (file) => fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.includes('"custom-title"'));
+
+test('renameSession: an ended session gets one custom-title line in Claude Code\'s format and the sidecar', () => {
+  const r = core.renameSession(A, '  Walnut "threshold"\n done\u0007  ');
+  assert.deepEqual(r, { ok: true, title: 'Walnut "threshold" done' });
+  const lines = titleLines(transcript);
+  assert.equal(lines.length, 1, 'one line');
+  assert.deepEqual(JSON.parse(lines[0]), { type: 'custom-title', sessionId: A, customTitle: 'Walnut "threshold" done' });
+  assert.ok(fs.readFileSync(transcript, 'utf8').endsWith(lines[0] + '\n'), 'appended as the last line');
+  assert.deepEqual(JSON.parse(fs.readFileSync(core.titleSidecar(transcript, A), 'utf8')), { customTitle: 'Walnut "threshold" done' });
+  const long = core.renameSession(A, 'x'.repeat(300));
+  assert.equal(long.title.length, 80, 'capped like Claude Code\'s titles');
+  assert.equal(titleLines(transcript).length, 2);
+});
+
+test('renameSession: bad id, empty title and a missing transcript write nothing', () => {
+  const before = fs.readFileSync(transcript, 'utf8');
+  assert.deepEqual(core.renameSession('nope', 'x').code, 'invalid');
+  assert.deepEqual(core.renameSession(A, ' \n\t ').code, 'empty');
+  assert.deepEqual(core.renameSession('cccccccc-3333-4333-8333-333333333333', 'x').code, 'no-transcript');
+  assert.equal(fs.readFileSync(transcript, 'utf8'), before);
+});
+
+test('renameSession: a running session in a VS Code window, or a terminal one whose CLI holds a name, is claude-owned and untouched; an unnamed terminal session is written', async () => {
+  const agent = (pid) => ({ sessionId: A, pid, status: 'idle', cwd: tmp, name: 'held name', kind: 'interactive' });
+  const registry = (pid, nameSource) => fs.writeFileSync(path.join(sessionsDir, pid + '.json'), JSON.stringify({ sessionId: A, pid, status: 'idle', statusUpdatedAt: Date.now(), name: 'held name', nameSource }));
+  const before = fs.readFileSync(transcript, 'utf8');
+  // in a VS Code window (the window map knows this process)
+  process.env.SB_SHIM_AGENTS = JSON.stringify([agent(process.pid)]);
+  registry(process.pid, 'derived');
+  let snap = await core.snapshot();
+  assert.ok(snap.sessions.find((s) => s.sessionId === A).window, 'mapped to a window');
+  assert.equal(core.renameSession(A, 'New').code, 'claude-owned');
+  assert.equal(fs.readFileSync(transcript, 'utf8'), before, 'nothing written');
+  // a terminal session (the parent process: alive, no window) whose CLI holds a name
+  fs.rmSync(path.join(sessionsDir, process.pid + '.json'));
+  process.env.SB_SHIM_AGENTS = JSON.stringify([agent(process.ppid)]);
+  registry(process.ppid, 'user');
+  snap = await core.snapshot();
+  const row = snap.sessions.find((s) => s.sessionId === A);
+  assert.deepEqual([row.window, row.nameSource], [null, 'user']);
+  assert.equal(core.renameSession(A, 'New').code, 'claude-owned');
+  assert.equal(fs.readFileSync(transcript, 'utf8'), before);
+  // the same terminal session without a held name: the line is written
+  registry(process.ppid, 'derived');
+  await core.snapshot();
+  assert.deepEqual(core.renameSession(A, 'Terminal name'), { ok: true, title: 'Terminal name' });
+  assert.equal(JSON.parse(titleLines(transcript).pop()).customTitle, 'Terminal name');
+  fs.rmSync(path.join(sessionsDir, process.ppid + '.json'));
+  delete process.env.SB_SHIM_AGENTS;
 });
 
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

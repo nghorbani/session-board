@@ -209,18 +209,37 @@ function listTranscripts() {
   return out;
 }
 
-const factsCache = new Map(); // sessionId -> { key, tokens, title, lastPrompt }
+const factsCache = new Map(); // sessionId -> { key, tokens, title, customTitle, lastPrompt }
 
+/** Claude Code's title sidecar: <project dir>/<id>/custom-title.json next to the transcript. */
+function titleSidecar(file, sessionId) { return path.join(path.dirname(file), String(sessionId), 'custom-title.json'); }
+
+/** The sidecar's title, or null when it is missing or unreadable. */
+function readSidecarTitle(file, sessionId) {
+  try {
+    const o = JSON.parse(fs.readFileSync(titleSidecar(file, sessionId), 'utf8'));
+    return o && typeof o.customTitle === 'string' && o.customTitle.trim() ? o.customTitle.trim() : null;
+  } catch (_) { return null; }
+}
+
+/**
+ * Tokens, titles and the last prompt of a transcript, cached until the transcript or its title
+ * sidecar changes. The Claude name is the newest custom-title line in the tail, else the
+ * sidecar: the order Claude Code's own session list uses.
+ */
 function transcriptFacts(sessionId, file) {
   const empty = { tokens: null, title: null, customTitle: null, lastPrompt: null };
   if (!file) return empty;
   let stat;
   try { stat = fs.statSync(file); } catch (_) { return empty; }
-  const key = stat.size + ':' + stat.mtimeMs;
+  let sideAt = 0;
+  try { sideAt = fs.statSync(titleSidecar(file, sessionId)).mtimeMs; } catch (_) { /* no sidecar */ }
+  const key = stat.size + ':' + stat.mtimeMs + ':' + sideAt;
   const hit = factsCache.get(sessionId);
   if (hit && hit.key === key) return hit;
   const tokens = contextTokens(file);
-  const { title, customTitle, lastPrompt } = titleFromTranscript(file);
+  const { title, customTitle: inTail, lastPrompt } = titleFromTranscript(file);
+  const customTitle = inTail || (sideAt ? readSidecarTitle(file, sessionId) : null);
   const facts = { key, tokens, title, customTitle, lastPrompt };
   factsCache.set(sessionId, facts);
   return facts;
@@ -401,8 +420,12 @@ const HEARTBEAT_DIR = process.env.SB_HEARTBEAT_DIR || path.join(os.tmpdir(), 'cl
 const HEARTBEAT_FRESH_MS = 45000;
 const HEARTBEAT_KEEP_MS = 24 * 60 * 60 * 1000;   // an older record belongs to a window long closed; the readers delete it
 
-/** One record per host and extension id; `name` is the window's workspace name, so other boards can label its section. */
-function writeHeartbeat(exthostPid, extensionId, name) {
+/**
+ * One record per host and extension id; `name` is the window's workspace name, so other boards
+ * can label its section; `focused` says whether that VS Code window has the OS focus, so the
+ * other boards leave a notification to it.
+ */
+function writeHeartbeat(exthostPid, extensionId, name, focused, version) {
   const id = EXTENSION_ID_RE.test(String(extensionId || '')) ? extensionId : EXTENSION_ID;
   try {
     fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });
@@ -410,6 +433,8 @@ function writeHeartbeat(exthostPid, extensionId, name) {
     const tmp = target + '.tmp.' + process.pid;
     const rec = { pid: exthostPid, at: Date.now(), id };
     if (typeof name === 'string' && name.trim()) rec.name = name.trim().slice(0, 200);
+    if (typeof focused === 'boolean') rec.focused = focused;
+    if (typeof version === 'string' && /^\d+\.\d+\.\d+/.test(version)) rec.version = version;
     fs.writeFileSync(tmp, JSON.stringify(rec));
     fs.renameSync(tmp, target);
   } catch (_) { /* best effort */ }
@@ -451,6 +476,22 @@ function dropIfOld(file, now, at) {
   if (now - then < HEARTBEAT_KEEP_MS) return false;
   try { fs.unlinkSync(file); } catch (_) { /* retried on the next read */ }
   return true;
+}
+
+/**
+ * The newest `at` of a fresh heartbeat from another host that reports its window focused, or 0.
+ * The notifier compares it with an event's time: a focused window that wrote after the event
+ * has seen it and spoke; an older record may come from a window that has died since.
+ */
+function focusedPeerAt(ownExthostPid) {
+  let best = 0;
+  for (const { rec } of readHeartbeats()) {
+    if (!rec || rec.focused !== true || Number(rec.pid) === Number(ownExthostPid)) continue;
+    const at = Number(rec.at);
+    if (!(Date.now() - at < HEARTBEAT_FRESH_MS)) continue;
+    if (at > best) best = at;
+  }
+  return best;
 }
 
 /** Workspace names of the hosts with a fresh heartbeat, by extension-host pid (the freshest record per pid). */
@@ -499,6 +540,25 @@ function boardAlive(exthostPid) {
     if (!best || Number(rec.at) > best.at) best = { id, at: Number(rec.at) };
   }
   return best ? best.id : null;
+}
+
+/** The version the freshest board in that window reports, or null (boards before 0.11.0 report none). */
+function boardVersion(exthostPid) {
+  const prefix = 'board-' + exthostPid + '-';
+  let best = null;
+  for (const { name, rec } of readHeartbeats()) {
+    if (!name.startsWith(prefix) || !(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;
+    if (!best || Number(rec.at) > best.at) best = { at: Number(rec.at), version: typeof rec.version === 'string' ? rec.version : null };
+  }
+  return best ? best.version : null;
+}
+
+/** True when version a is at least b (numeric x.y.z). */
+function versionAtLeast(a, b) {
+  const pa = String(a || '').split('.').map(Number);
+  const pb = String(b || '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) { const x = pa[i] || 0, y = pb[i] || 0; if (x !== y) return x > y; }
+  return true;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -881,7 +941,6 @@ function archiveSource(sessionId, boardIds, claudeIds) {
  */
 const UNSEEN_DIR = path.join(DATA_DIR, 'unseen');
 const SEEN_DIR = path.join(DATA_DIR, 'seen');
-const TITLES_DIR = path.join(DATA_DIR, 'titles');
 const MARKER_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
 const observedStatus = new Map();   // sessionId -> { status, statusUpdatedAt } from this process's last snapshot
 
@@ -918,17 +977,20 @@ function readSeen() { return readMarkers(SEEN_DIR, MARKER_MAX_AGE_MS); }
 
 /**
  * Remember a row's status and, when an answer ended since this process last looked, write
- * the unseen marker. True when the marker was written. The first observation of a session
- * never counts.
+ * the unseen marker. Returns the time written into the marker, 0 when none was written. The
+ * snapshot reports that same time, so this process and every window that reads the marker
+ * later agree on it (the notifier keys the "done" event on it). The first observation of a
+ * session never counts.
  */
 function noteAnswer(sessionId, status, statusUpdatedAt) {
   const prev = observedStatus.get(sessionId);
   const at = Number(statusUpdatedAt) || null;
   observedStatus.set(sessionId, { status, statusUpdatedAt: at });
-  if (!prev || status !== 'idle') return false;
+  if (!prev || status !== 'idle') return 0;
   const ended = prev.status !== 'idle' || (at && prev.statusUpdatedAt && at > prev.statusUpdatedAt);
-  if (!ended) return false;
-  try { markUnseen(sessionId, at || Date.now()); return true; } catch (_) { return false; }
+  if (!ended) return 0;
+  const when = at || Date.now();
+  try { markUnseen(sessionId, when); return when; } catch (_) { return 0; }
 }
 
 /** Forget sessions that are no longer listed, so a resumed id starts fresh. */
@@ -937,37 +999,54 @@ function forgetStatuses(liveIds) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Blinded sessions: kept under the folded Blinded group until brought back
+// Muted sessions: silent and uncounted, in place
 // ---------------------------------------------------------------------------------------
 
 /*
- * ⊘ on a row ──▶ blindSession(id) ──▶ DATA_DIR/blinded/<id>.json. Existence is the flag, as for
- *                 the archive marker; the content {at} is informational and never parsed, so a
- *                 half-written file seen by another window still counts and is never deleted
+ * the bell on a row ──▶ muteSession(id) ──▶ DATA_DIR/muted/<id>.json. Existence is the flag, as
+ *                 for the archive marker; the content {at} is informational and never parsed, so
+ *                 a half-written file seen by another window still counts and is never deleted
  *                 as garbage.
- * ⊙ on a row ──▶ unblindSession(id) ──▶ the marker is unlinked (a missing one is fine).
- * snapshot() ──▶ readBlinded() ──▶ `blinded` on every live row. A marker whose session is
- *                 neither live nor has a transcript under either root is unlinked: that session
- *                 cannot be resumed, so its blind has nothing left to hide. No clock: a blind
- *                 lasts as long as `claude --resume` can bring the session back.
- * The page keeps blinded rows under Blinded, waiting or not; the host and the page leave them
- * out of the activity-bar badge, the title, the counts strip, the toast and the notification.
+ * the struck bell ──▶ unmuteSession(id) ──▶ the marker is unlinked (a missing one is fine).
+ * snapshot() ──▶ readMuted() ──▶ `muted` on every live row. A marker whose session is neither
+ *                 live nor has a transcript under either root is unlinked: that session cannot be
+ *                 resumed, so its mute has nothing left to silence. No clock: a mute lasts as
+ *                 long as `claude --resume` can bring the session back.
+ * A muted row stays in its section; the host and the page leave it out of the activity-bar
+ * badge, the section badge, the title, the counts strip, the toasts and the notifications.
+ *
+ * Boards up to 0.10.0 kept the same markers under DATA_DIR/blinded ("Blind"). readMuted() moves
+ * each one into muted/ with a single rename, so muted/ is the only folder that holds state. The
+ * rename is atomic: a second window racing for the same marker gets ENOENT and writes nothing,
+ * so it cannot bring back a mute the user removed in between.
  */
-const BLINDED_DIR = path.join(DATA_DIR, 'blinded');
+const MUTED_DIR = path.join(DATA_DIR, 'muted');
+const LEGACY_BLINDED_DIR = path.join(DATA_DIR, 'blinded');
 
-function readBlinded() { return idSet(BLINDED_DIR); }
+function migrateBlinded() {
+  const ids = idSet(LEGACY_BLINDED_DIR);
+  if (!ids.size) return;
+  try { fs.mkdirSync(MUTED_DIR, { recursive: true }); } catch (_) { return; }
+  for (const id of ids) {
+    try { fs.renameSync(path.join(LEGACY_BLINDED_DIR, id + '.json'), path.join(MUTED_DIR, id + '.json')); } catch (_) { /* another window moved it, or it is held: next read */ }
+  }
+}
 
-function blindSession(sessionId) { writeMarker(BLINDED_DIR, sessionId, { at: Date.now() }); }
+function readMuted() { migrateBlinded(); return idSet(MUTED_DIR); }
 
-function unblindSession(sessionId) {
+function muteSession(sessionId) { writeMarker(MUTED_DIR, sessionId, { at: Date.now() }); }
+
+function unmuteSession(sessionId) {
   sessionId = String(sessionId || '');
   if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
-  try { fs.unlinkSync(path.join(BLINDED_DIR, sessionId + '.json')); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+  for (const dir of [MUTED_DIR, LEGACY_BLINDED_DIR]) {   // a legacy marker not moved yet would bring the mute back on the next read
+    try { fs.unlinkSync(path.join(dir, sessionId + '.json')); } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+  }
 }
 
 /**
  * Drop the markers in `dir` whose sessions are neither live nor resumable (no transcript in
- * the index); `coll` is the Set or Map of their ids and loses them too. Shared by the blinded
+ * the index); `coll` is the Set or Map of their ids and loses them too. Shared by the muted
  * and the order stores.
  */
 function pruneDead(dir, coll, liveIds, transcripts) {
@@ -988,7 +1067,7 @@ function pruneDead(dir, coll, liveIds, transcripts) {
  * the header switch ──▶ setSortMode('activity' | 'manual') ──▶ DATA_DIR/sort.json, tmp then rename
  * snapshot() ──▶ readOrder() ──▶ `rank` on every live row (null without a record or a finite rank)
  *                 and `order: { mode }`; a record whose session is neither live nor has a transcript
- *                 is pruned like a blind marker. Ranks are global by id and read inside whichever
+ *                 is pruned like a mute marker. Ranks are global by id and read inside whichever
  *                 section the row is in; the page sorts unranked rows first (new work on top).
  * The per-file read is the pattern of four stores; revisit when `order/` holds about 1000 files
  * (a 90-day `at` expiry through readMarkers' maxAgeMs is the cheap mitigation).
@@ -1032,17 +1111,25 @@ function setSortMode(mode) {
 function rankOf(rec) { return rec && Number.isFinite(Number(rec.rank)) ? Number(rec.rank) : null; }
 
 // ---------------------------------------------------------------------------------------
-// Board titles: ✎ asks a small model for a title from the transcript so far
+// Titles: Claude Code's own, suggested by a small model, written where Claude reads them
 // ---------------------------------------------------------------------------------------
 
 /*
- * Claude Code titles a session once, from its first prompt, so a long session often carries
- * a title that says nothing about where it went. ✎ runs `claude -p --model haiku` over the
- * recent prompts and the last answer (a few KB from the transcript tail; hook-free, no tools,
- * no MCP servers, no transcript of its own) and stores the reply as the board's title in
- * DATA_DIR/titles/<id>.json together with the renamed title seen at that moment. The board
- * title shows while that renamed title is unchanged; a later /rename wins again. Claude
- * Code's files are never written.
+ * The board keeps no titles of its own. A row's title is Claude Code's: the newest custom-title
+ * line in the transcript's tail, else <project dir>/<id>/custom-title.json, else the registry's
+ * user-set name, else the generated ai-title (transcriptFacts, snapshot).
+ *
+ * ✎ ──▶ suggestTitle(id): `claude -p --model haiku` over the recent prompts and the last answer
+ *       (a few KB from the transcript tail; hook-free, no tools, no MCP servers, no transcript of
+ *       its own) ──▶ a box prefilled with the suggestion ──▶ renameSession(id, title):
+ *         a session that is running is refused (`claude-owned`): its CLI writes its own name
+ *         after every answer, so only Claude Code's rename (which tells the CLI) sticks; the
+ *         host opens Claude's rename box for it instead. Running means: live with a VS Code
+ *         window, or live in a terminal with a name the CLI holds (registry nameSource "user").
+ *         Otherwise the line {"type":"custom-title","sessionId","customTitle"} is appended to the
+ *         transcript, the same line Claude Code's rename appends (a resumed CLI reads it and
+ *         writes it on), and the sidecar is written (tmp then rename) for when the line has left
+ *         the tail. The line goes first: it is what Claude reads first.
  */
 const TITLE_MODEL = 'haiku';
 const TITLE_TIMEOUT_MS = 90000;
@@ -1056,10 +1143,6 @@ const TITLE_INSTRUCTION = 'Write a title for this coding session: at most eight 
   + 'no trailing period, naming what has been done or decided so far rather than the first question. '
   + 'Reply with the title only.\n\n';
 
-function readTitles() { return readMarkers(TITLES_DIR, 0); }
-function setTitle(sessionId, title, seenCustomTitle) {
-  writeMarker(TITLES_DIR, sessionId, { title: String(title), at: Date.now(), seenCustomTitle: seenCustomTitle ? String(seenCustomTitle) : null });
-}
 
 /** The text blocks of a transcript message; tool results, thinking and tool calls are skipped. */
 function messageText(message) {
@@ -1149,12 +1232,8 @@ function cleanTitle(stdout) {
   return t;
 }
 
-/**
- * Ask for a new title and store it. { ok: true, title } or { ok: false, code, message } with
- * code invalid, no-transcript, timeout, failed or empty. Options: `timeoutMs`, `model`,
- * `command` (tests point it at the shim).
- */
-async function retitleSession(sessionId, opts) {
+/** Ask a small model for a title; nothing is stored. { ok: true, title } or { ok: false, code, message }. */
+async function suggestTitle(sessionId, opts) {
   opts = opts || {};
   sessionId = String(sessionId || '');
   if (!UUID_RE.test(sessionId)) return { ok: false, code: 'invalid', message: 'not a session id' };
@@ -1185,7 +1264,50 @@ async function retitleSession(sessionId, opts) {
   if (r.code !== 0) return { ok: false, code: 'failed', message: firstLine(r.stderr) || firstLine(r.stdout) || ('claude exited with ' + r.code) };
   const title = cleanTitle(r.stdout);
   if (!title) return { ok: false, code: 'empty', message: 'the model returned no title' };
-  setTitle(sessionId, title, row ? row.renamedTitle : null);
+  return { ok: true, title };
+}
+
+/** A title as Claude Code would take it: one line, no control characters, at most TITLE_MAX_CHARS. */
+function normalizeTitle(raw) {
+  let t = String(raw == null ? '' : raw).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (t.length > TITLE_MAX_CHARS) t = t.slice(0, TITLE_MAX_CHARS - 1).trim() + '…';
+  return t;
+}
+
+/**
+ * Give a session that is not running a new Claude Code title (see the block above). Resolves
+ * { ok: true, title, warning? } or { ok: false, code, message }; codes: invalid, empty,
+ * claude-owned, no-transcript, failed.
+ */
+function renameSession(sessionId, rawTitle) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) return { ok: false, code: 'invalid', message: 'not a session id' };
+  const title = normalizeTitle(rawTitle);
+  if (!title) return { ok: false, code: 'empty', message: 'the title is empty' };
+  const row = lastSnapshotRows().find((s) => s.sessionId === sessionId) || null;
+  const alive = Boolean(row && pidAlive(row.pid));
+  if (alive && (row.window || row.nameSource === 'user')) {
+    return { ok: false, code: 'claude-owned', message: 'the session is running; rename it in Claude Code so its CLI keeps the name' };
+  }
+  let file = (row && row.transcriptPath) || transcriptIndex().get(sessionId) || null;
+  if (file && !fs.existsSync(file)) file = null;
+  if (!file) file = liveTranscripts(sessionId)[0] || stowedTranscripts(sessionId)[0] || null;
+  if (!file) return { ok: false, code: 'no-transcript', message: 'no transcript for this session' };
+  try {
+    fs.appendFileSync(file, JSON.stringify({ type: 'custom-title', sessionId, customTitle: title }) + '\n');
+  } catch (e) {
+    return { ok: false, code: 'failed', message: String((e && e.message) || e) };
+  }
+  factsCache.delete(sessionId);
+  try {
+    const side = titleSidecar(file, sessionId);
+    fs.mkdirSync(path.dirname(side), { recursive: true });
+    const tmp = side + '.tmp.' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify({ customTitle: title }));
+    fs.renameSync(tmp, side);
+  } catch (e) {
+    return { ok: true, title, warning: 'the title sidecar was not written: ' + String((e && e.message) || e) };
+  }
   return { ok: true, title };
 }
 
@@ -1494,19 +1616,138 @@ function safeUsage() {
   try { return usageState(); } catch (_) { return null; }
 }
 
+/**
+ * The vscode:// URI that opens a session in its window: through the board running there when
+ * `viaBoard` names one (it routes by windowId and marks the session seen), else through Claude
+ * Code. Null for unchecked input.
+ */
+function openUri(sessionId, windowId, viaBoard, route) {
+  if (!UUID_RE.test(String(sessionId)) || !Number.isInteger(windowId)) return null;
+  const authority = typeof viaBoard === 'string' && EXTENSION_ID_RE.test(viaBoard) ? viaBoard : 'anthropic.claude-code';
+  const r = route === 'rename' && authority !== 'anthropic.claude-code' ? 'rename' : 'open';   // /rename is the board's own route
+  return 'vscode://' + authority + '/' + r + '?session=' + sessionId + '&windowId=' + windowId;
+}
+
+/** openUri for a live session's process, or null when no VS Code window owns it. */
+async function openUriForPid(sessionId, pid) {
+  const win = await windowForPid(Number(pid));
+  return win ? openUri(sessionId, win.windowId, boardAlive(win.exthostPid)) : null;
+}
+
 /** Bring the session's VS Code window forward on that session. */
 function focusSession(sessionId, windowId, opts) {
   return new Promise((resolve, reject) => {
-    if (!UUID_RE.test(String(sessionId)) || !Number.isInteger(windowId)) {
-      return reject(new Error('refusing to build a URI from unchecked input'));
-    }
-    const viaBoard = opts && opts.viaBoard;
-    const authority = typeof viaBoard === 'string' && EXTENSION_ID_RE.test(viaBoard) ? viaBoard : 'anthropic.claude-code';
-    const target = 'vscode://' + authority + '/open?session=' + sessionId + '&windowId=' + windowId;
+    const target = openUri(sessionId, windowId, opts && opts.viaBoard, opts && opts.route);
+    if (!target) return reject(new Error('refusing to build a URI from unchecked input'));
     // shell: true is required to run code.cmd; the quotes keep cmd.exe from reading `&`.
     execFile('code', ['--open-url', '"' + target + '"'], {
       env: strippedEnv(), timeout: 15000, windowsHide: true, shell: true,
     }, (err) => (err ? reject(err) : resolve(target)));
+  });
+}
+
+// ---------------------------------------------------------------------------------------
+// Windows notifications: one window claims each event, PowerShell shows the toast
+// ---------------------------------------------------------------------------------------
+
+/*
+ * notifier (one per window) ──▶ claimNotice(id, kind, at) ──▶ exclusive create of
+ *     DATA_DIR/notices/<id>.<kind>.<at>; the window that creates it shows the toast, the others
+ *     get EEXIST and stay quiet. releaseNotice() unlinks a claim whose toast failed, so the
+ *     retry can take it again. Claims a day old are removed on the next claim.
+ * showSystemToast(items) ──▶ one powershell.exe (Windows PowerShell 5.1, which has the WinRT
+ *     projection) per batch. The toast XML is built and escaped here, then base64-encoded; the
+ *     script holds only that base64 inside a single-quoted literal, so no session text is ever
+ *     PowerShell source. A click runs the toast's `launch` URI (activationType protocol), the
+ *     same vscode:// URI focusSession uses. SB_TOAST_LOG makes it write {script, xml} to a file
+ *     instead of spawning (tests).
+ */
+const NOTICES_DIR = path.join(DATA_DIR, 'notices');
+const NOTICE_KEEP_MS = 24 * 3600 * 1000;
+const NOTICE_KINDS = ['waiting', 'done'];
+const POWERSHELL_AUMID = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';
+
+function noticeFile(sessionId, kind, at) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
+  if (!NOTICE_KINDS.includes(kind)) throw new Error('unknown notice kind');
+  const n = Number(at);
+  if (!Number.isFinite(n) || n <= 0) throw new Error('a notice needs a time');
+  return path.join(NOTICES_DIR, sessionId + '.' + kind + '.' + Math.round(n));
+}
+
+function pruneNotices() {
+  let names = [];
+  try { names = fs.readdirSync(NOTICES_DIR); } catch (_) { return; }
+  const cutoff = Date.now() - NOTICE_KEEP_MS;
+  for (const name of names) {
+    const file = path.join(NOTICES_DIR, name);
+    try { if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file); } catch (_) { /* gone or held: next time */ }
+  }
+}
+
+/** True when this process now owns the event; false when another window claimed it first. */
+function claimNotice(sessionId, kind, at) {
+  const file = noticeFile(sessionId, kind, at);
+  fs.mkdirSync(NOTICES_DIR, { recursive: true });
+  pruneNotices();
+  try { fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); return true; } catch (e) {
+    if (e && e.code === 'EEXIST') return false;
+    throw e;
+  }
+}
+
+function releaseNotice(sessionId, kind, at) {
+  try { fs.unlinkSync(noticeFile(sessionId, kind, at)); } catch (_) { /* already gone */ }
+}
+
+function xmlEscape(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+/** The toast XML for one item: {title, body, launch}; launch (a vscode:// URI) is optional. */
+function toastXml(item) {
+  const launch = item && item.launch ? ' activationType="protocol" launch="' + xmlEscape(item.launch) + '"' : '';
+  return '<toast' + launch + '><visual><binding template="ToastGeneric"><text>' + xmlEscape(item && item.title)
+    + '</text>' + (item && item.body ? '<text>' + xmlEscape(item.body) + '</text>' : '') + '</binding></visual></toast>';
+}
+
+/** The PowerShell script that shows every XML in `xmls`; only base64 and constants appear in it. */
+function toastScript(xmls) {
+  const lines = [
+    "$ErrorActionPreference = 'Stop'",
+    '[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]',
+    '[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]',
+    "$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('" + POWERSHELL_AUMID + "')",
+  ];
+  for (const xml of xmls) {
+    const b64 = Buffer.from(xml, 'utf8').toString('base64');   // [A-Za-z0-9+/=] only: safe inside '...'
+    lines.push("$x = New-Object Windows.Data.Xml.Dom.XmlDocument; $x.LoadXml([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + b64 + "'))); $n.Show([Windows.UI.Notifications.ToastNotification]::new($x))");
+  }
+  return lines.join('\n');
+}
+
+/** Show the toasts of one batch; resolves when PowerShell exits cleanly, rejects otherwise. */
+function showSystemToast(items) {
+  const xmls = (items || []).map(toastXml);
+  if (!xmls.length) return Promise.resolve();
+  const script = toastScript(xmls);
+  if (process.env.SB_TOAST_LOG) {
+    fs.appendFileSync(process.env.SB_TOAST_LOG, JSON.stringify({ script, xml: xmls }) + '\n');
+    return process.env.SB_TOAST_FAIL ? Promise.reject(new Error(process.env.SB_TOAST_FAIL)) : Promise.resolve();
+  }
+  if (!IS_WINDOWS) return Promise.reject(new Error('Windows notifications need Windows'));
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+      env: strippedEnv(), timeout: 15000, windowsHide: true,
+    }, (err, _out, errOut) => {
+      if (!err) return resolve();
+      // -EncodedCommand reports errors as CLIXML on stderr; keep the error strings only
+      const parts = [...String(errOut || '').matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)].map((m) => m[1].replace(/_x000D__x000A_/g, ' ').trim());
+      const detail = parts.join(' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+      reject(new Error(detail || (err && err.message) || 'powershell failed'));
+    });
   });
 }
 
@@ -1571,14 +1812,13 @@ async function snapshot() {
   const claude = readClaudeArchived();
   const unseen = readUnseen();
   const seen = readSeen();
-  const titles = readTitles();
-  const blinded = readBlinded();
+  const muted = readMuted();
   const order = readOrder();
   const sortMode = readSortMode();
   const now = Date.now();
   const liveIds = new Set(rows.map((r) => r.sessionId));
   forgetStatuses(liveIds);
-  pruneDead(BLINDED_DIR, blinded, liveIds, index);
+  pruneDead(MUTED_DIR, muted, liveIds, index);
   pruneDead(ORDER_DIR, order, liveIds, index);
 
   const windows = new Map();
@@ -1612,24 +1852,21 @@ async function snapshot() {
     const changedAt = t.statusUpdatedAt || null;
     const w = windows.get(r.sessionId) || null;
     const tokens = facts.tokens;
-    // a /rename (custom-title line, or the registry's user-set name) beats the generated title;
-    // a board title (✎) beats both while the renamed title is the one it was taken against
+    // Claude Code's name (custom-title line or sidecar, else the registry's user-set name) beats the generated title
     const renamed = facts.customTitle || (t.nameSource === 'user' && r.name ? String(r.name) : null) || null;
-    const board = titles.get(r.sessionId) || null;
-    const boardTitle = board && board.title && (board.seenCustomTitle || null) === renamed ? String(board.title) : null;
-    const answered = noteAnswer(r.sessionId, r.status, changedAt);
-    const u = answered ? { at: changedAt || now } : (unseen.get(r.sessionId) || null);
+    const answeredAt = noteAnswer(r.sessionId, r.status, changedAt);
+    const u = answeredAt ? { at: answeredAt } : (unseen.get(r.sessionId) || null);
     const sn = seen.get(r.sessionId) || null;
+    const isUnseen = r.status === 'idle' && Boolean(u) && (!sn || Number(u.at) > Number(sn.at));
     return {
       sessionId: r.sessionId,
       pid: Number(r.pid),
       window: w ? { id: w.windowId, exthostPid: w.exthostPid, label: labelOf(w) } : null,
       name: r.name || String(r.sessionId).slice(0, 8),
       nameSource: t.nameSource || null,
-      title: boardTitle || renamed || facts.title,
+      title: renamed || facts.title,
       generatedTitle: facts.title,
       renamedTitle: renamed,
-      boardTitle,
       lastPrompt: facts.lastPrompt,
       cwd: r.cwd || '',
       transcriptPath: file,
@@ -1644,8 +1881,9 @@ async function snapshot() {
       hasTranscript: Boolean(file),
       needsAttention: r.status === 'waiting',
       ...archiveSource(r.sessionId, archived, claude.ids),
-      unseen: r.status === 'idle' && Boolean(u) && (!sn || Number(u.at) > Number(sn.at)),
-      blinded: blinded.has(r.sessionId),
+      unseen: isUnseen,
+      unseenAt: isUnseen ? Number(u.at) : null,   // the finished answer's time, the same in every window
+      muted: muted.has(r.sessionId),
       rank: rankOf(order.get(r.sessionId)),
     };
   });
@@ -1952,10 +2190,16 @@ function cancelSearch(requestId) {
  * Title pass over the index plus the live snapshot; optional content pass with ripgrep.
  * Returns { requestId, query, content, total, shown, partial, skipped, rgAvailable, rows }.
  */
+/** "f8005c0d" from "Session f8005c0d", the way Claude Code shows an id; any other query unchanged. */
+function idQuery(q) {
+  const m = /^\s*session\s+([0-9a-f][0-9a-f-]{3,35})\s*$/i.exec(String(q || ''));
+  return m ? m[1] : String(q || '');
+}
+
 async function searchSessions(query, opts) {
   opts = opts || {};
   const requestId = String(opts.requestId || Date.now());
-  const q = String(query || '').trim().slice(0, 200);
+  const q = idQuery(String(query || '')).trim().slice(0, 200);
   const runState = { children: new Set(), aborted: false };
   searchRuns.set(requestId, runState);
   const track = (child) => { runState.children.add(child); child.on('exit', () => runState.children.delete(child)); };
@@ -2077,11 +2321,22 @@ module.exports = {
   thresholds,
   exthostForPid,
   windowForPid,
+  openUri,
+  openUriForPid,
   focusSession,
+  NOTICES_DIR,
+  claimNotice,
+  releaseNotice,
+  toastXml,
+  toastScript,
+  showSystemToast,
+  focusedPeerAt,
   writeHeartbeat,
   heartbeatNames,
   HEARTBEAT_DIR,
   boardAlive,
+  boardVersion,
+  versionAtLeast,
   windowIdForExthost,
   pidAlive,
   readRegistry,
@@ -2093,10 +2348,11 @@ module.exports = {
   unarchiveSession,
   readClaudeArchived,
   archiveSource,
-  BLINDED_DIR,
-  readBlinded,
-  blindSession,
-  unblindSession,
+  MUTED_DIR,
+  LEGACY_BLINDED_DIR,
+  readMuted,
+  muteSession,
+  unmuteSession,
   ORDER_DIR,
   SORT_FILE,
   readOrder,
@@ -2117,22 +2373,23 @@ module.exports = {
   restoreTranscript,
   UNSEEN_DIR,
   SEEN_DIR,
-  TITLES_DIR,
   markUnseen,
   markSeen,
   readUnseen,
   readSeen,
   noteAnswer,
-  readTitles,
-  setTitle,
   transcriptExcerpt,
   cleanTitle,
-  retitleSession,
+  suggestTitle,
+  renameSession,
+  normalizeTitle,
+  titleSidecar,
   ARCHIVE_DIR,
   SESSIONS_DIR,
   rgProbe,
   sessionIndex,
   searchSessions,
+  idQuery,
   cancelSearch,
   isInside,
   DATA_DIR,

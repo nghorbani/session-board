@@ -2,9 +2,9 @@
 /*
  * The order store in core.cjs: rank markers under DATA_DIR/order written as one complete list
  * (setOrder checks every id before the first write), the sort mode in DATA_DIR/sort.json,
- * pruning shared with the blinded store (a marker goes when its session is neither live nor
+ * pruning shared with the muted store (a marker goes when its session is neither live nor
  * has a transcript), and the rank and order.mode fields on the snapshot. The fixture is the
- * one of blinded.test.cjs: temp dirs, the CLI shim, the window map.
+ * one of muted.test.cjs: temp dirs, the CLI shim, the window map.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');

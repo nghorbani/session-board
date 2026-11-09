@@ -23,20 +23,26 @@ shows background agents only, not the sessions you talk to.
   window you are in first, and each heading carries the number of sessions in it that need
   you. Inside a section the ones waiting on a permission prompt, a question or a dialog come
   first, highlighted, with what they are waiting for; working and idle sessions follow. The
-  activity-bar badge counts the waiting ones and a toast tells you when a new session starts
-  waiting.
+  activity-bar badge counts the waiting ones.
+- **Told when it matters.** A toast says when a session starts waiting and when one finishes
+  its answer. When no VS Code window has focus, one Windows notification says it instead, and
+  a click on it opens the session.
 - **Unseen answers stand out.** A session whose answer ended while the board was running
   shows as unseen and counts on its heading until you open it or send it a new prompt.
-- **Blind what can wait.** ⊘ moves a session under a folded Blinded section where it counts
-  nowhere else, even while it waits; ⊙ brings it back.
+- **Mute what can wait.** The bell on a row mutes a session: it stays where it is, but raises
+  no toast or notification and counts nowhere, even while it waits. The struck bell unmutes it.
 - **One click to the session.** A row opens its session where you keep Claude Code, sidebar
   or editor tab, and brings the right VS Code window to the front.
 - **Context at a glance.** Each row shows how much of the context window the session has
   used, amber and red near the limit.
 - **Your usage limits.** The 5-hour and 7-day windows sit at the top of the view with the time
   each one resets, next to the account the CLI is signed in with.
-- **A title that follows the work.** Claude Code titles a session from its first question;
-  ✎ asks for a new title from the recent prompts and the last answer (one short haiku call).
+- **A title that follows the work, shared with Claude Code.** Claude Code titles a session
+  from its first question; ✎ suggests a new one from the recent prompts and the last answer
+  (one short haiku call) and you confirm or edit it. The title is Claude Code's own, so its
+  sidebar and `claude --resume` show it too, and a rename in Claude Code shows on the board.
+- **The session id.** Each row shows "Session f8005c0d"; a click folds out the full id, start
+  time, process and transcript path, each copyable, and search finds a session by its id.
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
 - **Archive a session.** ⤓ ends it the same way and keeps it off the board. It also moves
   the transcript out of Claude Code's project folder, so Claude Code's own session list drops

@@ -1,8 +1,9 @@
 'use strict';
 /*
- * The Blinded store in core.cjs: existence markers under DATA_DIR/blinded, pruning by
- * liveness and transcript presence (no clock), the `blinded` flag on snapshot rows, and the
- * window label from a board heartbeat's workspace name. The CLI is the shim (SB_SHIM_AGENTS
+ * The Muted store in core.cjs: existence markers under DATA_DIR/muted, the move of the 0.10.0
+ * markers out of DATA_DIR/blinded, pruning by liveness and transcript presence (no clock), the
+ * `muted` flag on snapshot rows, the window label from a board heartbeat's workspace name and
+ * the focused flag other boards read from it. The CLI is the shim (SB_SHIM_AGENTS
  * seeds live rows); the registry, the projects dir, the heartbeat dir and the window map are
  * temp dirs or env seams, so no PowerShell and no exthost.log are read.
  */
@@ -12,7 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-blinded-'));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-muted-'));
 process.env.LOCALAPPDATA = tmp;
 process.env.XDG_DATA_HOME = tmp;
 process.env.SB_CODE_USER_DIR = path.join(tmp, 'User');   // never the real state.vscdb
@@ -37,50 +38,99 @@ fs.writeFileSync(path.join(projectsDir, 'proj', A + '.jsonl'), JSON.stringify({ 
 fs.writeFileSync(path.join(projectsDir, 'proj', B + '.jsonl'), JSON.stringify({ type: 'ai-title', aiTitle: 'Ended one', sessionId: B }) + '\n');
 
 const EXT_ID = 'nima-ghorbani.session-board-vscode';
-const marker = (id) => path.join(core.BLINDED_DIR, id + '.json');
+const marker = (id) => path.join(core.MUTED_DIR, id + '.json');
+const legacy = (id) => path.join(core.LEGACY_BLINDED_DIR, id + '.json');
 
 function agents(status, cwd) { process.env.SB_SHIM_AGENTS = JSON.stringify([{ sessionId: A, pid: process.pid, status, cwd: cwd || path.join(tmp, 'webapp'), name: 'me', kind: 'interactive' }]); }
 function registry(status) { fs.writeFileSync(path.join(sessionsDir, process.pid + '.json'), JSON.stringify({ sessionId: A, status, statusUpdatedAt: Date.now() })); }
 async function rowA() { const snap = await core.snapshot(); return snap.sessions.find((s) => s.sessionId === A); }
 
-test('store: blind writes a UUID-named marker, unblind removes it, a missing marker is a no-op, bad ids throw', () => {
-  core.blindSession(A);
+test('store: mute writes a UUID-named marker, unmute removes it, a missing marker is a no-op, bad ids throw', () => {
+  core.muteSession(A);
   assert.ok(fs.existsSync(marker(A)));
-  assert.ok(core.readBlinded().has(A));
-  core.blindSession(A);                                   // twice keeps one marker
-  assert.equal(fs.readdirSync(core.BLINDED_DIR).length, 1);
-  core.unblindSession(A);
+  assert.ok(core.readMuted().has(A));
+  core.muteSession(A);                                    // twice keeps one marker
+  assert.equal(fs.readdirSync(core.MUTED_DIR).length, 1);
+  core.unmuteSession(A);
   assert.equal(fs.existsSync(marker(A)), false);
-  assert.doesNotThrow(() => core.unblindSession(A), 'a second unblind finds nothing and says nothing');
-  assert.throws(() => core.blindSession('nope'), /not a session id/);
-  assert.throws(() => core.unblindSession(''), /not a session id/);
-  assert.equal(core.readBlinded().size, 0);
+  assert.doesNotThrow(() => core.unmuteSession(A), 'a second unmute finds nothing and says nothing');
+  assert.throws(() => core.muteSession('nope'), /not a session id/);
+  assert.throws(() => core.unmuteSession(''), /not a session id/);
+  assert.equal(core.readMuted().size, 0);
 });
 
 test('store: existence is the flag; unreadable content still counts and the file stays', () => {
-  fs.mkdirSync(core.BLINDED_DIR, { recursive: true });
+  fs.mkdirSync(core.MUTED_DIR, { recursive: true });
   fs.writeFileSync(marker(B), 'garb');
-  fs.writeFileSync(path.join(core.BLINDED_DIR, 'notes.txt'), 'ignored');
-  const ids = core.readBlinded();
-  assert.ok(ids.has(B), 'a half-written marker is still a blind');
+  fs.writeFileSync(path.join(core.MUTED_DIR, 'notes.txt'), 'ignored');
+  const ids = core.readMuted();
+  assert.ok(ids.has(B), 'a half-written marker is still a mute');
   assert.equal(ids.size, 1);
   assert.ok(fs.existsSync(marker(B)), 'nothing was deleted on read');
   fs.unlinkSync(marker(B));
-  fs.unlinkSync(path.join(core.BLINDED_DIR, 'notes.txt'));
+  fs.unlinkSync(path.join(core.MUTED_DIR, 'notes.txt'));
 });
 
-test('snapshot: the row carries blinded; a marker survives while the session is live or its transcript exists, and goes with neither', async () => {
+test('migration: a 0.10.0 blinded marker is moved into muted/ on read and reads as muted; unmute clears it for good', () => {
+  fs.mkdirSync(core.LEGACY_BLINDED_DIR, { recursive: true });
+  fs.writeFileSync(legacy(A), JSON.stringify({ at: 1 }));
+  fs.writeFileSync(path.join(core.LEGACY_BLINDED_DIR, 'notes.txt'), 'ignored');
+  assert.ok(core.readMuted().has(A));
+  assert.equal(fs.existsSync(legacy(A)), false, 'moved, not copied');
+  assert.deepEqual(JSON.parse(fs.readFileSync(marker(A), 'utf8')), { at: 1 }, 'the marker itself moved');
+  core.unmuteSession(A);
+  assert.equal(core.readMuted().has(A), false);
+  fs.unlinkSync(path.join(core.LEGACY_BLINDED_DIR, 'notes.txt'));
+});
+
+test('migration race: a second reader finds the marker gone and cannot bring back a mute removed in between', () => {
+  fs.mkdirSync(core.LEGACY_BLINDED_DIR, { recursive: true });
+  fs.writeFileSync(legacy(B), JSON.stringify({ at: 2 }));
+  // window 1 listed blinded/ and moved B; the user unmutes; window 2, which listed blinded/
+  // before the move, now tries the same rename
+  fs.mkdirSync(core.MUTED_DIR, { recursive: true });
+  fs.renameSync(legacy(B), marker(B));
+  core.unmuteSession(B);
+  assert.throws(() => fs.renameSync(legacy(B), marker(B)), { code: 'ENOENT' }, 'the late rename has nothing to move');
+  assert.equal(core.readMuted().has(B), false, 'still unmuted');
+  // unmute also clears a legacy marker that was not moved yet (held by another process)
+  fs.writeFileSync(legacy(C), '{}');
+  core.unmuteSession(C);
+  assert.equal(fs.existsSync(legacy(C)), false);
+  assert.equal(core.readMuted().has(C), false);
+});
+
+test('snapshot: the row carries muted; a marker survives while the session is live or its transcript exists, and goes with neither', async () => {
   registry('idle'); agents('idle');
-  core.blindSession(A); core.blindSession(B); core.blindSession(C);
+  core.muteSession(A); core.muteSession(B); core.muteSession(C);
   let a = await rowA();
-  assert.equal(a.blinded, true);
+  assert.equal(a.muted, true);
+  assert.equal('blinded' in a, false, 'the old flag is gone');
   assert.ok(fs.existsSync(marker(A)), 'live: kept');
   assert.ok(fs.existsSync(marker(B)), 'ended with a transcript: kept for a resume');
   assert.equal(fs.existsSync(marker(C)), false, 'ended without a transcript: dropped');
-  core.unblindSession(A);
+  core.unmuteSession(A);
   a = await rowA();
-  assert.equal(a.blinded, false);
-  core.unblindSession(B);
+  assert.equal(a.muted, false);
+  core.unmuteSession(B);
+});
+
+test('focused peers: the newest fresh heartbeat of another host that reports focus; this host, stale, unfocused and flagless records do not count', () => {
+  fs.rmSync(heartbeatDir, { recursive: true, force: true });
+  assert.equal(core.focusedPeerAt(EXTHOST), 0, 'no heartbeats');
+  core.writeHeartbeat(EXTHOST, EXT_ID, 'me', true);
+  assert.equal(core.focusedPeerAt(EXTHOST), 0, 'this host itself');
+  core.writeHeartbeat(EXTHOST + 1, EXT_ID, 'other', false);
+  core.writeHeartbeat(EXTHOST + 2, EXT_ID, 'older');           // no flag: a board before 0.11.0
+  assert.equal(core.focusedPeerAt(EXTHOST), 0);
+  fs.writeFileSync(path.join(heartbeatDir, 'board-' + (EXTHOST + 3) + '-' + EXT_ID + '.json'), JSON.stringify({ pid: EXTHOST + 3, at: Date.now() - 120000, id: EXT_ID, focused: true }));
+  assert.equal(core.focusedPeerAt(EXTHOST), 0, 'stale');
+  const before = Date.now();
+  core.writeHeartbeat(EXTHOST + 1, EXT_ID, 'other', true);
+  const at = core.focusedPeerAt(EXTHOST);
+  assert.ok(at >= before && at <= Date.now(), 'the focused peer time');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(heartbeatDir, 'board-' + (EXTHOST + 1) + '-' + EXT_ID + '.json'), 'utf8')).focused, true);
+  fs.rmSync(heartbeatDir, { recursive: true, force: true });
 });
 
 test('heartbeat names: a fresh heartbeat names its extension host; nameless, stale and foreign records do not', () => {

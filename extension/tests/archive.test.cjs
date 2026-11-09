@@ -234,6 +234,21 @@ test('search rows carry the archived flag', async () => {
   }
 });
 
+test('search finds a past session by its id, bare or the way Claude Code shows it ("Session <8 hex>"); idQuery leaves other text alone', async () => {
+  assert.deepEqual([core.idQuery('Session f8005c0d'), core.idQuery(' session F8005C0D-4e69 '), core.idQuery('Session board'), core.idQuery('plain')], ['f8005c0d', 'F8005C0D-4e69', 'Session board', 'plain']);
+  const rg = await core.rgProbe(APP_ROOT);
+  if (!rg.path) { assert.ok(true, 'ripgrep not found; id search is checked manually'); return; }
+  const dir = path.join(projectsDir, 'proj');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, B + '.jsonl'),
+    JSON.stringify({ type: 'user', cwd: 'C:\\x', sessionId: B, message: { role: 'user', content: 'hello' } }) + '\n'
+    + JSON.stringify({ type: 'ai-title', aiTitle: 'By id', sessionId: B }) + '\n');
+  for (const q of [B.slice(0, 8), 'Session ' + B.slice(0, 8), B.toUpperCase()]) {
+    const res = await core.searchSessions(q, { content: false, requestId: 'id-' + q, appRoot: APP_ROOT });
+    assert.ok(res.rows.some((r) => r.sessionId === B), q + ': ' + JSON.stringify(res.rows.map((r) => r.sessionId)));
+  }
+});
+
 // The transcript moves with the archive: stow on ⤓, restore on ⤒, and the recovery paths.
 
 const D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';

@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
 const core = require('./core.cjs');
+const { createNotifier } = require('./notify.cjs');
 
 const VIEW_ID = 'sessionBoard.view';
 const POLL_VISIBLE_MS = 5000;
@@ -28,8 +29,7 @@ class BoardProvider {
     this.last = null;
     this.timer = null;
     this.stopped = false;
-    this.prevWaiting = new Set();
-    this.primed = false;
+    this.notifier = this.makeNotifier();
     this.inFlight = false;     // one snapshot at a time; a request during one queues one follow-up
     this.queued = false;
     this.seq = 0;
@@ -83,14 +83,15 @@ class BoardProvider {
         case 'refresh': return await this.refresh();
         case 'open': if (core.UUID_RE.test(sid)) return await this.openSession(sid); return;
         case 'copy': if (core.UUID_RE.test(sid)) return await this.copyResume(sid); return;
+        case 'copyText': return await this.copyText(m.text);
         case 'end': if (core.UUID_RE.test(sid)) return await this.endSession(sid, Boolean(m.force), Boolean(m.archive)); return;
         case 'unarchive': if (core.UUID_RE.test(sid)) return await this.unarchive(sid); return;
         case 'search': return await this.search(String(m.query || ''), Boolean(m.content), String(m.requestId || ''));
         case 'cancelSearch': return this.cancelSearch();
         case 'openPast': if (core.UUID_RE.test(sid)) return await this.openPast(sid, String(m.path || ''), String(m.cwd || '')); return;
         case 'seen': if (core.UUID_RE.test(sid)) this.markSeen(sid); return;
-        case 'blind': if (core.UUID_RE.test(sid)) return this.setBlinded(sid, true); return;
-        case 'unblind': if (core.UUID_RE.test(sid)) return this.setBlinded(sid, false); return;
+        case 'mute': if (core.UUID_RE.test(sid)) return this.setMuted(sid, true); return;
+        case 'unmute': if (core.UUID_RE.test(sid)) return this.setMuted(sid, false); return;
         case 'order': return this.setOrder(m.ids);
         case 'sortMode': return this.setSortMode(m.mode);
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
@@ -117,6 +118,13 @@ class BoardProvider {
     }
     await vscode.env.clipboard.writeText('claude --resume ' + sid);
     vscode.window.setStatusBarMessage('Copied: claude --resume ' + sid, 3000);
+  }
+
+  /** A value from a row's details line (the id, the transcript path) onto the clipboard. */
+  async copyText(text) {
+    if (typeof text !== 'string' || !text) return;
+    await vscode.env.clipboard.writeText(text.slice(0, 4096));
+    vscode.window.setStatusBarMessage('Copied: ' + (text.length > 60 ? text.slice(0, 59) + '…' : text), 3000);
   }
 
   // -- usage limits ----------------------------------------------------------------------
@@ -183,7 +191,7 @@ class BoardProvider {
     if (this.inFlight) { this.queued = true; return; }
     this.inFlight = true;
     const mySeq = ++this.seq;
-    core.writeHeartbeat(process.pid, (this.context.extension && this.context.extension.id) || core.EXTENSION_ID, vscode.workspace.name || null);
+    this.beat();
     try {
       const snap = await core.snapshot();
       if (mySeq === this.seq) {          // an older result never overwrites a newer one
@@ -192,7 +200,7 @@ class BoardProvider {
         this.noteClaudeArchiveError(snap);
         this.push();
         this.updateBadge();
-        this.notifyNewlyWaiting();
+        this.notifier.observe(snap.sessions);
       }
     } catch (e) {
       this.log.error('poll failed: ' + String((e && e.message) || e));
@@ -213,29 +221,44 @@ class BoardProvider {
 
   updateBadge() {
     if (!this.view || !this.last) return;
-    const waiting = this.last.sessions.filter((s) => s.status === 'waiting' && !s.blinded).length;   // blinded sessions are muted
+    const waiting = this.last.sessions.filter((s) => s.status === 'waiting' && !s.muted).length;   // a muted session counts nowhere
     this.view.badge = waiting
       ? { value: waiting, tooltip: waiting + ' Claude Code session' + (waiting === 1 ? '' : 's') + ' need input' }
       : undefined;
   }
 
-  /** Toast on a new waiting session; only the focused window speaks, the badge counts everywhere. A blinded session is tracked but never announced, so unblinding it raises no toast either. */
-  notifyNewlyWaiting() {
-    if (!this.last) return;
-    const now = new Set();
-    const fresh = [];
-    for (const s of this.last.sessions) {
-      if (s.status !== 'waiting') continue;
-      now.add(s.sessionId);
-      if (this.primed && !this.prevWaiting.has(s.sessionId) && !s.blinded) fresh.push(s);
-    }
-    this.prevWaiting = now;
-    this.primed = true;
-    if (!vscode.window.state.focused) return;
-    for (const s of fresh) {
-      vscode.window.showWarningMessage((s.title || s.name) + ': ' + (s.waitingFor || 'needs input'), 'Open')
-        .then((choice) => { if (choice === 'Open') this.openSession(s.sessionId); });
-    }
+  /** This window's heartbeat, with whether it has the OS focus (the other boards leave a notification to a focused window). */
+  beat() {
+    const ext = this.context.extension;
+    core.writeHeartbeat(process.pid, (ext && ext.id) || core.EXTENSION_ID, vscode.workspace.name || null, Boolean(vscode.window.state.focused),
+      (ext && ext.packageJSON && ext.packageJSON.version) || null);
+  }
+
+  /**
+   * Waiting and done notifications (notify.cjs decides which and where): a toast in this window
+   * when it is focused, a Windows notification from one window when none is.
+   */
+  makeNotifier() {
+    const settings = () => {
+      const c = vscode.workspace.getConfiguration('sessionBoard');
+      return { notifyOnDone: c.get('notifyOnDone', true), systemNotifications: c.get('systemNotifications', true) };
+    };
+    return createNotifier({
+      isFocused: () => Boolean(vscode.window.state.focused),
+      focusedPeerAt: () => core.focusedPeerAt(process.pid),
+      claim: (id, kind, at) => core.claimNotice(id, kind, at),
+      release: (id, kind, at) => core.releaseNotice(id, kind, at),
+      launchFor: (row) => core.openUriForPid(row.sessionId, row.pid),
+      showSystemToast: (items) => core.showSystemToast(items),
+      systemAvailable: core.IS_WINDOWS,
+      settings,
+      showVsToast: (ev) => {
+        const show = ev.kind === 'done' ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
+        show(ev.text, 'Open').then((choice) => { if (choice === 'Open') this.openSession(ev.row.sessionId); });
+      },
+      reportFailure: (message) => vscode.window.showWarningMessage('Session Board: Windows notifications are unavailable (' + message + '). Toasts still show in a focused VS Code window.'),
+      log: { info: (m) => this.log.info(m), warn: (m) => this.log.warn(m) },
+    });
   }
 
   sessionRow(sessionId) {
@@ -272,9 +295,15 @@ class BoardProvider {
   /** vscode://<this extension id>/open?session=<id>, routed here by windowId. */
   async handleUri(uri) {
     this.log.info('uri ' + uri.toString(true));
+    if (uri.path === '/rename') {
+      const id = new URLSearchParams(uri.query).get('session') || '';
+      if (core.UUID_RE.test(id)) await this.openClaudeRename(id);
+      return;
+    }
     if (uri.path !== '/open') return;
     const sessionId = new URLSearchParams(uri.query).get('session') || '';
     if (!core.UUID_RE.test(sessionId)) return;
+    this.markSeen(sessionId);                 // a click on a Windows notification counts as opening it
     if (!(await this.revealHere(sessionId))) {
       vscode.window.showWarningMessage('Claude Code is not active in this window, so the session could not be opened here.');
     }
@@ -405,19 +434,19 @@ class BoardProvider {
     this.schedule(0);
   }
 
-  /** âŠ˜ and âŠ™ on a row: the shared marker is written or removed, the page hears the outcome, the next snapshot moves the row. */
-  setBlinded(sessionId, blinded) {
+  /** The bell on a row: the shared mute marker is written or removed, the page hears the outcome, the next snapshot carries the flag. */
+  setMuted(sessionId, muted) {
     let ok = true;
     let message = '';
     try {
-      if (blinded) core.blindSession(sessionId); else core.unblindSession(sessionId);
-      this.log.info((blinded ? 'blind ' : 'unblind ') + sessionId);
+      if (muted) core.muteSession(sessionId); else core.unmuteSession(sessionId);
+      this.log.info((muted ? 'mute ' : 'unmute ') + sessionId);
     } catch (e) {
       ok = false;
       message = String((e && e.message) || e);
-      this.log.error((blinded ? 'blind ' : 'unblind ') + sessionId + ' failed: ' + message);
+      this.log.error((muted ? 'mute ' : 'unmute ') + sessionId + ' failed: ' + message);
     }
-    this.post({ type: 'blindResult', sessionId, ok, blinded: ok ? blinded : false, message });
+    this.post({ type: 'muteResult', sessionId, ok, muted: ok ? muted : false, message });
     this.schedule(0);
   }
 
@@ -462,13 +491,95 @@ class BoardProvider {
     try { core.markSeen(sessionId); } catch (e) { this.log.warn('seen marker for ' + sessionId + ' failed: ' + String((e && e.message) || e)); }
   }
 
-  /** ✎ on a row: one short model call over the transcript; the reply becomes the board's title. */
+  /**
+   * ✎ on a row: a small model suggests a title; Claude Code keeps it.
+   *   a running session in a VS Code window ──▶ handToClaude: the suggestion on the clipboard,
+   *     the session opened in its window and Claude's own rename box (Claude tells the CLI, so
+   *     the name survives the next answer) ──▶ retitleResult code handed
+   *   any other ──▶ an input box prefilled with the suggestion ──▶ Escape: code cancelled;
+   *     Enter: core.renameSession writes Claude's title ──▶ retitleResult with the title
+   * The page hears retitleResult on every outcome, so its ✎ never stays busy.
+   */
   async retitle(sessionId) {
-    const result = await core.retitleSession(sessionId);
-    if (result.ok) this.log.info('retitle ' + sessionId + ': "' + result.title + '"');
-    else this.log.warn('retitle ' + sessionId + ' failed: ' + (result.message || result.code));
-    this.post({ type: 'retitleResult', sessionId, ok: Boolean(result.ok), title: result.ok ? result.title : null, message: result.ok ? '' : (result.message || result.code || '') });
-    if (result.ok) this.schedule(0);
+    const reply = (r) => this.post(Object.assign({ type: 'retitleResult', sessionId, ok: false, title: null, message: '' }, r));
+    try {
+      const row = this.sessionRow(sessionId);
+      const suggestion = await core.suggestTitle(sessionId);
+      if (suggestion.ok) this.log.info('title suggestion for ' + sessionId + ': "' + suggestion.title + '"');
+      else this.log.warn('title suggestion for ' + sessionId + ' failed: ' + (suggestion.message || suggestion.code));
+      if (row && row.window && core.pidAlive(row.pid)) {
+        await this.handToClaude(row, suggestion.ok ? suggestion.title : null);
+        return reply({ ok: true, code: 'handed' });
+      }
+      const current = (row && row.title) || '';
+      const typed = await vscode.window.showInputBox({
+        title: 'Session title (written where Claude Code reads it)',
+        prompt: suggestion.ok ? 'Suggested from the progress so far; edit or replace it' : 'No suggestion (' + (suggestion.message || suggestion.code) + '); type a title',
+        value: suggestion.ok ? suggestion.title : current,
+        validateInput: (v) => (v && v.trim() ? undefined : 'Enter a title'),
+      });
+      if (typed === undefined) return reply({ code: 'cancelled' });
+      const result = core.renameSession(sessionId, typed);
+      if (result.code === 'claude-owned') {               // it started running meanwhile
+        if (row) await this.handToClaude(row, typed.trim());
+        return reply({ ok: true, code: 'handed' });
+      }
+      if (!result.ok) {
+        this.log.warn('rename ' + sessionId + ' failed: ' + (result.message || result.code));
+        return reply({ code: result.code, message: result.message || result.code });
+      }
+      this.log.info('rename ' + sessionId + ': "' + result.title + '"' + (result.warning ? ' (' + result.warning + ')' : ''));
+      if (result.warning) vscode.window.showWarningMessage('Renamed, but ' + result.warning);
+      reply({ ok: true, title: result.title });
+      this.schedule(0);
+    } catch (e) {
+      const message = String((e && e.message) || e);
+      this.log.error('rename ' + sessionId + ' failed: ' + message);
+      reply({ message });
+    }
+  }
+
+  /**
+   * A running session keeps the name its CLI holds, so its rename goes through Claude Code:
+   * the text goes onto the clipboard, then Claude's rename box opens in the session's window
+   * (here, or through the board running there, 0.11.0 or newer). Without such a board the
+   * message says where to rename.
+   */
+  async handToClaude(row, text) {
+    if (text) await vscode.env.clipboard.writeText(text);
+    const hint = text ? 'Suggested title copied: paste it into Claude Code\'s rename box.' : 'Rename the session in Claude Code\'s rename box.';
+    const owner = await core.exthostForPid(Number(row.pid));
+    if (owner === process.pid) {
+      vscode.window.setStatusBarMessage(hint, 8000);
+      await this.openClaudeRename(row.sessionId);
+      return;
+    }
+    const win = await core.windowForPid(Number(row.pid));
+    const board = win ? core.boardAlive(win.exthostPid) : null;
+    if (win && board && core.versionAtLeast(core.boardVersion(win.exthostPid), '0.11.0')) {
+      try {
+        await core.focusSession(row.sessionId, win.windowId, { viaBoard: board, route: 'rename' });
+        vscode.window.setStatusBarMessage(hint, 8000);
+        return;
+      } catch (e) { this.log.warn('rename hand-over failed: ' + String((e && e.message) || e)); }
+    }
+    vscode.window.showInformationMessage('That session runs in another window without a current Session Board. Rename it there in Claude Code' + (text ? ' (the suggested title is on the clipboard).' : '.'));
+  }
+
+  /** Open the session here and Claude Code's rename box for it; nothing runs when the session could not be revealed. */
+  async openClaudeRename(sessionId) {
+    if (!(await this.revealHere(sessionId))) {
+      vscode.window.showInformationMessage('The session could not be opened here; rename it in Claude Code.');
+      return false;
+    }
+    try {
+      await vscode.commands.executeCommand('claude-vscode.renameSessionTab');
+      return true;
+    } catch (e) {
+      this.log.warn('claude-vscode.renameSessionTab failed: ' + String((e && e.message) || e));
+      vscode.window.showInformationMessage('Claude Code did not open its rename box; use "Claude Code: Rename Session Tab" on the session.');
+      return false;
+    }
   }
 
   // -- search ----------------------------------------------------------------------------
@@ -541,6 +652,7 @@ function activate(context) {
     }),
     vscode.commands.registerCommand('sessionBoard.refreshUsage', () => provider.refreshUsage()),
     vscode.window.registerUriHandler({ handleUri: (uri) => provider.handleUri(uri) }),
+    vscode.window.onDidChangeWindowState(() => provider.beat()),   // the other boards learn about a focus change within a poll
     { dispose: () => provider.stop() },
   );
   log.info('activated in extension host ' + process.pid + ' as ' + ((context.extension && context.extension.id) || core.EXTENSION_ID));

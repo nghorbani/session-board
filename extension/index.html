@@ -111,7 +111,7 @@
   }
   .group.results h2 { color: var(--busy); }
 
-  /* one section per VS Code window, each with a Blinded group (h3) at its bottom; every head is a button that folds its body */
+  /* one section per VS Code window; every head is a button that folds its body */
   .section { margin-bottom: 18px; }
   .section-head { margin: 0 0 8px; }
   .section-head .fold {
@@ -125,9 +125,6 @@
   .section.unseen > .section-head .label { color: var(--ok); }
   .section-head .n { color: var(--faint); font-weight: 500; letter-spacing: 0; text-transform: none; }
   .section.folded > .section-body { display: none; }
-  .section .section.blinded { margin: 4px 0 0 10px; }   /* the group reads as part of its section */
-  h3.section-head { margin: 0 0 6px; }
-  h3.section-head .fold { font-size: 10.5px; letter-spacing: .7px; }
   .badge {
     display: inline-block; min-width: 18px; padding: 0 6px; border-radius: 9px; text-align: center;
     font-size: 10.5px; font-weight: 600; letter-spacing: 0; line-height: 16px; font-variant-numeric: tabular-nums;
@@ -136,7 +133,8 @@
   .badge.wait { background: color-mix(in srgb, var(--wait) 28%, var(--panel-2)); color: var(--wait); }
   .badge.unseen { background: color-mix(in srgb, var(--ok) 22%, var(--panel-2)); color: var(--ok); }
   .chip.here { color: var(--busy); border-color: var(--busy); text-transform: none; letter-spacing: 0; font-weight: 500; }
-  .chip.blinded { color: var(--faint); border-style: dotted; }
+  .chip.muted { color: var(--faint); border-style: dotted; }
+  .row.muted .main, .row.muted .status { opacity: .6; }   /* silent and uncounted, still in its place */
   .subhead {
     display: flex; align-items: center; gap: 7px; margin: 10px 0 6px 2px;
     font-size: 11px; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: .9px;
@@ -175,6 +173,12 @@
   .sub { color: var(--faint); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sub .nm { color: var(--dim); }
   .chip { color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-right: 6px; font-size: 10.5px; }
+  .sid { background: none; border: none; padding: 0; margin: 0 6px 0 0; color: var(--faint); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+  .sid:hover { color: var(--text); text-decoration: underline; border: none; background: none; }
+  .details { color: var(--faint); font-size: 11px; margin-top: 4px; line-height: 1.6; }
+  .details div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .details .k { color: var(--dim); margin-right: 4px; }
+  .details .iconbtn { font-size: 11px; padding: 0 3px; }
   .chip.live { color: var(--ok); border-color: var(--ok); }
   .snips { grid-column: 1 / -1; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
   .snips div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -190,7 +194,8 @@
   .iconbtn.end:hover { color: var(--crit); }
   .iconbtn.archive:hover, .iconbtn.unarchive:hover { color: var(--busy); }
   .iconbtn.retitle:hover { color: var(--ok); }
-  .iconbtn.blind:hover, .iconbtn.unblind:hover { color: var(--busy); }
+  .iconbtn.mute, .iconbtn.unmute { display: inline-flex; align-items: center; vertical-align: middle; }
+  .iconbtn.mute:hover, .iconbtn.unmute:hover { color: var(--busy); }
   .iconbtn.confirm { color: var(--crit); font-size: 12px; font-weight: 600; background: color-mix(in srgb, var(--crit) 15%, transparent); }
   .status { font-size: 12px; white-space: nowrap; }
   .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: var(--idle); }
@@ -264,7 +269,7 @@ var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
 var POLL_MS = 4000;
 var IDLE_HIDE_MINUTES = 120;
 var CONFIRM_MS = 3000;
-var BLIND_PENDING_MS = 10000;   // ⊘/⊙ keep the row where it was clicked to until a snapshot agrees, at most this long
+var MUTE_PENDING_MS = 10000;    // the bell keeps the flag it was clicked to until a snapshot agrees, at most this long
 var ORDER_PENDING_MS = 10000;   // a move or a mode switch holds its result until a snapshot agrees, at most this long
 var ORDER_QUERY_MAX = 8000;     // the browser route's cap on the comma-joined id list (server.cjs says the same)
 
@@ -272,8 +277,9 @@ var state = {
   data: null,
   showStale: Object.create(null),           // section key -> true while its "Show N idle over 2h" is open
   showArchived: false,                      // "Show N archived" toggle
-  folded: Object.create(null),              // section key -> folded; absent keys follow isFolded (a Blinded group starts folded)
-  pendingBlind: Object.create(null),        // sessionId -> { blinded, until } from ⊘/⊙ until a snapshot agrees
+  folded: Object.create(null),              // section key -> folded; a section starts open
+  pendingMute: Object.create(null),         // sessionId -> { muted, until } from the bell until a snapshot agrees
+  details: Object.create(null),             // sessionId -> true while its details line is folded out (memory only)
   pendingOrder: Object.create(null),        // group key -> { ids, until } from a move until a snapshot agrees
   pendingMode: null,                        // { mode, until } from the header switch until a snapshot agrees
   drag: null,                               // { sid, key, over } while a handle is dragged; renders wait for dragend
@@ -282,6 +288,8 @@ var state = {
   search: null,                             // { requestId, query, content, pending, result }
   pendingEnd: Object.create(null),          // sessionId -> { kind: 'confirming'|'pending'|'ended'|'error', archive, pid, until, message }
   prevWaiting: Object.create(null),
+  prevUnseenAt: Object.create(null),        // sessionId -> the unseenAt last seen (the browser done Notification)
+  known: Object.create(null),               // ids of the last snapshot: a done Notification needs a row seen before
   firstLoad: true,
   flashes: Object.create(null),             // sessionId -> { cls, text, until }
   retitling: Object.create(null),           // sessionId -> true while ✎ waits for the new title
@@ -482,17 +490,17 @@ function actionsHtml(s, opts) {
   var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
   var html = '<span class="age">' + esc(age) + '</span>';
   html += '<button class="iconbtn copy" title="copy: claude --resume …' + (boardArchived(s) ? ' (brings the transcript back first)' : '') + '" data-act="copy">⧉</button>';
-  if (opts.endable) {
+  if (opts.endable || (opts.past && !s.live)) {
     html += state.retitling[s.sessionId]
       ? '<button class="iconbtn retitle" disabled title="asking for a title…">…</button>'
-      : '<button class="iconbtn retitle" data-act="retitle" title="Retitle from the progress so far (one short model call)">✎</button>';
+      : '<button class="iconbtn retitle" data-act="retitle" title="Rename in Claude Code: a model suggests a title from the progress so far, you confirm or edit it">✎</button>';
   }
   if (opts.endable) {
-    var pb = state.pendingBlind[s.sessionId];
-    var dis = pb && pb.until > Date.now() ? ' disabled' : '';
-    html += isBlinded(s)
-      ? '<button class="iconbtn unblind" data-act="unblind"' + dis + ' title="Unblind: show this session in its window section again">⊙</button>'
-      : '<button class="iconbtn blind" data-act="blind"' + dis + ' title="Blind: keep this session under Blinded, out of every count, until you bring it back">⊘</button>';
+    var pm = state.pendingMute[s.sessionId];
+    var dis = pm && pm.until > Date.now() ? ' disabled' : '';
+    html += isMuted(s)
+      ? '<button class="iconbtn unmute" data-act="unmute"' + dis + ' title="Unmute: notify and count this session again"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.6 11h10.8L12 8.5V5.8a4 4 0 0 0-4-4zM6.4 12.6a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.2 2.2l11.6 11.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>'
+      : '<button class="iconbtn mute" data-act="mute"' + dis + ' title="Mute: no notifications and no count for this session"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.6 11h10.8L12 8.5V5.8a4 4 0 0 0-4-4zM6.4 12.6a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>';
   }
   if (boardArchived(s)) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: bring the transcript back and show this session on the board again">⤒</button>';
   if (opts.endable) {
@@ -509,6 +517,45 @@ function actionsHtml(s, opts) {
   return html;
 }
 
+/** "f8005c0d" from "Session f8005c0d", as Claude Code shows an id; any other query unchanged. */
+function idQuery(q) {
+  var m = /^\s*session\s+([0-9a-f][0-9a-f-]{3,35})\s*$/i.exec(String(q || ''));
+  return m ? m[1] : String(q || '');
+}
+
+function fmtStarted(ms) {
+  if (!ms) return null;
+  var d = new Date(Number(ms));
+  if (isNaN(d.getTime())) return null;
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+/** The folded-out details of a row: full id, start, process, window, transcript; id and path copy. */
+function detailsHtml(s, opts) {
+  if (!state.details[s.sessionId]) return '';
+  var copy = function (v, what) { return '<button class="iconbtn copyval" data-act="copyval" data-copy="' + esc(v) + '" title="copy the ' + what + '">⧉</button>'; };
+  var lines = ['<div><span class="k">id</span>' + esc(s.sessionId) + copy(s.sessionId, 'session id') + '</div>'];
+  var started = fmtStarted(s.startedAt);
+  var facts = [];
+  if (started) facts.push('<span class="k">started</span>' + esc(started));
+  if (!opts.past && s.pid) facts.push('<span class="k">pid</span>' + esc(s.pid));
+  if (s.window) facts.push('<span class="k">window</span>' + esc(s.window.label || ('window ' + s.window.id)));
+  if (s.kind && s.kind !== 'interactive') facts.push('<span class="k">kind</span>' + esc(s.kind));
+  if (facts.length) lines.push('<div>' + facts.join(' · ') + '</div>');
+  var file = s.transcriptPath || s.path || '';
+  if (file) lines.push('<div title="' + esc(file) + '"><span class="k">transcript</span>' + esc(file) + copy(file, 'transcript path') + '</div>');
+  return '<div class="details">' + lines.join('') + '</div>';
+}
+
+/** Put text on the clipboard: through the host in VS Code, the browser API otherwise. */
+function copyText(sid, text) {
+  if (vsapi) { send({ type: 'copyText', text: String(text).slice(0, 4096) }); flash(sid, 'copied', 'copied'); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () { flash(sid, 'copied', 'copied'); }, function () { window.prompt('Copy:', text); });
+  } else window.prompt('Copy:', text);
+}
+
 function rowHtml(s, limits, opts) {
   opts = opts || {};
   var isLive = opts.past ? s.live : true;
@@ -517,6 +564,7 @@ function rowHtml(s, limits, opts) {
   if (pe && pe.kind === 'pending') cls += ' ending';
   if (pe && pe.kind === 'error') cls += ' error';
   if (s.archived) cls += ' archived';
+  if (!opts.past && isMuted(s)) cls += ' muted';
   var movable = isLive && !opts.past && canMove();   // manual mode and no filter: the handle shows only where a move can happen
   if (movable) cls += ' manual';
   var flash = state.flashes[s.sessionId];
@@ -549,8 +597,8 @@ function rowHtml(s, limits, opts) {
   else if (by === 'both') chips += '<span class="chip archived" title="archived on the board and in Claude Code\'s sidebar; ⤒ clears the board\'s flag">archived here and in Claude Code</span>';
   else if (by === 'board') chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
   if (opts.past && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
-  if (!opts.past && isBlinded(s) && state.filter) chips += '<span class="chip blinded" title="blinded: shown here because it matches the filter">blinded</span>';
-  var sub = chips + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
+  if (!opts.past && isMuted(s)) chips += '<span class="chip muted" title="muted: no notifications, not counted">muted</span>';
+  var sub = chips + '<button class="sid" data-act="details" title="' + esc(s.sessionId) + ' (click for details)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
   var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
@@ -563,14 +611,14 @@ function rowHtml(s, limits, opts) {
   }
 
   return '<div class="row ' + cls + '" data-session="' + esc(s.sessionId) + '" data-live="' + (isLive ? '1' : '0') + '" data-archived="' + (s.archived ? '1' : '0') + '" data-board-archived="' + (boardArchived(s) ? '1' : '0') + '"'
-    + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-blinded="' + (isBlinded(s) ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
+    + ' data-haswindow="' + (s.window ? '1' : '0') + '" data-muted="' + (isMuted(s) ? '1' : '0') + '" data-path="' + esc(s.path || s.transcriptPath || '') + '" data-cwd="' + esc(s.cwd || '') + '"'
     + (opts.past ? '' : ' data-group="' + esc(groupKey(s)) + '" tabindex="0"')
     + ' title="' + esc(s.cwd) + (s.name ? '\n' + esc(s.name) : '') + '\n' + esc(hint) + '">'
     + (movable ? '<span class="handle" draggable="true" title="drag to reorder (Alt+Up or Alt+Down with the keyboard)" aria-hidden="true">⋮⋮</span>' : '')
-    + '<div class="main"><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div></div>'
+    + '<div class="main"><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div>' + detailsHtml(s, opts) + '</div>'
     + '<div class="status"><span class="dot"></span>' + statusText + '</div>'
     + '<div>' + ctx + '</div>'
-    + '<div class="actions">' + actionsHtml(s, { endable: isLive && !opts.past }) + '</div>'
+    + '<div class="actions">' + actionsHtml(s, { endable: isLive && !opts.past, past: Boolean(opts.past) }) + '</div>'
     + snips
     + '</div>';
 }
@@ -732,58 +780,81 @@ function onUnarchiveResult(r) {
 }
 
 /*
- * ✎: click ──▶ state.retitling[sid] = true (button disabled, "…") ──▶ host or POST /api/retitle/<id>
- *    result ok ──▶ the row shows the title at once; the next snapshot carries it from the store
+ * ✎: click ──▶ state.retitling[sid] = true (button disabled, "…")
+ *    VS Code: the host suggests, asks, writes or hands over to Claude's rename box ──▶ retitleResult
+ *    browser: POST /api/title/suggest/<id> ──▶ prompt() prefilled ──▶ POST /api/title/<id>?title=
+ *    result ok ──▶ the row shows the title at once; the next snapshot reads it from Claude's files
+ *    code cancelled ──▶ nothing; code claude-owned (browser) ──▶ the suggestion is copied, the notice says why
  *    result not ok ──▶ the message on the row for 6 s, like a failed end
  */
+/** A row of the current search result, or undefined. */
+function searchRow(sid) { return ((state.search && state.search.result && state.search.result.rows) || []).filter(function (x) { return x.sessionId === sid; })[0]; }
+
 function requestRetitle(sid) {
   if (state.retitling[sid]) return;
   state.retitling[sid] = true;
   render();
   if (vsapi) { send({ type: 'retitle', sessionId: sid }); return; }
-  api('POST', '/api/retitle/' + encodeURIComponent(sid)).then(function (res) {
+  var fail = function (message) { onRetitleResult({ sessionId: sid, ok: false, title: null, message: message }); };
+  api('POST', '/api/title/suggest/' + encodeURIComponent(sid)).then(function (res) {
     var b = res.body || {};
-    onRetitleResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), title: b.title || null, message: b.message || b.error || ('http ' + res.status) });
-  }).catch(function () { onRetitleResult({ sessionId: sid, ok: false, title: null, message: 'server not reachable' }); });
+    var current = rowById(sid) || searchRow(sid) || {};
+    var proposal = res.ok && b.ok ? b.title : (current.title || '');
+    var typed = window.prompt('Session title' + (res.ok && b.ok ? '' : ' (no suggestion: ' + (b.message || b.error || ('http ' + res.status)) + ')'), proposal);
+    if (typed === null || !typed.trim()) { onRetitleResult({ sessionId: sid, ok: false, code: 'cancelled' }); return; }
+    return api('POST', '/api/title/' + encodeURIComponent(sid) + '?title=' + encodeURIComponent(typed.trim().slice(0, 200))).then(function (w) {
+      var wb = w.body || {};
+      if (w.status === 409) {
+        copyText(sid, typed.trim());
+        delete state.retitling[sid];
+        notice('rename it in Claude Code: the session is running and its CLI would write its own name back (the title is on the clipboard)');
+        render();
+        return;
+      }
+      onRetitleResult({ sessionId: sid, ok: Boolean(w.ok && wb.ok), title: wb.title || null, message: wb.message || wb.error || ('http ' + w.status) });
+    });
+  }).catch(function () { fail('server not reachable'); });
 }
 
 function onRetitleResult(r) {
   delete state.retitling[r.sessionId];
-  if (!r.ok) { endError(r.sessionId, 'retitle failed: ' + (r.message || 'unknown')); return; }
-  var live = rowById(r.sessionId);
-  if (live && r.title) live.title = r.title;
-  flash(r.sessionId, 'retitled', 'copied');
+  if (r.code === 'cancelled') { render(); return; }
+  if (r.code === 'handed') { render(); flash(r.sessionId, 'in Claude', 'copied'); return; }
+  if (!r.ok) { endError(r.sessionId, 'rename failed: ' + (r.message || 'unknown')); return; }
+  var target = rowById(r.sessionId) || searchRow(r.sessionId);
+  if (target && r.title) target.title = r.title;
+  flash(r.sessionId, 'renamed', 'copied');
 }
 
 /*
- * ⊘ and ⊙: click ──▶ state.pendingBlind[sid] = { blinded, until: now + 10 s } ──▶ render: the row moves
- *    under Blinded (or back) at once and both buttons are disabled ──▶ host or POST /api/blind|unblind/<id>
+ * The bell: click ──▶ state.pendingMute[sid] = { muted, until: now + 10 s } ──▶ render: the row shows
+ *    the new flag at once and its bell is disabled ──▶ host or POST /api/mute|unmute/<id>
  *    result ok ──▶ the row keeps its flag; the entry stays until a snapshot agrees or the 10 s pass
- *    result not ok ──▶ the entry goes, the row returns, the notice line says why
+ *    result not ok ──▶ the entry goes, the flag returns, the notice line says why
  */
-function requestBlind(sid, blinded) {
-  var pb = state.pendingBlind[sid];
-  if (pb && pb.until > Date.now()) return;                 // one request at a time; a second click is ignored
-  state.pendingBlind[sid] = { blinded: Boolean(blinded), until: Date.now() + BLIND_PENDING_MS };
+function requestMute(sid, muted) {
+  var pm = state.pendingMute[sid];
+  if (pm && pm.until > Date.now()) return;                 // one request at a time; a second click is ignored
+  state.pendingMute[sid] = { muted: Boolean(muted), until: Date.now() + MUTE_PENDING_MS };
   render();
-  setTimeout(render, BLIND_PENDING_MS + 50);              // the guard's expiry needs a repaint
-  if (vsapi) { send({ type: blinded ? 'blind' : 'unblind', sessionId: sid }); return; }
-  api('POST', '/api/' + (blinded ? 'blind' : 'unblind') + '/' + encodeURIComponent(sid)).then(function (res) {
+  setTimeout(render, MUTE_PENDING_MS + 50);               // the guard's expiry needs a repaint
+  if (vsapi) { send({ type: muted ? 'mute' : 'unmute', sessionId: sid }); return; }
+  api('POST', '/api/' + (muted ? 'mute' : 'unmute') + '/' + encodeURIComponent(sid)).then(function (res) {
     var b = res.body || {};
-    onBlindResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), blinded: Boolean(blinded), message: b.error || b.message || ('http ' + res.status) });
-  }).catch(function () { onBlindResult({ sessionId: sid, ok: false, blinded: Boolean(blinded), message: 'server not reachable' }); });
+    onMuteResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), muted: Boolean(muted), message: b.error || b.message || ('http ' + res.status) });
+  }).catch(function () { onMuteResult({ sessionId: sid, ok: false, muted: Boolean(muted), message: 'server not reachable' }); });
 }
 
-function onBlindResult(r) {
+function onMuteResult(r) {
   if (!r.ok) {
-    delete state.pendingBlind[r.sessionId];
-    notice((r.blinded ? 'blind' : 'unblind') + ' failed: ' + (r.message || 'unknown'));
+    delete state.pendingMute[r.sessionId];
+    notice((r.muted ? 'mute' : 'unmute') + ' failed: ' + (r.message || 'unknown'));
     render();
     return;
   }
   var live = rowById(r.sessionId);
-  if (live) live.blinded = Boolean(r.blinded);             // the next snapshot carries the same flag
-  flash(r.sessionId, r.blinded ? 'blinded' : 'back', 'copied');
+  if (live) live.muted = Boolean(r.muted);                 // the next snapshot carries the same flag
+  flash(r.sessionId, r.muted ? 'muted' : 'unmuted', 'copied');
 }
 
 /*
@@ -840,7 +911,6 @@ function groupLists(key) {
   for (var i = 0; i < g.sections.length; i++) {
     var sec = g.sections[i];
     if (sec.key === key) return { shown: ids(sec.shown), hidden: ids(sec.rows.filter(function (s) { return sec.shown.indexOf(s) === -1; })) };
-    if (sec.blinded && sec.blinded.key === key) return { shown: ids(sec.blinded.rows), hidden: [] };
   }
   return null;
 }
@@ -934,9 +1004,11 @@ function onRowClick(ev) {
     ev.stopPropagation();
     var act = btn.getAttribute('data-act');
     if (act === 'copy') { copyBack(el, sid); return; }
+    if (act === 'details') { state.details[sid] = !state.details[sid]; render(); return; }
+    if (act === 'copyval') { copyText(sid, btn.getAttribute('data-copy') || ''); return; }
     if (act === 'unarchive') { requestUnarchive(sid); return; }
     if (act === 'retitle') { requestRetitle(sid); return; }
-    if (act === 'blind' || act === 'unblind') { requestBlind(sid, act === 'blind'); return; }
+    if (act === 'mute' || act === 'unmute') { requestMute(sid, act === 'mute'); return; }
     if (act === 'end' || act === 'archive') { startConfirm(sid, act === 'archive'); return; }
     return;
   }
@@ -978,7 +1050,7 @@ function clearSearch() {
 
 function matchesFilter(s) {
   if (!state.filter) return true;
-  var f = state.filter.toLowerCase();
+  var f = idQuery(state.filter).toLowerCase();
   return [s.title, s.lastPrompt, s.name, s.cwd, s.sessionId].some(function (v) { return typeof v === 'string' && v.toLowerCase().indexOf(f) !== -1; });
 }
 
@@ -990,17 +1062,16 @@ function statusRank(s) { return s.status === 'waiting' ? 0 : s.status === 'busy'
 function sectionKey(s) { return s.window ? 'w' + s.window.id : 'none'; }
 function sectionLabel(s) { return s.window ? (s.window.label || ('window ' + s.window.id)) : 'Elsewhere'; }
 function isStale(s) { return statusRank(s) === 3 && !(s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES); }
-/** The row's blind flag as the page shows it: a fresh ⊘/⊙ click wins over the last snapshot. */
-function isBlinded(s) { var p = state.pendingBlind[s.sessionId]; return p && p.until > Date.now() ? p.blinded : Boolean(s.blinded); }
+/** The row's mute flag as the page shows it: a fresh click on the bell wins over the last snapshot. */
+function isMuted(s) { var p = state.pendingMute[s.sessionId]; return p && p.until > Date.now() ? p.muted : Boolean(s.muted); }
 
 /*
- * Sections: one per VS Code window, "Elsewhere" for rows without one, each with its own folded
- * Blinded group at the bottom, and the archived rows that are put away. Precedence per row: an
- * ended row is dropped, archived-and-not-waiting goes to Archived, blinded goes under its
- * section's Blinded group (waiting or not), the rest to its window. A typed filter shows
- * archived and blinded matches in place. The badge of a section counts its rows that wait or
- * are unseen; the Blinded group carries its own. Order: this window first, then by waiting
- * rows, unseen rows and label; Elsewhere last.
+ * Sections: one per VS Code window, "Elsewhere" for rows without one, and the archived rows that
+ * are put away. Precedence per row: an ended row is dropped, archived-and-not-waiting goes to
+ * Archived, the rest to its window, muted or not (a muted row keeps its place and its colour).
+ * A typed filter shows archived matches in place. The badge of a section counts its rows that
+ * wait or are unseen, muted rows left out. Order: this window first, then by waiting rows,
+ * unseen rows and label; Elsewhere last.
  */
 /** The order the switch chose: a pending switch wins over the snapshot; an older server without `order` means activity. */
 function currentMode() {
@@ -1008,7 +1079,7 @@ function currentMode() {
   if (p && p.until > Date.now()) return p.mode;
   return state.data && state.data.order && state.data.order.mode === 'manual' ? 'manual' : 'activity';
 }
-function groupKey(s) { return sectionKey(s) + (isBlinded(s) && !state.filter ? ':blinded' : ''); }
+function groupKey(s) { return sectionKey(s); }
 /** The row's rank as the page sorts it: a pending move of its group wins over the snapshot; null means unranked (on top). */
 function rankOf(s) {
   var po = state.pendingOrder[groupKey(s)];
@@ -1025,19 +1096,20 @@ function rowOrder(a, b) {
 function groupSessions(rows, thisWindowId) {
   var filter = Boolean(state.filter);
   var byKey = Object.create(null), archived = [];
-  var add = function (s, blind) {
+  var add = function (s) {
     var key = sectionKey(s);
-    if (!byKey[key]) byKey[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [], blindRows: [] };
-    (blind ? byKey[key].blindRows : byKey[key].rows).push(s);
+    if (!byKey[key]) byKey[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [] };
+    byKey[key].rows.push(s);
   };
   rows.forEach(function (s) {
     if (!matchesFilter(s)) return;
     var pe = state.pendingEnd[s.sessionId];
     if (pe && pe.kind === 'ended') return;
     if (putAway(s) && !filter) { archived.push(s); return; }
-    add(s, isBlinded(s) && !filter);
+    add(s);
   });
   var counts = function (list) {
+    list = list.filter(function (s) { return !isMuted(s); });   // a muted row counts nowhere
     var waiting = list.filter(function (s) { return s.status === 'waiting'; }).length;
     var unseen = list.filter(function (s) { return s.status !== 'waiting' && s.status !== 'busy' && s.unseen; }).length;
     return { waiting: waiting, unseen: unseen, badge: waiting + unseen };
@@ -1047,8 +1119,6 @@ function groupSessions(rows, thisWindowId) {
     Object.assign(sec, counts(sec.rows));
     sec.stale = filter ? [] : sec.rows.filter(isStale);
     sec.shown = state.showStale[sec.key] ? sec.rows : sec.rows.filter(function (s) { return sec.stale.indexOf(s) === -1; });
-    var blind = sec.blindRows.sort(rowOrder);
-    sec.blinded = blind.length ? Object.assign({ key: sec.key + ':blinded', rows: blind }, counts(blind)) : null;
     return sec;
   };
   var sections = Object.keys(byKey).map(function (k) { return finish(byKey[k]); }).sort(function (a, b) {
@@ -1060,8 +1130,8 @@ function groupSessions(rows, thisWindowId) {
   return { sections: sections, archived: archived };
 }
 
-/** Fold state is memory only: a window section starts open, a Blinded group (key ending in :blinded) starts folded. */
-function isFolded(key) { return key in state.folded ? Boolean(state.folded[key]) : key.slice(-8) === ':blinded'; }
+/** Fold state is memory only: a window section starts open. */
+function isFolded(key) { return Boolean(state.folded[key]); }
 
 function badgeHtml(sec) {
   if (!sec.badge) return '';
@@ -1069,9 +1139,9 @@ function badgeHtml(sec) {
   return '<span class="badge ' + (sec.waiting ? 'wait' : 'unseen') + '" title="' + esc(hint) + '">' + sec.badge + '</span>';
 }
 
-/** The head of a section (h2) or of a Blinded group (h3): a button that folds the body, with the label, the badge and the row count. */
-function sectionHead(sec, label, count, thisWindow, tag) {
-  tag = tag || 'h2';
+/** The head of a section: a button that folds the body, with the label, the badge and the row count. */
+function sectionHead(sec, label, count, thisWindow) {
+  var tag = 'h2';
   var folded = isFolded(sec.key) && !state.filter;   // a filter shows every match, folded or not
   return '<' + tag + ' class="section-head"><button class="fold" data-act="fold" data-section="' + esc(sec.key) + '" aria-expanded="' + (folded ? 'false' : 'true') + '" title="' + (folded ? 'unfold' : 'fold') + '">'
     + '<span class="caret">' + (folded ? '▸' : '▾') + '</span><span class="label">' + esc(label) + '</span>'
@@ -1084,16 +1154,7 @@ function sectionHtml(sec, limits) {
   var cls = 'group section' + (folded ? ' folded' : '') + (sec.waiting ? ' waiting' : sec.unseen ? ' unseen' : '') + (sec.thisWindow ? ' here' : '');
   var body = sec.shown.map(function (s) { return rowHtml(s, limits); }).join('');
   if (sec.stale.length) body += '<div class="empty"><button data-act="stale" data-section="' + esc(sec.key) + '">' + (state.showStale[sec.key] ? 'Hide' : 'Show') + ' ' + sec.stale.length + ' idle over 2h</button></div>';
-  if (sec.blinded) body += blindedGroupHtml(sec.blinded, limits);
   return '<div class="' + cls + '" data-section="' + esc(sec.key) + '">' + sectionHead(sec, sec.label, sec.rows.length, sec.thisWindow) + '<div class="section-body">' + body + '</div></div>';
-}
-
-/** A section's Blinded group: folded by default, its own badge (amber when a blinded row waits), its rows below. */
-function blindedGroupHtml(gr, limits) {
-  var folded = isFolded(gr.key) && !state.filter;
-  var cls = 'section blinded' + (folded ? ' folded' : '') + (gr.waiting ? ' waiting' : gr.unseen ? ' unseen' : '');
-  return '<div class="' + cls + '" data-section="' + esc(gr.key) + '">' + sectionHead(gr, 'Blinded', gr.rows.length, false, 'h3')
-    + '<div class="section-body">' + gr.rows.map(function (s) { return rowHtml(s, limits); }).join('') + '</div></div>';
 }
 
 function render() {
@@ -1120,9 +1181,9 @@ function render() {
     document.getElementById('l-results').innerHTML = html;
   } else gr.style.display = 'none';
 
-  // Blinded sessions are muted: they count nowhere but on their group's head.
+  // Muted sessions count nowhere.
   var g = groupSessions(all, data ? data.thisWindowId : null);
-  var counted = all.filter(function (s) { return !isBlinded(s); });
+  var counted = all.filter(function (s) { return !isMuted(s); });
   var allWaiting = counted.filter(function (s) { return s.status === 'waiting'; });
   var visible = counted.filter(function (s) { return !putAway(s); });
   var isIdle = function (s) { return s.status !== 'waiting' && s.status !== 'busy'; };
@@ -1170,25 +1231,44 @@ function onSnapshot(data) {
   // the switch holds its mode until a snapshot agrees, or the guard expires
   var pm = state.pendingMode;
   if (pm && ((data.order && data.order.mode === pm.mode) || pm.until <= Date.now())) state.pendingMode = null;
-  // a ⊘/⊙ click holds its row in place until a snapshot agrees with it, or the guard expires
-  Object.keys(state.pendingBlind).forEach(function (sid) {
-    var pb = state.pendingBlind[sid];
+  // a click on the bell holds its flag until a snapshot agrees with it, or the guard expires
+  Object.keys(state.pendingMute).forEach(function (sid) {
+    var pm = state.pendingMute[sid];
     var live = (data.sessions || []).filter(function (s) { return s.sessionId === sid; })[0];
-    if (!live || Boolean(live.blinded) === pb.blinded || pb.until <= Date.now()) delete state.pendingBlind[sid];
+    if (!live || Boolean(live.muted) === pm.muted || pm.until <= Date.now()) delete state.pendingMute[sid];
   });
   render();
-  notifyNewlyWaiting((data.sessions || []).filter(function (s) { return s.status === 'waiting'; }));
+  notifyFresh(data.sessions || []);
 }
 
-function notifyNewlyWaiting(waiting) {
-  var now = Object.create(null), fresh = [];
-  waiting.forEach(function (s) { now[s.sessionId] = true; if (!state.prevWaiting[s.sessionId] && !isBlinded(s)) fresh.push(s); });   // a blinded session is tracked, never announced
+/**
+ * Browser front end only (VS Code has its own toasts): a Notification for a row that starts
+ * waiting and for a known row whose answer ended (its unseenAt moved). Muted rows are tracked,
+ * never announced, so unmuting raises nothing either; nothing on the first snapshot.
+ */
+function notifyFresh(rows) {
+  var waitingNow = Object.create(null), unseenNow = Object.create(null), known = Object.create(null), fresh = [];
+  rows.forEach(function (s) {
+    known[s.sessionId] = true;
+    if (s.status === 'waiting') {
+      waitingNow[s.sessionId] = true;
+      if (!state.prevWaiting[s.sessionId] && !isMuted(s)) fresh.push({ s: s, title: (s.title || s.name) + ' needs you', body: (s.waitingFor || 'waiting') + ' · ' + shortCwd(s.cwd) });
+    }
+    var u = Number(s.unseenAt) || 0;
+    var before = state.prevUnseenAt[s.sessionId] || 0;
+    if (u) {
+      if (state.known[s.sessionId] && u > before && s.unseen && !isMuted(s)) fresh.push({ s: s, title: (s.title || s.name) + ' is done', body: shortCwd(s.cwd) });
+      unseenNow[s.sessionId] = Math.max(u, before);
+    } else if (before) unseenNow[s.sessionId] = before;
+  });
   if (!vsapi && !state.firstLoad && fresh.length && window.Notification && Notification.permission === 'granted') {
     fresh.forEach(function (f) {
-      try { new Notification((f.title || f.name) + ' needs you', { body: (f.waitingFor || 'waiting') + ' · ' + shortCwd(f.cwd), tag: 'cc-' + f.sessionId }); } catch (e) { /* unavailable */ }
+      try { new Notification(f.title, { body: f.body, tag: 'cc-' + f.s.sessionId }); } catch (e) { /* unavailable */ }
     });
   }
-  state.prevWaiting = now;
+  state.prevWaiting = waitingNow;
+  state.prevUnseenAt = unseenNow;
+  state.known = known;
   state.firstLoad = false;
 }
 
@@ -1270,7 +1350,7 @@ if (vsapi) {
     else if (m.type === 'endResult') onEndResult(m);
     else if (m.type === 'unarchiveResult') onUnarchiveResult(m);
     else if (m.type === 'retitleResult') onRetitleResult(m);
-    else if (m.type === 'blindResult') onBlindResult(m);
+    else if (m.type === 'muteResult') onMuteResult(m);
     else if (m.type === 'sortModeResult') onSortModeResult(m);
     else if (m.type === 'orderResult') onOrderResult(m);
     else if (m.type === 'searchResult') onSearchResult(m.data);

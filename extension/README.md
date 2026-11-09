@@ -35,15 +35,18 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   toggle per section, and a click on the heading folds the whole section.
 - **The number on a heading** counts the sessions in that section that wait for you (amber)
   or are unseen (green). It goes down as you answer or open them.
-- Each row: the session's name (`/rename` wins over the generated title; a session with
-  neither shows its last prompt), its folder, status, a context bar, and time in that state.
-  Hover for the folder and the internal agent name.
-- **Blinded**: ⊘ on a row puts the session under the folded **Blinded** group at the bottom
-  of its own window section, where it stays, waiting or not, until ⊙ brings it back. Blinded
-  sessions count on that group's heading only (amber when one of them waits): not on the
-  section's number, in the counts line, the title, the activity-bar badge or the toast. The
-  flag is shared by every window and the browser page, survives restarts, and lasts as long
-  as the session can still be resumed.
+- Each row: the session's title (Claude Code's: a rename wins over the generated title; a
+  session with neither shows its last prompt), "Session" and the first 8 characters of its
+  id, its folder, status, a context bar, and time in that state. Hover for the folder and the
+  internal agent name. A click on the id folds out a details line: the full id, when the
+  session started, its process, its window and its transcript path; ⧉ copies the id or the
+  path. Search finds a session by its id, typed bare or as Claude Code shows it
+  (`Session f8005c0d`).
+- **Muted**: a muted session stays in its place in its window section, marked "muted" and
+  dimmed, waiting or not. It raises no toast and no notification and counts nowhere: not on
+  the section's number, in the counts line, the title or the activity-bar badge. The flag is
+  shared by every window and the browser page, survives restarts, and lasts as long as the
+  session can still be resumed.
 - **Your own order**: the switch in the header picks **by activity** (the order above) or
   **manual**. In manual mode the rows keep the order you give them: drag a row by its ⋮⋮
   handle onto another row of the same section, or focus a row and press Alt+Up or Alt+Down.
@@ -51,9 +54,21 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   session you have not placed yet (a new one, or one started outside the board) sits on top.
   The order and the switch are shared by every window and the browser page and survive
   restarts.
-- The badge on the activity-bar icon is the number of sessions waiting on you, blinded ones
-  excepted. When a session newly starts waiting, the focused window shows a toast with an
-  Open button.
+- The badge on the activity-bar icon is the number of sessions waiting on you, muted ones
+  excepted.
+
+## Notifications
+
+- When a session starts waiting, and when a session finishes its answer, the focused VS Code
+  window shows a toast with an Open button.
+- When no VS Code window has focus (you are in another app), one window shows a Windows
+  notification instead: "needs you" or "done". A click on it brings the session's window
+  forward on that session and clears its unseen mark. Several windows never show the same
+  notification twice; a burst shows three and says how many more.
+- Muted sessions never notify. `sessionBoard.notifyOnDone` turns the "done" ones off,
+  `sessionBoard.systemNotifications` the Windows notifications (toasts in a focused window
+  stay). Windows notifications come from Windows PowerShell; if they cannot be shown, the
+  board says so once and keeps the toasts.
 
 ## Actions
 
@@ -61,12 +76,21 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   the window that owns it, and that window comes to the front. Without a mapped window the
   resume command is copied instead.
 - **⧉** copies `claude --resume <id>` (a transcript the board stowed comes back first).
-- **✎ retitles the session** from its progress so far: one short haiku call over the recent
-  prompts and the last answer (a few KB of the transcript, passed through your own `claude`
-  command the way a prompt would be), hook-free and without tools. The title is the board's
-  own; Claude Code's files are not written, and a later `/rename` wins again.
-- **⊘ blinds the session** and **⊙** brings it back (see Blinded above). No confirmation;
-  the row moves at once.
+- **✎ renames the session in Claude Code** with a title suggested from its progress so far:
+  one short haiku call over the recent prompts and the last answer (a few KB of the
+  transcript, passed through your own `claude` command the way a prompt would be), hook-free
+  and without tools. The board keeps no titles of its own:
+  - for a session that is not running (an ended one from the search, or a terminal session
+    without a name), a box prefilled with the suggestion opens; Enter writes the title where
+    Claude Code keeps it (a `custom-title` line in the transcript and `custom-title.json`
+    next to it), so Claude Code's sidebar and `claude --resume` show it; Escape writes nothing;
+  - for a running session, the suggestion goes onto the clipboard and Claude Code's own rename
+    box opens on that session (in its window, through the board running there): a running
+    session's CLI writes its own name after every answer, so only Claude Code's rename sticks.
+    Paste and press Enter.
+  A rename made in Claude Code shows on the board with the next poll.
+- **The bell mutes the session** and the struck bell unmutes it (see Muted above). No
+  confirmation; the flag changes at once.
 - **⋮⋮ moves the session** (manual order only): drag it onto another row of its section, or
   press Alt+Up or Alt+Down on the focused row. No confirmation; the row moves at once and
   the whole section's order is saved.
@@ -122,9 +146,10 @@ logged in", and a Claude Code release without that command shows no account.
 - Sessions started outside the VS Code extension (a terminal, a background agent) have no
   window and sit under Elsewhere; click copies the resume command.
 - A window still running an older Session Board names its section after the most common
-  folder of its sessions until that window reloads; a 0.8.0 board also still counts blinded
-  sessions in its badge and toast, and a 0.9.x board keeps the old Blinded section at the
-  bottom and the activity order until then.
+  folder of its sessions until that window reloads; a 0.9.x board keeps the old Blinded
+  section at the bottom and the activity order until then, and a 0.10.x board shows sessions
+  that were blinded there unfolded and unmuted until it reloads (0.11.0 turns them into muted
+  sessions).
 - The window mapping reads the newest VS Code log run, so a second VS Code instance
   (Insiders, portable) is outside it.
 - Each window polls independently (5 s while the view is visible, 15 s hidden).

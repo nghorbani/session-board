@@ -1,12 +1,12 @@
 'use strict';
 /*
- * The page's archive, section and Blinded flows, driven in a headless Chromium over the
+ * The page's archive, section and Mute flows, driven in a headless Chromium over the
  * DevTools protocol against an in-test HTTP server that serves index.html and plays scripted
  * /api answers. Skipped with a reason when no Chromium is found (tools/screenshot.cjs knows
  * the usual paths).
  *
  *   node:test ──▶ fake API (http) ◀── index.html in headless Chrome ◀── CDP over Node's WebSocket
- *                   scripted /api/sessions, /api/end, /api/unarchive, /api/blind, /api/unblind,
+ *                   scripted /api/sessions, /api/end, /api/unarchive, /api/mute, /api/unmute,
  *                   /api/search, /api/focus; every call except the poll is recorded for the assertions
  */
 const test = require('node:test');
@@ -39,7 +39,7 @@ function snapshotOf(sessions, extra) {
 
 // -- fake API ----------------------------------------------------------------------------
 
-const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), retitle: () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } }), blind: () => ({ status: 200, body: { ok: true, blinded: true } }), unblind: () => ({ status: 200, body: { ok: true, blinded: false } }), search: { rows: [] }, calls: [] };
+const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), suggest: () => ({ status: 200, body: { ok: true, title: 'Suggested by model' } }), title: (id, t) => ({ status: 200, body: { ok: true, title: t } }), mute: () => ({ status: 200, body: { ok: true, muted: true } }), unmute: () => ({ status: 200, body: { ok: true, muted: false } }), search: { rows: [] }, calls: [] };
 fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
 fake.mode = (m) => ({ status: 200, body: { ok: true, mode: m } });
 let PORT = 0;
@@ -50,7 +50,7 @@ function serve(req, res) {
     const html = INDEX
       .replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '">')
       .replace('var POLL_MS = 4000;', 'var POLL_MS = 250;')
-      .replace('<script>', '<script>window.confirm = function () { return window.__confirmAnswer !== false; }; window.prompt = function () { return null; };'
+      .replace('<script>', '<script>window.confirm = function () { return window.__confirmAnswer !== false; }; window.__prompts = []; window.prompt = function (m, v) { window.__prompts.push([m, v]); return window.__promptAnswer === undefined ? null : window.__promptAnswer; };'
         + ' Object.defineProperty(navigator, "clipboard", { value: { writeText: function (t) { window.__copied = t; return Promise.resolve(); } } }); window.Notification = undefined;</script>\n<script>');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(html);
@@ -61,13 +61,14 @@ function serve(req, res) {
   fake.calls.push({ method: req.method, path: u.pathname, query: u.search });
   if (u.pathname.startsWith('/api/end/')) { const r = fake.end(u.pathname.slice('/api/end/'.length), u.searchParams); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unarchive/')) { const r = fake.unarchive(u.pathname.slice('/api/unarchive/'.length)); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
-  if (u.pathname.startsWith('/api/blind/')) { const r = fake.blind(u.pathname.slice('/api/blind/'.length)); return json(res, r.status, r.body); }
-  if (u.pathname.startsWith('/api/unblind/')) { const r = fake.unblind(u.pathname.slice('/api/unblind/'.length)); return json(res, r.status, r.body); }
+  if (u.pathname.startsWith('/api/mute/')) { const r = fake.mute(u.pathname.slice('/api/mute/'.length)); return json(res, r.status, r.body); }
+  if (u.pathname.startsWith('/api/unmute/')) { const r = fake.unmute(u.pathname.slice('/api/unmute/'.length)); return json(res, r.status, r.body); }
   if (u.pathname === '/api/order') { const r = fake.order(u.searchParams.get('ids') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname === '/api/order/mode') { const r = fake.mode(u.searchParams.get('mode') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
-  if (u.pathname.startsWith('/api/retitle/')) { const r = fake.retitle(u.pathname.slice('/api/retitle/'.length)); return json(res, r.status, r.body); }
+  if (u.pathname.startsWith('/api/title/suggest/')) { const r = fake.suggest(u.pathname.slice('/api/title/suggest/'.length)); return json(res, r.status, r.body); }
+  if (u.pathname.startsWith('/api/title/')) { const r = fake.title(u.pathname.slice('/api/title/'.length), u.searchParams.get('title')); return json(res, r.status, r.body); }
   if (u.pathname === '/api/search') {
     return json(res, 200, Object.assign({ requestId: u.searchParams.get('requestId'), query: u.searchParams.get('q'), content: true, total: fake.search.rows.length, shown: fake.search.rows.length, partial: false, skipped: 0, rgAvailable: true }, fake.search));
   }
@@ -119,16 +120,17 @@ const SAMPLE = `(function () {
   var ids = function (sel) { return q(sel + ' .row[data-session]').map(function (r) { return r.getAttribute('data-session'); }); };
   var text = function (sel) { var e = document.querySelector(sel); return e ? e.textContent : null; };
   return {
-    rows: q('#sections .row[data-session]').filter(function (r) { return !r.closest('.section.blinded'); }).map(function (r) { return r.getAttribute('data-session'); }), archivedList: ids('#l-archived'), results: ids('#l-results'),
-    sections: q('#sections > .section').map(function (sec) { var rowsOf = function (el) { return Array.prototype.slice.call(el.querySelectorAll(':scope > .section-body > .row[data-session]')).map(function (r) { return r.getAttribute('data-session'); }); }; var h = sec.querySelector(':scope > .section-head .fold'); var b = h.querySelector('.badge'); var t = sec.querySelector(':scope > .section-body > .empty > button[data-act="stale"]'); var g = sec.querySelector(':scope > .section-body > .section.blinded'); var gh = g ? g.querySelector('.fold') : null; var gb = gh ? gh.querySelector('.badge') : null; return { key: sec.getAttribute('data-section'), label: h.querySelector('.label').textContent, here: !!h.querySelector('.chip.here'), expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, n: h.querySelector('.n').textContent, rows: rowsOf(sec), stale: t ? t.textContent : null, blinded: g ? { key: g.getAttribute('data-section'), expanded: gh.getAttribute('aria-expanded'), folded: g.classList.contains('folded'), badge: gb ? gb.textContent : null, tone: gb ? (gb.classList.contains('wait') ? 'wait' : 'unseen') : null, waitingHead: g.classList.contains('waiting'), n: gh.querySelector('.n').textContent, rows: rowsOf(g) } : null }; }),
+    rows: ids('#sections'), archivedList: ids('#l-archived'), results: ids('#l-results'),
+    sections: q('#sections > .section').map(function (sec) { var rowsOf = function (el) { return Array.prototype.slice.call(el.querySelectorAll(':scope > .section-body > .row[data-session]')).map(function (r) { return r.getAttribute('data-session'); }); }; var h = sec.querySelector(':scope > .section-head .fold'); var b = h.querySelector('.badge'); var t = sec.querySelector(':scope > .section-body > .empty > button[data-act="stale"]'); return { key: sec.getAttribute('data-section'), label: h.querySelector('.label').textContent, here: !!h.querySelector('.chip.here'), expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, n: h.querySelector('.n').textContent, rows: rowsOf(sec), stale: t ? t.textContent : null, groups: sec.querySelectorAll('.section .section').length }; }),
     title: document.title,
     mode: (function () { var b = document.querySelector('#sortMode button[aria-pressed="true"]'); return b && document.getElementById('sortMode').style.display !== 'none' ? b.getAttribute('data-mode') : null; })(),
     handles: q('.row .handle').length,
     focused: document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-session') : null,
     dropMarks: q('.row.drop-before, .row.drop-after').length,
-    blindBusy: q('.iconbtn.blind:disabled, .iconbtn.unblind:disabled').length,
-    unblindOn: q('.row[data-session]').filter(function (r) { return r.querySelector('.iconbtn.unblind'); }).map(function (r) { return r.getAttribute('data-session'); }),
-    blindedChips: q('.row .chip.blinded').length,
+    muteBusy: q('.iconbtn.mute:disabled, .iconbtn.unmute:disabled').length,
+    unmuteOn: q('.row[data-session]').filter(function (r) { return r.querySelector('.iconbtn.unmute'); }).map(function (r) { return r.getAttribute('data-session'); }),
+    mutedRows: q('.row.muted[data-session]').map(function (r) { return r.getAttribute('data-session'); }),
+    mutedChips: q('.row .chip.muted').length,
     actionsOverflow: q('.row .actions').filter(function (a) { return a.scrollWidth > a.clientWidth; }).length,
     notes: window.__notes || null,
     titles: q('.row[data-session]').map(function (r) { var t = r.querySelector('.title'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
@@ -146,6 +148,9 @@ const SAMPLE = `(function () {
     dimmed: q('.row.archived').length,
     pendingEnd: JSON.parse(JSON.stringify(state.pendingEnd)),
     copied: window.__copied || null,
+    prompts: window.__prompts || [],
+    sids: q('.row[data-session] .sid').map(function (b) { return b.closest('.row').getAttribute('data-session') + '=' + b.textContent; }),
+    details: q('.row[data-session] .details').map(function (d) { return d.closest('.row').getAttribute('data-session') + '=' + d.textContent; }),
     acct: text('.u-acct'),
     acctTitle: (function () { var e = document.querySelector('.u-acct'); return e ? e.getAttribute('title') : null; })()
   };
@@ -390,20 +395,64 @@ test('page: a click on an unseen row without a window copies the command and sti
   await page.close();
 });
 
-test('page: ✎ asks for a new title and shows it when it arrives', opts, async () => {
+const titleCalls = () => fake.calls.filter((c) => c.path.startsWith('/api/title/')).map((c) => c.path + (c.query || ''));
+
+test('page (browser): ✎ asks for a suggestion, prefills the prompt, writes what you confirm and shows it; Escape writes nothing', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
   const page = await openPage();
   await page.until((x) => x.rows.includes(A), 'the row');
+  await page.eval('window.__promptAnswer = "Typed title"; true');
   await page.click(rowSel(A) + ' .iconbtn.retitle');
-  let s = await page.until((x) => x.titles.includes(A + '=Renamed by model'), 'the new title');
-  assert.ok(fake.calls.some((c) => c.method === 'POST' && c.path === '/api/retitle/' + A));
+  let s = await page.until((x) => x.titles.includes(A + '=Typed title'), 'the new title');
+  assert.deepEqual(s.prompts.map((p) => p[1]), ['Suggested by model'], 'prefilled with the suggestion');
+  assert.deepEqual(titleCalls(), ['/api/title/suggest/' + A, '/api/title/' + A + '?title=Typed%20title']);
   assert.equal(s.retitleBusy, 0, 'the button is free again');
-  fake.retitle = () => ({ status: 502, body: { ok: false, code: 'failed', message: 'model not available' } });
+  fake.calls.length = 0;
+  await page.eval('window.__promptAnswer = null; true');
+  await page.click(rowSel(A) + ' .iconbtn.retitle');
+  await page.until((x) => x.prompts.length === 2 && x.retitleBusy === 0, 'the prompt dismissed');
+  assert.deepEqual(titleCalls(), ['/api/title/suggest/' + A], 'Escape: nothing written');
+  await page.close();
+});
+
+test('page (browser): a running session answers 409; the title goes on the clipboard and the notice says to rename it in Claude Code; a failed write shows on the row', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
+  fake.title = () => ({ status: 409, body: { ok: false, code: 'claude-owned', message: 'the session is running' } });
+  const page = await openPage();
+  await page.until((x) => x.rows.includes(A), 'the row');
+  await page.eval('window.__promptAnswer = "Mine"; true');
+  await page.click(rowSel(A) + ' .iconbtn.retitle');
+  let s = await page.until((x) => x.notice !== null, 'the notice');
+  assert.match(s.notice, /^rename it in Claude Code/);
+  assert.deepEqual([s.copied, s.retitleBusy, s.titles], ['Mine', 0, [A + '=Spike']]);
+  fake.title = () => ({ status: 500, body: { ok: false, code: 'failed', message: 'EACCES' } });
   await page.click(rowSel(A) + ' .iconbtn.retitle');
   s = await page.until((x) => x.errorText !== null, 'the failure on the row');
-  assert.equal(s.errorText, 'retitle failed: model not available');
-  fake.retitle = () => ({ status: 200, body: { ok: true, title: 'Renamed by model' } });
+  assert.equal(s.errorText, 'rename failed: EACCES');
+  fake.suggest = () => ({ status: 502, body: { ok: false, code: 'failed', message: 'model not available' } });
+  fake.title = (id, t) => ({ status: 200, body: { ok: true, title: t } });
+  await page.eval('window.__prompts = []; true');
+  await page.click(rowSel(A) + ' .iconbtn.retitle');
+  s = await page.until((x) => x.prompts.length === 1, 'the prompt without a suggestion');
+  assert.deepEqual([s.prompts[0][1], /no suggestion: model not available/.test(s.prompts[0][0])], ['Spike', true], 'prefilled with the current title');
+  fake.suggest = () => ({ status: 200, body: { ok: true, title: 'Suggested by model' } });
+  await page.close();
+});
+
+test('page (browser): an ended session in the search results has ✎ too', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([]);
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, snippets: [] }] };
+  const page = await openPage();
+  await page.search('Old');
+  await page.until((x) => x.results.includes(P), 'the search row');
+  await page.eval('window.__promptAnswer = "Ended name"; true');
+  await page.click(rowSel(P) + ' .iconbtn.retitle');
+  await page.until(() => titleCalls().length === 2, 'suggest and write');
+  assert.deepEqual(titleCalls(), ['/api/title/suggest/' + P, '/api/title/' + P + '?title=Ended%20name']);
+  fake.search = { rows: [] };
   await page.close();
 });
 
@@ -454,13 +503,63 @@ test('page: an archive whose move failed shows the notice after the row has left
   await page.close();
 });
 
-// -- sections, Blinded, badges and muting ---------------------------------------------------
+// -- session id and details --------------------------------------------------------------
+
+test('page: every row shows "Session <first 8>"; a click folds out the details with the full id, start, pid, window and transcript; ⧉ copies; the row does not open', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { startedAt: new Date(2026, 10, 9, 13, 5).getTime(), transcriptPath: 'C:\\p\\x\\' + A + '.jsonl', window: { id: 4, label: 'webapp' } })]);
+  const page = await openPage();
+  let s = await page.until((x) => x.rows.includes(A), 'the row');
+  assert.deepEqual([s.sids, s.details], [[A + '=Session ' + A.slice(0, 8)], []]);
+  await page.click(rowSel(A) + ' .sid');
+  s = await page.until((x) => x.details.length === 1, 'the details line');
+  assert.equal(s.details[0], A + '=id' + A + '⧉started2026-11-09 13:05 · pid100 · windowwebapptranscriptC:\\p\\x\\' + A + '.jsonl⧉');
+  assert.equal(fake.calls.filter((c) => /^\/api\/(focus|seen)\//.test(c.path)).length, 0, 'the id click does not open the session');
+  await page.click(rowSel(A) + ' .details .copyval');
+  s = await page.until((x) => x.copied === A, 'the id copied');
+  await page.click(rowSel(A) + ' .sid');
+  s = await page.until((x) => x.details.length === 0, 'folded again');
+  await page.close();
+});
+
+test('page: a search row shows its id too, and its details carry the transcript path', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([]);
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, snippets: [] }] };
+  const page = await openPage();
+  await page.search('Old');
+  let s = await page.until((x) => x.results.includes(P), 'the search row');
+  assert.ok(s.sids.includes(P + '=Session ' + P.slice(0, 8)));
+  await page.click(rowSel(P) + ' .sid');
+  s = await page.until((x) => x.details.length === 1, 'the details line');
+  assert.ok(s.details[0].includes('transcriptC:\\t\\x\\p.jsonl'), s.details[0]);
+  assert.equal(s.details[0].includes('pid'), false, 'no process for a past row');
+  fake.search = { rows: [] };
+  await page.close();
+});
+
+test('page: the filter takes an id as Claude Code shows it ("Session f8005c0d") or bare', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
+  const page = await openPage();
+  await page.until((x) => x.rows.length === 2, 'both rows');
+  await page.type('Session ' + B.slice(0, 8));
+  let s = await page.until((x) => x.rows.length === 1, 'filtered by the id');
+  assert.deepEqual(s.rows, [B]);
+  await page.type(A.slice(0, 8).toUpperCase());
+  s = await page.until((x) => x.rows.length === 1 && x.rows[0] === A, 'bare id, any case');
+  await page.type('Session board');
+  s = await page.until((x) => x.rows.length === 0, 'not an id: an ordinary query');
+  await page.close();
+});
+
+// -- sections, badges and muting ------------------------------------------------------------
 
 const C = 'dddddddd-4444-4444-8444-444444444444';
 const D = 'eeeeeeee-5555-4555-8555-555555555555';
 const E = 'ffffffff-6666-4666-8666-666666666666';
 const win = (id, label) => ({ window: { id, label } });
-const blindCalls = () => fake.calls.filter((c) => /^\/api\/(un)?blind\//.test(c.path)).map((c) => c.path);
+const muteCalls = () => fake.calls.filter((c) => /^\/api\/(un)?mute\//.test(c.path)).map((c) => c.path);
 
 test('page: one section per window, this window first, then by activity, Elsewhere last; the badge counts waiting and unseen', opts, async () => {
   fake.calls.length = 0;
@@ -479,107 +578,105 @@ test('page: one section per window, this window first, then by activity, Elsewhe
   assert.deepEqual(s.sections.map((sec) => [sec.badge, sec.tone]), [['1', 'unseen'], ['1', 'wait'], [null, null], [null, null]]);
   assert.deepEqual(s.sections[1].rows, [C, E], 'waiting before idle inside a section');
   assert.deepEqual(s.sections.map((sec) => sec.expanded), ['true', 'true', 'true', 'true']);
-  assert.deepEqual(s.sections.map((sec) => sec.blinded), [null, null, null, null], 'no Blinded group without blinded rows');
+  assert.deepEqual(s.sections.map((sec) => sec.groups), [0, 0, 0, 0], 'no nested groups');
   assert.equal(s.counts, '1 need you · 0 working · 1 unseen · 3 idle');
   assert.equal(s.title, '(1) Sessions');
   assert.equal(s.actionsOverflow, 0, 'five icons and the age fit the actions cell');
   await page.close();
 });
 
-test('page: ⊘ moves the row under the folded Blinded group of its own section at once and posts /api/blind; the group head unfolds it; ⊙ brings it back', opts, async () => {
+test('page: the bell mutes a row in place at once and posts /api/mute; the struck bell unmutes it', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
   const page = await openPage();
   await page.until((x) => x.rows.includes(A), 'the row');
-  await page.click(rowSel(A) + ' .iconbtn.blind');
-  let s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null, 'the Blinded group');
-  const g = s.sections[0].blinded;
-  assert.deepEqual([s.rows, g.key, g.folded, g.expanded, g.badge, g.n, g.rows], [[B], 'w1:blinded', true, 'false', null, '1', [A]], 'moved at once, folded, no badge for an idle row');
-  assert.equal(s.sections[0].n, '1', 'the section head counts its own rows only');
-  assert.equal(s.blindBusy, 1, 'both buttons wait for the reply');
-  await page.until(() => blindCalls().length === 1, 'the POST');
-  assert.deepEqual(blindCalls(), ['/api/blind/' + A]);
-  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
-  s = await page.until((x) => x.blindBusy === 0, 'the snapshot agrees and the buttons are free');
-  assert.deepEqual(s.sections[0].blinded.rows, [A]);
-  await page.click('#sections .section.blinded .fold');
-  s = await page.until((x) => x.sections[0].blinded && !x.sections[0].blinded.folded, 'unfolded');
-  assert.deepEqual([s.sections[0].blinded.expanded, s.unblindOn], ['true', [A]]);
-  await page.click(rowSel(A) + ' .iconbtn.unblind');
-  s = await page.until((x) => x.rows.includes(A), 'the row back in its section at once');
-  assert.equal(s.sections[0].blinded, null);
-  await page.until(() => blindCalls().length === 2, 'the second POST');
-  assert.deepEqual(blindCalls(), ['/api/blind/' + A, '/api/unblind/' + A]);
+  await page.click(rowSel(A) + ' .iconbtn.mute');
+  let s = await page.until((x) => x.mutedRows.includes(A), 'muted at once');
+  assert.deepEqual([s.sections[0].rows, s.mutedChips, s.sections[0].n, s.muteBusy], [[A, B], 1, '2', 1], 'still in its section, with the chip; the bell waits for the reply');
+  await page.until(() => muteCalls().length === 1, 'the POST');
+  assert.deepEqual(muteCalls(), ['/api/mute/' + A]);
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { muted: true }), row(B, 'Other', 'idle', { pid: 200 })]);
+  s = await page.until((x) => x.muteBusy === 0, 'the snapshot agrees and the bell is free');
+  assert.deepEqual([s.unmuteOn, s.mutedRows], [[A], [A]]);
+  await page.click(rowSel(A) + ' .iconbtn.unmute');
+  s = await page.until((x) => x.mutedRows.length === 0, 'unmuted at once');
+  await page.until(() => muteCalls().length === 2, 'the second POST');
+  assert.deepEqual(muteCalls(), ['/api/mute/' + A, '/api/unmute/' + A]);
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
-  await page.until((x) => x.blindBusy === 0 && x.rows.includes(A), 'settled');
+  await page.until((x) => x.muteBusy === 0 && x.mutedChips === 0, 'settled');
+  await sleep(1800);                                         // the "unmuted" flash gives the age back
+  s = await page.sample();
+  assert.equal(s.actionsOverflow, 0, 'the bell, the other icons and the age fit the actions cell');
   await page.close();
 });
 
-test('page: a failed /api/blind drops the pending state, the row returns and the notice says why', opts, async () => {
+test('page: a failed /api/mute drops the pending state, the flag returns and the notice says why', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle')]);
-  fake.blind = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
+  fake.mute = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
   const page = await openPage();
   await page.until((x) => x.rows.includes(A), 'the row');
-  await page.click(rowSel(A) + ' .iconbtn.blind');
-  const s = await page.until((x) => x.notice !== null && x.rows.includes(A), 'the row back with the notice');
-  assert.equal(s.notice, 'blind failed: EACCES: permission denied');
-  assert.deepEqual([s.sections[0].blinded, s.blindBusy], [null, 0]);
-  fake.blind = () => ({ status: 200, body: { ok: true, blinded: true } });
+  await page.click(rowSel(A) + ' .iconbtn.mute');
+  const s = await page.until((x) => x.notice !== null && x.mutedRows.length === 0, 'unmuted again with the notice');
+  assert.equal(s.notice, 'mute failed: EACCES: permission denied');
+  assert.equal(s.muteBusy, 0);
+  fake.mute = () => ({ status: 200, body: { ok: true, muted: true } });
   await page.close();
 });
 
-test('page: a waiting blinded row stays under its section Blinded group and turns the group head amber, not the section badge; an archived blinded row stays under Archived', opts, async () => {
+test('page: a waiting muted row stays in its section in the waiting colour but counts nowhere: not in the section badge, the strip or the title; an archived muted row stays under Archived', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { blinded: true }), row(B, 'Old', 'idle', { pid: 200, blinded: true, archived: true, archivedBy: 'board' }), row(C, 'Plain', 'idle', { pid: 300 })]);
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { muted: true }), row(B, 'Old', 'idle', { pid: 200, muted: true, archived: true, archivedBy: 'board' }), row(C, 'Plain', 'idle', { pid: 300 })]);
   const page = await openPage();
-  const s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null && x.toggleArchived !== null, 'the Blinded group and the archived toggle');
-  const g = s.sections[0].blinded;
-  assert.deepEqual([g.rows, g.badge, g.tone, g.waitingHead, g.folded], [[A], '1', 'wait', true, true]);
-  assert.deepEqual([s.sections[0].badge, s.sections[0].tone], [null, null], 'the section badge leaves the blinded row out');
-  assert.equal(s.toggleArchived, 'Show 1 archived', 'archived wins over blinded');
-  assert.deepEqual(s.rows, [C]);
-  assert.equal(s.counts, '0 need you · 0 working · 1 idle', 'the waiting blinded row counts nowhere');
+  const s = await page.until((x) => x.sections[0] && x.toggleArchived !== null, 'the section and the archived toggle');
+  assert.deepEqual(s.sections[0].rows, [A, C], 'waiting first, in place');
+  assert.deepEqual([s.sections[0].badge, s.sections[0].tone], [null, null], 'the section badge leaves the muted row out');
+  assert.equal(s.toggleArchived, 'Show 1 archived', 'archived wins over muted');
+  assert.equal(s.counts, '0 need you · 0 working · 1 idle', 'the waiting muted row counts nowhere');
   assert.equal(s.title, 'Sessions');
+  assert.equal(s.statusWords.find((w) => w.startsWith(A)), A + '=permission prompt', 'it still says what it waits for');
   await page.close();
 });
 
-test('page: muted: no Notification for a blinded row that starts waiting, none when it is unblinded, one for a new waiting row', opts, async () => {
+test('page: muted: no Notification for a muted row that starts waiting or finishes, none when it is unmuted, one for a new waiting row and one for a finished answer', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 })]);
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle'), row(B, 'Other', 'idle', { pid: 200 }), row(C, 'Third', 'busy', { pid: 300 })]);
   const page = await openPage();
-  await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
+  await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'the rows');
   await page.eval('window.__notes = []; window.Notification = function (t) { window.__notes.push(t); }; window.Notification.permission = "granted"; true');
-  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
-  let s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null, 'the blinded waiting row');
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { muted: true }), row(B, 'Other', 'idle', { pid: 200 }), row(C, 'Third', 'idle', { pid: 300, unseen: true, unseenAt: 5000, muted: true })]);
+  let s = await page.until((x) => x.mutedRows.length === 2, 'the muted rows');
   await sleep(600);                                          // two more polls
   s = await page.sample();
-  assert.deepEqual(s.notes, [], 'blinded: silent');
-  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting'), row(B, 'Other', 'idle', { pid: 200 })]);
-  s = await page.until((x) => x.rows.includes(A), 'unblinded');
+  assert.deepEqual(s.notes, [], 'muted: silent');
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting'), row(B, 'Other', 'idle', { pid: 200 }), row(C, 'Third', 'idle', { pid: 300, unseen: true, unseenAt: 5000 })]);
+  s = await page.until((x) => x.mutedRows.length === 0, 'unmuted');
   await sleep(600);
   s = await page.sample();
-  assert.deepEqual(s.notes, [], 'unblinded while waiting: still silent');
-  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting'), row(B, 'Other', 'waiting', { pid: 200 })]);
-  s = await page.until((x) => x.notes && x.notes.length === 1, 'one Notification for the new waiting row');
-  assert.deepEqual(s.notes, ['Other needs you']);
+  assert.deepEqual(s.notes, [], 'unmuted while waiting or unseen: still silent');
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting'), row(B, 'Other', 'waiting', { pid: 200 }), row(C, 'Third', 'idle', { pid: 300, unseen: true, unseenAt: 6000 })]);
+  s = await page.until((x) => x.notes && x.notes.length === 2, 'one Notification each');
+  assert.deepEqual(s.notes.slice().sort(), ['Other needs you', 'Third is done']);
+  await sleep(600);
+  s = await page.sample();
+  assert.equal(s.notes.length, 2, 'once each');
   await page.close();
 });
 
-test('page: a typed filter shows a blinded row in its section with a chip and unfolds a folded section for the match', opts, async () => {
+test('page: a typed filter keeps the muted chip and unfolds a folded section for the match', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, 'Spike blinded', 'idle', { blinded: true }), row(B, 'Other', 'idle', { pid: 200 })]);
+  fake.snapshot = snapshotOf([row(A, 'Spike muted', 'idle', { muted: true }), row(B, 'Other', 'idle', { pid: 200 })]);
   const page = await openPage();
-  let s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null && x.rows.includes(B), 'the Blinded group and the section');
+  let s = await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows in the section');
   await page.click('#sections > .section[data-section="w1"] > .section-head .fold');
   s = await page.until((x) => x.sections[0].folded, 'the section folded');
   assert.equal(s.sections[0].expanded, 'false');
-  await page.type('blinded');
-  s = await page.until((x) => x.rows.includes(A), 'the blinded match in its section');
-  assert.deepEqual([s.sections[0].folded, s.sections[0].expanded, s.blindedChips, s.sections[0].blinded, s.rows], [false, 'true', 1, null, [A]]);
+  await page.type('muted');
+  s = await page.until((x) => x.rows.length === 1 && !x.sections[0].folded, 'the match in its section');
+  assert.deepEqual([s.sections[0].expanded, s.mutedChips, s.rows], ['true', 1, [A]]);
   await page.type('');
-  s = await page.until((x) => x.sections[0] && x.sections[0].blinded !== null, 'the Blinded group again');
-  assert.deepEqual([s.sections[0].folded, s.rows], [true, [B]], 'the fold state survived the filter');
+  s = await page.until((x) => x.sections[0] && x.sections[0].folded, 'folded again');
+  assert.deepEqual(s.sections[0].rows.length, 2, 'the fold state survived the filter');
   await page.close();
 });
 
@@ -607,19 +704,19 @@ const manualRows = () => [
   row(B, 'Beta ranked waits', 'waiting', { pid: 200, rank: 0, ageMinutes: 20 }),
   row(C, 'Gamma new idle', 'idle', { pid: 300, ageMinutes: 5 }),
   row(D, 'Delta new busy', 'busy', { pid: 400, ageMinutes: 1 }),
-  row(E, 'Eps blinded', 'idle', { pid: 500, rank: 1, blinded: true, ageMinutes: 3 }),
-  row(P, 'Pi blinded', 'idle', { pid: 600, rank: 0, blinded: true, ageMinutes: 9 }),
 ];
+const Q = '12121212-8888-4888-8888-888888888888';
+const otherWindow = () => row(Q, 'Elsewhere idle', 'idle', Object.assign({ pid: 800, rank: 0, ageMinutes: 2 }, win(2, 'beta')));
 
 test('page: the header switch posts /api/order/mode, the rows follow the pending mode at once, and the snapshot confirms it', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
   const page = await openPage();
   let s = await page.until((x) => x.mode === 'activity', 'the switch');
-  assert.deepEqual([s.sections[0].rows, s.sections[0].blinded.rows, s.handles], [[B, D, C, A], [E, P], 0], 'by activity: waiting, busy, idle by age; no handles');
+  assert.deepEqual([s.sections[0].rows, s.handles], [[B, D, C, A], 0], 'by activity: waiting, busy, idle by age; no handles');
   await page.click('#sortMode button[data-mode="manual"]');
   s = await page.until((x) => x.mode === 'manual', 'manual at once');
-  assert.deepEqual([s.sections[0].rows, s.sections[0].blinded.rows, s.handles], [[D, C, B, A], [P, E], 6], 'manual: unranked on top newest first, then by rank, the waiting row stays put; a handle per live row');
+  assert.deepEqual([s.sections[0].rows, s.handles], [[D, C, B, A], 4], 'manual: unranked on top newest first, then by rank, the waiting row stays put; a handle per live row');
   await page.until(() => modeCalls().length === 1, 'the POST');
   assert.deepEqual(modeCalls(), ['?mode=manual']);
   fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
@@ -685,36 +782,34 @@ test('page: Alt+Down on a focused row posts /api/order with the complete list of
 
 test('page: a drag by the handle moves the row inside its group and posts the order; a drop on another group is refused', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  fake.snapshot = snapshotOf(manualRows().concat([otherWindow()]), { order: { mode: 'manual' } });
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.handles === 6, 'manual with handles');
+  let s = await page.until((x) => x.mode === 'manual' && x.handles === 5, 'manual with handles');
   let r = await page.drag(A, D, true);
   assert.deepEqual([r.allowed, r.marks], [true, 1], 'the drop was allowed and the target marked');
   s = await page.until((x) => x.sections[0].rows[0] === A, 'moved at once');
   assert.deepEqual([s.sections[0].rows, s.dropMarks], [[A, D, C, B], 0]);
   await page.until(() => orderCalls().length === 1, 'the POST');
   assert.deepEqual(orderCalls(), [[A, D, C, B]]);
-  r = await page.drag(B, P, false);
-  assert.deepEqual([r.allowed, r.marks], [false, 0], 'a section row onto the Blinded group: refused');
+  r = await page.drag(B, Q, false);
+  assert.deepEqual([r.allowed, r.marks], [false, 0], 'a row onto another window section: refused');
   await sleep(300);
   s = await page.sample();
-  assert.deepEqual([s.sections[0].rows, s.sections[0].blinded.rows, orderCalls().length], [[A, D, C, B], [P, E], 1]);
+  assert.deepEqual([secOf(s, 'w1').rows, secOf(s, 'w2').rows, orderCalls().length], [[A, D, C, B], [Q], 1]);
   await page.close();
 });
 
-test('page: a Blinded group reorders on its own list', opts, async () => {
+test('page: a muted row (blinded under 0.10.0) keeps its rank and moves with the rest of its section', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
+  fake.snapshot = snapshotOf(manualRows().concat([row(E, 'Eps muted', 'idle', { pid: 500, rank: 1, muted: true, ageMinutes: 3 })]), { order: { mode: 'manual' } });
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.sections[0].blinded !== null, 'the group');
-  await page.click('#sections .section.blinded .fold');
-  s = await page.until((x) => x.sections[0].blinded && !x.sections[0].blinded.folded, 'unfolded');
-  assert.deepEqual(s.sections[0].blinded.rows, [P, E]);
+  let s = await page.until((x) => x.mode === 'manual' && x.handles === 5, 'manual with the muted row');
+  assert.deepEqual([s.sections[0].rows, s.mutedRows], [[D, C, B, E, A], [E]], 'ranked between B (0) and A (2)');
   await page.key(E, 'ArrowUp');
-  s = await page.until((x) => x.sections[0].blinded.rows[0] === E, 'moved at once');
-  assert.deepEqual([s.sections[0].blinded.rows, s.sections[0].rows, s.focused], [[E, P], [D, C, B, A], E]);
+  s = await page.until((x) => x.sections[0].rows[2] === E, 'moved at once');
+  assert.deepEqual([s.sections[0].rows, s.focused], [[D, C, E, B, A], E]);
   await page.until(() => orderCalls().length === 1, 'the POST');
-  assert.deepEqual(orderCalls(), [[E, P]]);
+  assert.deepEqual(orderCalls(), [[D, C, E, B, A]], 'one list for the whole section');
   await page.close();
 });
 
@@ -789,7 +884,7 @@ test('page: in activity mode there are no handles and Alt+arrows do nothing; wit
   await sleep(300);
   assert.equal(orderCalls().length, 0, 'a filter: the keys do nothing');
   await page.type('');
-  s = await page.until((x) => x.sections[0].rows.length === 4 && x.handles === 6, 'the filter cleared');
+  s = await page.until((x) => x.sections[0].rows.length === 4 && x.handles === 4, 'the filter cleared');
   await page.key(C, 'ArrowDown');
   await page.until(() => orderCalls().length === 1, 'moving works again');
   await page.close();

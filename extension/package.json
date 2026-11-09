@@ -2,7 +2,7 @@
   "name": "session-board-vscode",
   "displayName": "Session Board for VS Code",
   "description": "Your Claude Code sessions at a glance across every VS Code window: who needs input, who is working, context and usage limits, click to jump, ✕ to end, search every session.",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "publisher": "nima-ghorbani",
   "license": "MIT",
   "preview": true,
@@ -106,6 +106,21 @@
           "group": "navigation@2"
         }
       ]
+    },
+    "configuration": {
+      "title": "Session Board",
+      "properties": {
+        "sessionBoard.notifyOnDone": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Announce a session whose answer has finished. Muted sessions never announce anything."
+        },
+        "sessionBoard.systemNotifications": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When no VS Code window has focus, show the waiting and done notifications as Windows notifications (one window shows each). Windows only."
+        }
+      }
     }
   }
 }

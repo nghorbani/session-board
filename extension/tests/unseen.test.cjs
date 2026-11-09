@@ -56,17 +56,19 @@ test('markers: unseen and seen are UUID-named files under the data dir; stale on
   fs.unlinkSync(path.join(core.SEEN_DIR, A + '.json'));
 });
 
-test('noteAnswer: only a turn that ended since this process last looked writes a marker', () => {
+test('noteAnswer: only a turn that ended since this process last looked writes a marker, and returns its time', () => {
   const t1 = Date.now() - 60000;
-  assert.equal(core.noteAnswer(C, 'idle', t1), false, 'first observation');
-  assert.equal(core.noteAnswer(C, 'idle', t1), false, 'nothing changed');
-  assert.equal(core.noteAnswer(C, 'busy', t1 + 1000), false, 'working');
-  assert.equal(core.noteAnswer(C, 'idle', t1 + 2000), true, 'the answer ended');
+  assert.equal(core.noteAnswer(C, 'idle', t1), 0, 'first observation');
+  assert.equal(core.noteAnswer(C, 'idle', t1), 0, 'nothing changed');
+  assert.equal(core.noteAnswer(C, 'busy', t1 + 1000), 0, 'working');
+  assert.equal(core.noteAnswer(C, 'idle', t1 + 2000), t1 + 2000, 'the answer ended');
   assert.equal(core.readUnseen().get(C).at, t1 + 2000, 'the marker carries the registry time');
-  assert.equal(core.noteAnswer(C, 'idle', t1 + 2000), false, 'the same answer');
-  assert.equal(core.noteAnswer(C, 'idle', t1 + 2500), true, 'a turn shorter than one poll interval');
-  assert.equal(core.noteAnswer(C, 'waiting', t1 + 3000), false, 'a permission prompt is not an answer');
-  assert.equal(core.noteAnswer(C, 'idle', null), true, 'without a registry time the transition itself counts');
+  assert.equal(core.noteAnswer(C, 'idle', t1 + 2000), 0, 'the same answer');
+  assert.equal(core.noteAnswer(C, 'idle', t1 + 2500), t1 + 2500, 'a turn shorter than one poll interval');
+  assert.equal(core.noteAnswer(C, 'waiting', t1 + 3000), 0, 'a permission prompt is not an answer');
+  const at = core.noteAnswer(C, 'idle', null);
+  assert.ok(at > 0, 'without a registry time the transition itself counts');
+  assert.equal(core.readUnseen().get(C).at, at, 'and the time returned is the one in the marker');
   fs.unlinkSync(path.join(core.UNSEEN_DIR, C + '.json'));
 });
 
@@ -84,9 +86,12 @@ test('snapshot: a session is unseen after an answer ends while the board watches
   let row = await rowA();
   assert.equal(row.unseen, true, 'the answer ended');
   assert.equal(row.status, 'idle');
-  assert.equal((await rowA()).unseen, true, 'still unseen on the next poll');
+  assert.ok(row.unseenAt > 0, 'with the time of the answer');
+  const next = await rowA();
+  assert.deepEqual([next.unseen, next.unseenAt], [true, row.unseenAt], 'still unseen on the next poll, the same time');
   await sleep(5); core.markSeen(A);
-  assert.equal((await rowA()).unseen, false, 'opened from the board');
+  row = await rowA();
+  assert.deepEqual([row.unseen, row.unseenAt], [false, null], 'opened from the board');
   await sleep(5); registry('idle'); agents('idle');
   assert.equal((await rowA()).unseen, true, 'a new answer after the open');
   await sleep(5); registry('busy'); agents('busy');
@@ -95,22 +100,37 @@ test('snapshot: a session is unseen after an answer ends while the board watches
   assert.equal((await rowA()).unseen, true, 'and the next answer flags it again');
 });
 
-test('snapshot: the board title beats the generated one; a later rename beats the board title', winOnly, async () => {
+test('snapshot: the title is Claude Code\'s: a custom-title line, else the sidecar, else the generated title; old board titles are ignored', winOnly, async () => {
   registry('idle'); agents('idle');
   let row = await rowA();
-  assert.equal(row.title, 'Generated');
-  assert.equal(row.boardTitle, null);
-  core.setTitle(A, 'From the board', null);
+  assert.deepEqual([row.title, row.renamedTitle, 'boardTitle' in row], ['Generated', null, false]);
+  fs.mkdirSync(path.join(core.DATA_DIR, 'titles'), { recursive: true });
+  fs.writeFileSync(path.join(core.DATA_DIR, 'titles', A + '.json'), JSON.stringify({ title: 'Old board title', at: Date.now(), seenCustomTitle: null }));
   row = await rowA();
-  assert.equal(row.title, 'From the board');
-  assert.equal(row.boardTitle, 'From the board');
-  assert.equal(row.generatedTitle, 'Generated');
-  fs.appendFileSync(transcript, JSON.stringify({ type: 'custom-title', customTitle: 'Renamed', sessionId: A }) + '\n');
+  assert.equal(row.title, 'Generated', 'a 0.10.0 board title is no longer read');
+  await sleep(20);
+  fs.mkdirSync(path.join(path.dirname(transcript), A), { recursive: true });
+  fs.writeFileSync(path.join(path.dirname(transcript), A, 'custom-title.json'), JSON.stringify({ customTitle: 'From the sidecar' }));
   row = await rowA();
-  assert.equal(row.title, 'Renamed', 'a rename after the board title wins');
-  assert.equal(row.renamedTitle, 'Renamed');
-  core.setTitle(A, 'Board again', 'Renamed');
-  assert.equal((await rowA()).title, 'Board again', 'a board title taken after the rename wins');
+  assert.deepEqual([row.title, row.renamedTitle, row.generatedTitle], ['From the sidecar', 'From the sidecar', 'Generated'], 'a sidecar-only change is seen');
+  await sleep(20);
+  fs.appendFileSync(transcript, JSON.stringify({ type: 'custom-title', customTitle: 'From the line', sessionId: A }) + '\n');
+  row = await rowA();
+  assert.equal(row.title, 'From the line', 'the line in the tail wins over the sidecar');
+  assert.ok(fs.existsSync(path.join(core.DATA_DIR, 'titles', A + '.json')), 'the old store is left on disk');
+});
+
+test('snapshot: without a registry time the writing process reports the marker time on every poll (one done event, not two)', winOnly, async () => {
+  const noTime = (status) => fs.writeFileSync(path.join(sessionsDir, process.pid + '.json'), JSON.stringify({ sessionId: A, status }));
+  noTime('busy'); agents('busy');
+  await rowA();
+  await sleep(5); noTime('idle'); agents('idle');
+  const first = await rowA();
+  assert.equal(first.unseen, true);
+  await sleep(5);
+  const second = await rowA();
+  assert.equal(second.unseenAt, first.unseenAt, 'the same time from the marker');
+  assert.equal(core.readUnseen().get(A).at, first.unseenAt);
 });
 
 test.after(() => { delete process.env.SB_SHIM_AGENTS; fs.rmSync(tmp, { recursive: true, force: true }); });

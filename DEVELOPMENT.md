@@ -25,7 +25,8 @@ pull request should bring. The user-facing pages are [README.md](README.md) (rep
 session-board/
   extension/                  the VS Code extension; everything the package ships lives here
     package.json              manifest: activity-bar container "Session Board", webview view, commands
-    extension.js              VS Code host: polling, badge, toasts, open/end/search, URI handler
+    extension.js              VS Code host: polling, badge, open/end/search, URI handler
+    notify.cjs                which waiting and done events a window announces, and where
     core.cjs                  data layer: sessions, transcript facts, window mapping, jump, end,
                               archive, search, usage limits and the signed-in account
     index.html                the page; runs in the webview and in a browser
@@ -55,7 +56,7 @@ per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON
 `no-store`. Routes: `GET /api/sessions`, `POST /api/focus/<id>`,
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
-`POST /api/retitle/<id>`, `POST /api/blind/<id>`, `POST /api/unblind/<id>`,
+`POST /api/title/suggest/<id>`, `POST /api/title/<id>?title=`, `POST /api/mute/<id>`, `POST /api/unmute/<id>`,
 `POST /api/order?ids=<comma-joined ids>`, `POST /api/order/mode?mode=activity|manual`.
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
@@ -110,21 +111,31 @@ installed.
 - `release-notes.test.cjs`: the changelog has a section for the manifest version and the
   release-notes script prints it.
 - `unseen.test.cjs`: the unseen and seen markers, `noteAnswer()` and the `unseen` flag on
-  snapshot rows, and how a board title ranks against the generated and the renamed title.
-- `retitle.test.cjs`: the transcript excerpt (also with a prompt buried behind megabytes of
-  tool output), the cleaning of the model's reply and `retitleSession()` against the shim.
-- `unseen-host.test.cjs`: opening marks a session seen, the `seen` message, and the
-  `retitle` message's replies.
-- `blinded.test.cjs`: the blinded marker store (existence is the flag), pruning by liveness
-  and transcript presence, the `blinded` flag on rows, heartbeat names and the window label.
-- `blinded-host.test.cjs`: the `blind` and `unblind` messages, muting of the badge and the
-  toast, and `thisWindowId` on the posted snapshot.
-- `server-blind.test.cjs`: `server.cjs` as a child process answering the blind routes.
+  snapshot rows, and which title a row shows (custom-title line, sidecar, generated).
+- `title.test.cjs`: the transcript excerpt (also with a prompt buried behind megabytes of
+  tool output), the cleaning of the model's reply, `suggestTitle()` against the shim, and
+  `renameSession()`: the line and the sidecar for a session that is not running, `claude-owned`
+  for a running one.
+- `unseen-host.test.cjs`: opening marks a session seen, the `seen` and `copyText` messages, and
+  ✎: the prefilled box and the write, the hand-over to Claude Code's rename box for a running
+  session (here, through the `/rename` route of the board in its window, or a message).
+- `server-title.test.cjs`: `server.cjs` answering the title write route.
+- `muted.test.cjs`: the muted marker store (existence is the flag), the move of 0.10.0
+  `blinded\` markers (and its race), pruning by liveness and transcript presence, the `muted`
+  flag on rows, heartbeat names, the window label and `focusedPeerAt()`.
+- `muted-host.test.cjs`: the `mute` and `unmute` messages, the badge, the notifier as the host
+  wires it (VS Code toasts, the Windows path), `handleUri` marking a session seen, the focus
+  heartbeat, and `thisWindowId` on the posted snapshot.
+- `server-mute.test.cjs`: `server.cjs` as a child process answering the mute routes.
+- `notify.test.cjs`: `notify.cjs` with plain fakes: which events are announced, the routing
+  table (focused, focused peer, pending, Windows path), batching, release and retry.
+- `notices.test.cjs`: notice claims, the toast XML and the PowerShell script (no session text
+  in it), through the `SB_TOAST_LOG` dry run.
 - `heartbeats.test.cjs`: the heartbeat readers delete records older than a day and leftover
   `.tmp` files, keep fresh and merely stale ones, and `boardAlive()` answers against a temp
   installed-extension list.
 - `order.test.cjs`: the order store (`setOrder()` checks the whole list before the first
-  write, `readOrder()`), the sort-mode file, pruning shared with the blinded store, and
+  write, `readOrder()`), the sort-mode file, pruning shared with the muted store, and
   `rank` and `order.mode` on the snapshot.
 - `order-host.test.cjs`: the `order` and `sortMode` messages and their replies.
 - `server-order.test.cjs`: `server.cjs` as a child process answering the order routes.
@@ -140,8 +151,11 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
 - Live rows join their transcript `~/.claude/projects/<slug>/<sessionId>.jsonl` via a
   filename index (deriving the path from the cwd matches only two thirds of sessions).
   Context tokens come from the tail of the transcript, the same formula the context-guard
-  hook uses; the heading is the `custom-title` line (`/rename`), else the registry's
-  user-set name, else the `ai-title` line; the last prompt comes from `last-prompt` lines.
+  hook uses; the heading is Claude Code's name: the newest `custom-title` line in the tail,
+  else `<project dir>\<id>\custom-title.json` (the order Claude Code's own list uses), else
+  the registry's user-set name, else the `ai-title` line; the last prompt comes from
+  `last-prompt` lines. The facts cache keys on the transcript's size and mtime and the
+  sidecar's mtime.
 - **Window mapping**: a session's `claude.exe` is a child of its window's extension host
   (`Code.exe --type=utility --utility-sub-type=node.mojom.NodeService`); one `Win32_Process`
   query gives parents, evicted when a pid disappears. VS Code logs each window's extension-
@@ -250,27 +264,40 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   Markers older than two weeks are dropped on read. The page shows those rows with the
   unseen status inside their window's section, counts them on its badge, and flips the flag
   at once on a click.
-- **Sections and Blinded**: the page groups live rows with `groupSessions()` (index.html):
+- **Sections and Muted**: the page groups live rows with `groupSessions()` (index.html):
   one section per `window.id` (`Elsewhere` for rows without one), this window first
   (`thisWindowId`, set by the host from `windowIdForExthost(process.pid)`), then by waiting
   and unseen rows and label. A section's label is the workspace name the board in that
-  window writes into its heartbeat (`writeHeartbeat(pid, id, vscode.workspace.name)`, read
-  back with `heartbeatNames()`), else the most common folder name of its sessions. ⊘ writes
-  `%LOCALAPPDATA%\SessionBoard\blinded\<id>.json` (`blindSession()`; existence is the flag,
-  the content is never parsed, so a half-written file seen by another window is never
-  deleted); ⊙ unlinks it. `snapshot()` sets `blinded` on every row and drops a marker whose
-  session is neither live nor has a transcript under either root (`pruneDead()`), so a blind
-  lasts as long as a resume is possible. The page keeps a blinded row under the folded Blinded
-  group of its own section (key `w<id>:blinded`, rendered by `blindedGroupHtml()`, folded by
-  default through `isFolded()`), waiting or not, with that group's own badge; it holds a ⊘/⊙
-  click in `state.pendingBlind` until a snapshot agrees (10 s at most), and leaves blinded rows
-  out of the section badge, the counts line, the title and the browser notification; the host
-  leaves them out of the activity-bar badge and the toast. A typed filter shows every match in
-  place, sections unfolded.
+  window writes into its heartbeat (`writeHeartbeat(pid, id, vscode.workspace.name, focused)`,
+  read back with `heartbeatNames()`), else the most common folder name of its sessions. The
+  bell writes `%LOCALAPPDATA%\SessionBoard\muted\<id>.json` (`muteSession()`; existence is the
+  flag, the content is never parsed, so a half-written file seen by another window is never
+  deleted); the struck bell unlinks it. `readMuted()` first renames any 0.10.0 marker from
+  `blinded\` into `muted\` (one atomic rename each, so a racing window cannot bring back a mute
+  removed meanwhile). `snapshot()` sets `muted` on every row and drops a marker whose session is
+  neither live nor has a transcript under either root (`pruneDead()`), so a mute lasts as long
+  as a resume is possible. A muted row stays in its section, dimmed, with a chip; the page
+  holds a click in `state.pendingMute` until a snapshot agrees (10 s at most) and leaves muted
+  rows out of the section badge, the counts line, the title and the browser notification; the
+  host leaves them out of the activity-bar badge and the notifier. A typed filter shows every
+  match in place, sections unfolded.
+- **Notifications**: `notify.cjs` (no vscode import; the host injects focus, toasts, settings and
+  the core calls) sees every snapshot. Events: a row that starts waiting (keyed by its
+  `statusUpdatedAt`) and a known row whose `unseenAt` moved (the time `noteAnswer()` wrote into
+  the unseen marker, so every window keys one answer the same way). A focused window shows a
+  VS Code toast. Otherwise `focusedPeerAt()` reads the heartbeats: a focused window that wrote
+  after the event has seen it; an older focused record keeps the event pending up to 60 s (that
+  window may have died); with no focused window, `claimNotice(id, kind, at)` creates
+  `notices\<id>.<kind>.<at>` exclusively and the window that wins calls `showSystemToast()`:
+  one `powershell.exe -EncodedCommand` per batch whose script holds the toast XML only as
+  base64 (session text never becomes PowerShell source), shown under PowerShell's
+  AppUserModelID, with the session's `openUri()` as a protocol launch. A failed batch releases
+  its claims and is retried once, then reported once. `SB_TOAST_LOG` writes the script to a file
+  instead of spawning (tests).
 - **Manual order**: the header switch (`#sortMode`, `applyMode()`) writes
   `%LOCALAPPDATA%\SessionBoard\sort.json` through `setSortMode()` (tmp then rename); `snapshot()`
-  reads it back as `order.mode`. In manual mode `rowOrder()` sorts a section and its Blinded
-  group by `rank` (a row without one sits on top, newest first); by activity it is waiting,
+  reads it back as `order.mode`. In manual mode `rowOrder()` sorts a section
+  by `rank` (a row without one sits on top, newest first); by activity it is waiting,
   busy, unseen, idle, then age. A move (the ⋮⋮ handle, HTML5 drag and drop on the handle
   only, or Alt+Up/Down on the focused row) ends in `applyOrder(key, ids)`: the whole group's
   ids (the shown rows in their new order, then the folded stale rows), held in
@@ -278,13 +305,14 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   or `POST /api/order?ids=` (comma-joined, 8000 characters at most; core caps the list at
   500). `setOrder()` checks every id before the first write, then writes
   `order\<id>.json` = `{ rank: index, at }`; ids outside the list keep their ranks, and a marker is
-  pruned like a blind marker. Ranks are global by id and read inside whichever section the
+  pruned like a mute marker. Ranks are global by id and read inside whichever section the
   row is in, so a session resumed in another window lands somewhere plausible there until its
   next move; two windows reordering one group at once settle on the last write. A typed
   filter disables moving, and so does the activity mode. The per-file read runs once per
   snapshot like the other stores; revisit it when `order\` holds about 1000 files (a 90-day
   expiry through `readMarkers()` is the cheap mitigation).
-- **Titles**: ✎ sends `retitle`; `retitleSession()` collects the last six prompts and the
+- **Titles**: the board keeps none of its own (0.10.x boards wrote `titles\<id>.json`; it is
+  no longer read and is left on disk). ✎ sends `retitle`; `suggestTitle()` collects the last six prompts and the
   newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB
   steps until it has them (a long tool run can push the last prompt megabytes back; after
   16 MB without a prompt it gives up) and skips injected `isMeta` lines, text starting with
@@ -292,10 +320,18 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   `claude -p --model haiku --output-format text --no-session-persistence --tools "" --settings
   <file> --disable-slash-commands --strict-mcp-config --mcp-config <file>` with the
   instruction and the excerpt on stdin, keeps the last non-empty stdout line (settings
-  warnings come first) unquoted and without a trailing period, and stores it in
-  `titles\<id>.json` with the renamed title seen at that moment. `snapshot()` shows the board
-  title while that renamed title is unchanged, so a later `/rename` wins again. Outcomes:
-  `invalid`, `no-transcript`, `timeout` (90 s, process tree killed), `failed`, `empty`.
+  warnings come first) unquoted and without a trailing period. Outcomes: `invalid`,
+  `no-transcript`, `timeout` (90 s, process tree killed), `failed`, `empty`. The host then
+  routes by whether the session runs in a VS Code window: if it does, `handToClaude()` puts the
+  suggestion on the clipboard and opens `claude-vscode.renameSessionTab` on the revealed
+  session (here, or through `vscode://<board>/rename?session=&windowId=` when the board in the
+  owning window reports version 0.11.0 or newer in its heartbeat), because a running CLI
+  writes its own `custom-title` after every answer and only Claude Code's rename tells it.
+  Otherwise an input box prefilled with the suggestion; Enter calls `renameSession()`, which
+  appends `{"type":"custom-title","sessionId","customTitle"}` to the transcript (what Claude
+  Code's rename appends; a resumed CLI reads it and writes it on) and then writes the sidecar
+  (tmp then rename). It answers `claude-owned` for a session running in a window or in a
+  terminal whose registry record says `nameSource: "user"`.
 
 ## Where a change goes
 

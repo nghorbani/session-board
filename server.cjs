@@ -5,8 +5,8 @@
  * data layer run inside VS Code via the extension.
  *
  * Every /api route requires the per-run token the server embeds into the page, and a Host
- * of 127.0.0.1:<port> (Origin, when sent, must match too): the end, unarchive, seen, blind,
- * unblind and retitle routes change state, the usage and retitle routes start a CLI process, and the
+ * of 127.0.0.1:<port> (Origin, when sent, must match too): the end, unarchive, seen, mute,
+ * unmute and title routes change state, the usage and title-suggest routes start a CLI process, and the
  * search route returns private transcript text.
  */
 
@@ -103,14 +103,14 @@ async function handle(req, res) {
     catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
   }
 
-  for (const [prefix, blinded] of [['/api/blind/', true], ['/api/unblind/', false]]) {
+  for (const [prefix, muted] of [['/api/mute/', true], ['/api/unmute/', false]]) {
     if (route.startsWith(prefix) && req.method === 'POST') {
-      // âŠ˜ / âŠ™: the shared marker under the data dir; the next poll moves the row.
+      // the bell on a row: the shared marker under the data dir; the next poll carries the flag.
       const sessionId = safeDecode(route.slice(prefix.length));
       if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, error: 'not a session id' });
       try {
-        if (blinded) core.blindSession(sessionId); else core.unblindSession(sessionId);
-        return sendJson(res, 200, { ok: true, blinded });
+        if (muted) core.muteSession(sessionId); else core.unmuteSession(sessionId);
+        return sendJson(res, 200, { ok: true, muted });
       } catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
     }
   }
@@ -134,12 +134,24 @@ async function handle(req, res) {
     catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
   }
 
-  if (route.startsWith('/api/retitle/') && req.method === 'POST') {
-    // One short model call over the transcript; the reply is stored as the board's title.
-    const sessionId = safeDecode(route.slice('/api/retitle/'.length));
+  if (route.startsWith('/api/title/suggest/') && req.method === 'POST') {
+    // One short model call over the transcript; nothing is stored.
+    const sessionId = safeDecode(route.slice('/api/title/suggest/'.length));
     if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, code: 'invalid', message: 'not a session id' });
-    const result = await core.retitleSession(sessionId);
+    const result = await core.suggestTitle(sessionId);
     const codes = { invalid: 400, 'no-transcript': 404, timeout: 504, failed: 502, empty: 502 };
+    return sendJson(res, result.ok ? 200 : (codes[result.code] || 500), result);
+  }
+
+  if (route.startsWith('/api/title/') && req.method === 'POST') {
+    // Writes Claude Code's title (the custom-title line and the sidecar) of a session that is
+    // not running; a running one answers 409 claude-owned. The title rides in the query string.
+    const sessionId = safeDecode(route.slice('/api/title/'.length));
+    if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, code: 'invalid', message: 'not a session id' });
+    const title = parsed.searchParams.get('title') || '';
+    if (title.length > 200) return sendJson(res, 400, { ok: false, code: 'invalid', message: 'title too long' });
+    const result = core.renameSession(sessionId, title);
+    const codes = { invalid: 400, empty: 400, 'claude-owned': 409, 'no-transcript': 404, failed: 500 };
     return sendJson(res, result.ok ? 200 : (codes[result.code] || 500), result);
   }
 

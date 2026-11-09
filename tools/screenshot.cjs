@@ -49,13 +49,13 @@ function session(sessionId, title, status, extra) {
 }
 
 const sessions = [
-  session('a1', 'Fix flaky upload test', 'waiting', { waitingFor: 'permission prompt', ageMinutes: 4, contextTokens: 168000, pct: 18 }),
-  session('a2', 'Release notes for 2.4', 'waiting', { waitingFor: 'input needed', ageMinutes: 22, contextTokens: 94000, pct: 10, cwd: 'C:\\code\\acme\\docs', window: { id: 2, label: 'docs' } }),
-  session('a3', 'Migrate auth to OAuth', 'busy', { contextTokens: 611000, pct: 66 }),
-  session('a4', 'Refactor CSV importer', 'busy', { contextTokens: 872000, pct: 95, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' } }),
-  session('a5', 'Explore vector databases', 'idle', { ageMinutes: 48, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' }, unseen: true }),
-  session('a6', 'Spike: streaming parser', 'idle', { ageMinutes: 95, contextTokens: 210000, pct: 23, archived: true }),
-  session('a7', 'Nightly dependency bump', 'idle', { ageMinutes: 140, contextTokens: 76000, pct: 8, cwd: 'C:\code\acme\api', window: { id: 3, label: 'api' }, blinded: true }),
+  session('57f9950b-6af0-43b1-8cf6-df44231415d6', 'Fix flaky upload test', 'waiting', { waitingFor: 'permission prompt', ageMinutes: 4, contextTokens: 168000, pct: 18 }),
+  session('9c6e6599-150d-4902-86d7-0912fb739fb2', 'Release notes for 2.4', 'waiting', { waitingFor: 'input needed', ageMinutes: 22, contextTokens: 94000, pct: 10, cwd: 'C:\\code\\acme\\docs', window: { id: 2, label: 'docs' } }),
+  session('8de2ac3e-106d-4060-8465-ad7df94a6f7c', 'Migrate auth to OAuth', 'busy', { contextTokens: 611000, pct: 66 }),
+  session('8ea18419-65ce-4e4d-800a-fc1766733b8e', 'Refactor CSV importer', 'busy', { contextTokens: 872000, pct: 95, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' } }),
+  session('06011aa6-f5ad-4143-81a7-ec8d73d905d6', 'Explore vector databases', 'idle', { ageMinutes: 48, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' }, unseen: true }),
+  session('f012f188-e632-41b8-82a0-99a8e5855280', 'Spike: streaming parser', 'idle', { ageMinutes: 95, contextTokens: 210000, pct: 23, archived: true }),
+  session('5ec9d000-209b-466d-8118-6f18417f7a92', 'Nightly dependency bump', 'idle', { ageMinutes: 35, contextTokens: 76000, pct: 8, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' }, muted: true }),
 ];
 
 const snapshot = {
@@ -73,11 +73,11 @@ const snapshot = {
 };
 
 const searchRows = [
-  { sessionId: 'a4', title: 'Refactor CSV importer', live: true, status: 'busy', folder: 'acme/api', cwd: 'C:\\code\\acme\\api', ageMinutes: 0, window: { id: 3, label: 'api' },
+  { sessionId: '8ea18419-65ce-4e4d-800a-fc1766733b8e', title: 'Refactor CSV importer', live: true, status: 'busy', folder: 'acme/api', cwd: 'C:\\code\\acme\\api', ageMinutes: 0, window: { id: 3, label: 'api' },
     snippets: ['…the CSV importer chokes on quoted newlines; the new parser streams rows instead…'] },
-  { sessionId: 'p1', title: 'CSV importer v1', live: false, folder: 'acme/api', cwd: 'C:\\code\\acme\\api', ageMinutes: 60 * 24 * 12,
+  { sessionId: '96655b25-aa6f-4954-8905-59d65d781f9a', title: 'CSV importer v1', live: false, folder: 'acme/api', cwd: 'C:\\code\\acme\\api', ageMinutes: 60 * 24 * 12,
     snippets: ['…wrote the first CSV importer with a fixed delimiter; header row optional…', '…the CSV files from the ERP export use semicolons…'] },
-  { sessionId: 'p2', title: 'Invoice export cleanup', live: false, folder: 'acme/webapp', cwd: 'C:\\code\\acme\\webapp', ageMinutes: 60 * 24 * 40,
+  { sessionId: '51f0fe27-2fba-40e5-89d8-62b248fa5239', title: 'Invoice export cleanup', live: false, folder: 'acme/webapp', cwd: 'C:\\code\\acme\\webapp', ageMinutes: 60 * 24 * 40,
     snippets: ['…export invoices as CSV instead of XLSX for the accounting hand-off…'] },
 ];
 
