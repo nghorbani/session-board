@@ -134,6 +134,9 @@
   .badge.unseen { background: color-mix(in srgb, var(--ok) 22%, var(--panel-2)); color: var(--ok); }
   .chip.here { color: var(--busy); border-color: var(--busy); text-transform: none; letter-spacing: 0; font-weight: 500; }
   .chip.muted { color: var(--faint); border-style: dotted; }
+  .filterline { color: var(--busy); font-size: 11.5px; margin: 0 2px 10px; }
+  .filterline button { margin-left: 8px; font-size: 11px; padding: 0 6px; }
+  .row .agent { color: var(--dim); margin-right: 6px; }
   .row.muted .main, .row.muted .status { opacity: .6; }   /* silent and uncounted, still in its place */
   .subhead {
     display: flex; align-items: center; gap: 7px; margin: 10px 0 6px 2px;
@@ -249,6 +252,7 @@
   </div>
 
   <div class="group results" id="g-results" style="display:none"><h2 id="h-results">Search results</h2><div id="l-results"></div></div>
+  <div class="filterline" id="filterline" style="display:none"></div>
   <div id="sections"></div>
   <div class="group" id="g-archived" style="display:none"><h2>Archived</h2><div id="l-archived"></div></div>
 </div>
@@ -267,7 +271,6 @@ var tokenMeta = document.querySelector('meta[name="board-token"]');
 var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
 
 var POLL_MS = 4000;
-var IDLE_HIDE_MINUTES = 120;
 var CONFIRM_MS = 3000;
 var MUTE_PENDING_MS = 10000;    // the bell keeps the flag it was clicked to until a snapshot agrees, at most this long
 var ORDER_PENDING_MS = 10000;   // a move or a mode switch holds its result until a snapshot agrees, at most this long
@@ -275,7 +278,6 @@ var ORDER_QUERY_MAX = 8000;     // the browser route's cap on the comma-joined i
 
 var state = {
   data: null,
-  showStale: Object.create(null),           // section key -> true while its "Show N idle over 2h" is open
   showArchived: false,                      // "Show N archived" toggle
   folded: Object.create(null),              // section key -> folded; a section starts open
   pendingMute: Object.create(null),         // sessionId -> { muted, until } from the bell until a snapshot agrees
@@ -536,6 +538,7 @@ function detailsHtml(s, opts) {
   if (!state.details[s.sessionId]) return '';
   var copy = function (v, what) { return '<button class="iconbtn copyval" data-act="copyval" data-copy="' + esc(v) + '" title="copy the ' + what + '">⧉</button>'; };
   var lines = ['<div><span class="k">id</span>' + esc(s.sessionId) + copy(s.sessionId, 'session id') + '</div>'];
+  if (s.name && s.name !== String(s.sessionId).slice(0, 8)) lines.push('<div><span class="k">agent</span>' + esc(s.name) + copy(s.name, 'agent name') + '</div>');
   var started = fmtStarted(s.startedAt);
   var facts = [];
   if (started) facts.push('<span class="k">started</span>' + esc(started));
@@ -598,7 +601,8 @@ function rowHtml(s, limits, opts) {
   else if (by === 'board') chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
   if (opts.past && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
   if (!opts.past && isMuted(s)) chips += '<span class="chip muted" title="muted: no notifications, not counted">muted</span>';
-  var sub = chips + '<button class="sid" data-act="details" title="' + esc(s.sessionId) + ' (click for details)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
+  var agent = s.name && s.name !== s.title && s.name !== String(s.sessionId).slice(0, 8) ? '<span class="agent" title="the agent name other Claude sessions use for this one">' + esc(s.name) + '</span>' : '';
+  var sub = chips + agent + '<button class="sid" data-act="details" title="' + esc(s.sessionId) + ' (click for details)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
   var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
@@ -898,19 +902,18 @@ function renderSwitch(data) {
  *    ──▶ render at once (rankOf answers from the pending list) ──▶ host or POST /api/order?ids=
  *    result ok ──▶ the entry stays until a snapshot agrees (every rank equals its index) or the 10 s pass
  *    result not ok ──▶ the entry goes, the rows return, the notice line says why
- * The list is the whole group: the shown rows in their new order, then the folded stale rows as they are, so a
- * ranked stale row never surfaces on top when the fold opens. Manual mode only, and never under a typed filter
+ * The list is the whole group, every row in its new order. Manual mode only, and never under a typed filter
  * (the list must be the whole group).
  */
 function canMove() { return currentMode() === 'manual' && !state.filter; }
 
-/** The ids of a group as the page shows them: `shown` in display order and `hidden` (stale rows behind the fold). */
+/** The ids of a group in display order, or null for an unknown group. */
 function groupLists(key) {
   var g = groupSessions((state.data && state.data.sessions) || [], state.data ? state.data.thisWindowId : null);
   var ids = function (list) { return list.map(function (s) { return s.sessionId; }); };
   for (var i = 0; i < g.sections.length; i++) {
     var sec = g.sections[i];
-    if (sec.key === key) return { shown: ids(sec.shown), hidden: ids(sec.rows.filter(function (s) { return sec.shown.indexOf(s) === -1; })) };
+    if (sec.key === key) return ids(sec.rows);
   }
   return null;
 }
@@ -942,25 +945,25 @@ function groupKeyOf(sid) { var s = rowById(sid); return s ? groupKey(s) : null; 
 function applyDrop(sid, targetSid, before) {
   var key = groupKeyOf(sid);
   if (!key || sid === targetSid || key !== groupKeyOf(targetSid)) return false;
-  var lists = groupLists(key);
-  if (!lists) return false;
-  var shown = lists.shown.filter(function (id) { return id !== sid; });
+  var list = groupLists(key);
+  if (!list) return false;
+  var shown = list.filter(function (id) { return id !== sid; });
   var at = shown.indexOf(targetSid);
   if (at === -1) return false;
   shown.splice(before ? at : at + 1, 0, sid);
-  return applyOrder(key, shown.concat(lists.hidden));
+  return applyOrder(key, shown);
 }
 
-/** Alt+Up / Alt+Down: swap the row with its neighbour among the shown rows of its group; the ends are no-ops. */
+/** Alt+Up / Alt+Down: swap the row with its neighbour in its group; the ends are no-ops. */
 function moveByOne(sid, delta) {
   var key = groupKeyOf(sid);
-  var lists = key ? groupLists(key) : null;
-  if (!lists) return false;
-  var shown = lists.shown.slice();
+  var list = key ? groupLists(key) : null;
+  if (!list) return false;
+  var shown = list.slice();
   var i = shown.indexOf(sid), j = i + delta;
   if (i === -1 || j < 0 || j >= shown.length) return false;
   shown[i] = shown[j]; shown[j] = sid;
-  return applyOrder(key, shown.concat(lists.hidden));
+  return applyOrder(key, shown);
 }
 
 function refocus(sid) { var el = document.querySelector('.row[data-session="' + sid + '"]'); if (el && el.focus) el.focus(); }
@@ -984,14 +987,14 @@ function rowById(sid) {
 }
 
 function onRowClick(ev) {
-  var ctl = ev.target.closest ? ev.target.closest('button[data-act="fold"], button[data-act="stale"], button[data-act="archived"], button[data-act="mode"]') : null;
+  var ctl = ev.target.closest ? ev.target.closest('button[data-act="fold"], button[data-act="archived"], button[data-act="mode"], button[data-act="clearfilter"]') : null;
   if (ctl) {                                               // section controls live outside the rows
     ev.stopPropagation();
     var key = ctl.getAttribute('data-section');
     var ctlAct = ctl.getAttribute('data-act');
     if (ctlAct === 'mode') { applyMode(ctl.getAttribute('data-mode')); return; }
+    if (ctlAct === 'clearfilter') { clearSearch(); return; }
     if (ctlAct === 'fold') state.folded[key] = !isFolded(key);
-    else if (ctlAct === 'stale') state.showStale[key] = !state.showStale[key];
     else state.showArchived = !state.showArchived;
     render();
     return;
@@ -1061,7 +1064,6 @@ function byAge(a, b) { return (a.ageMinutes == null ? 1e9 : a.ageMinutes) - (b.a
 function statusRank(s) { return s.status === 'waiting' ? 0 : s.status === 'busy' ? 1 : s.unseen ? 2 : 3; }
 function sectionKey(s) { return s.window ? 'w' + s.window.id : 'none'; }
 function sectionLabel(s) { return s.window ? (s.window.label || ('window ' + s.window.id)) : 'Elsewhere'; }
-function isStale(s) { return statusRank(s) === 3 && !(s.ageMinutes != null && s.ageMinutes < IDLE_HIDE_MINUTES); }
 /** The row's mute flag as the page shows it: a fresh click on the bell wins over the last snapshot. */
 function isMuted(s) { var p = state.pendingMute[s.sessionId]; return p && p.until > Date.now() ? p.muted : Boolean(s.muted); }
 
@@ -1117,8 +1119,6 @@ function groupSessions(rows, thisWindowId) {
   var finish = function (sec) {
     sec.rows.sort(rowOrder);
     Object.assign(sec, counts(sec.rows));
-    sec.stale = filter ? [] : sec.rows.filter(isStale);
-    sec.shown = state.showStale[sec.key] ? sec.rows : sec.rows.filter(function (s) { return sec.stale.indexOf(s) === -1; });
     return sec;
   };
   var sections = Object.keys(byKey).map(function (k) { return finish(byKey[k]); }).sort(function (a, b) {
@@ -1152,8 +1152,7 @@ function sectionHead(sec, label, count, thisWindow) {
 function sectionHtml(sec, limits) {
   var folded = isFolded(sec.key) && !state.filter;
   var cls = 'group section' + (folded ? ' folded' : '') + (sec.waiting ? ' waiting' : sec.unseen ? ' unseen' : '') + (sec.thisWindow ? ' here' : '');
-  var body = sec.shown.map(function (s) { return rowHtml(s, limits); }).join('');
-  if (sec.stale.length) body += '<div class="empty"><button data-act="stale" data-section="' + esc(sec.key) + '">' + (state.showStale[sec.key] ? 'Hide' : 'Show') + ' ' + sec.stale.length + ' idle over 2h</button></div>';
+  var body = sec.rows.map(function (s) { return rowHtml(s, limits); }).join('');   // every running row that is not archived, idle or not
   return '<div class="' + cls + '" data-section="' + esc(sec.key) + '">' + sectionHead(sec, sec.label, sec.rows.length, sec.thisWindow) + '<div class="section-body">' + body + '</div></div>';
 }
 
@@ -1162,6 +1161,15 @@ function render() {
   var data = state.data;
   var limits = (data && data.limits) || { compact: null, save: null };
   var all = (data && data.sessions) || [];
+
+  // a typed filter hides rows; say so, with the count and a way out
+  var fl = document.getElementById('filterline');
+  if (state.filter) {
+    var matched = all.filter(function (s) { var pe = state.pendingEnd[s.sessionId]; return matchesFilter(s) && !(pe && pe.kind === 'ended'); }).length;
+    fl.innerHTML = 'Filter “' + esc(state.filter) + '”: ' + matched + ' of ' + all.length + ' running session' + (all.length === 1 ? '' : 's')
+      + '<button data-act="clearfilter" title="clear the filter (Esc)">clear</button>';
+    fl.style.display = '';
+  } else { fl.style.display = 'none'; fl.innerHTML = ''; }
 
   // search results block
   var gr = document.getElementById('g-results');

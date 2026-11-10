@@ -31,16 +31,20 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   under **Elsewhere**. Inside a section the rows sort by what they need from you: waiting
   (`permission prompt`, `input needed`, `dialog open`), then working, then unseen (the
   answer ended while the board was running and you have not opened the session since;
-  opening it or sending a new prompt clears it), then idle. Idle rows over 2 h fold behind a
-  toggle per section, and a click on the heading folds the whole section.
+  opening it or sending a new prompt clears it), then idle. Every running session that is not
+  archived stays in its section, however long it has been idle; a click on the heading folds
+  the whole section.
+- **A typed filter says so**: while the search box holds text, a line above the sections reads
+  `Filter "cuvis-ai-6c": 1 of 17 running sessions`, with a clear button (Esc does the same).
 - **The number on a heading** counts the sessions in that section that wait for you (amber)
   or are unseen (green). It goes down as you answer or open them.
 - Each row: the session's title (Claude Code's: a rename wins over the generated title; a
   session with neither shows its last prompt), "Session" and the first 8 characters of its
-  id, its folder, status, a context bar, and time in that state. Hover for the folder and the
-  internal agent name. A click on the id folds out a details line: the full id, when the
-  session started, its process, its window and its transcript path; ⧉ copies the id or the
-  path. Search finds a session by its id, typed bare or as Claude Code shows it
+  id, its folder, status, a context bar, and time in that state. When the session's agent
+  name (the one other Claude sessions use for it, such as `cuvis-ai-6c`) differs from its
+  title, it shows before the id. A click on the id folds out a details line: the full id, the
+  agent name, when the session started, its process, its window and its transcript path; ⧉
+  copies the id, the name or the path. Search finds a session by its id, typed bare or as Claude Code shows it
   (`Session f8005c0d`).
 - **Muted**: a muted session stays in its place in its window section, marked "muted" and
   dimmed, waiting or not. It raises no toast and no notification and counts nowhere: not on

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+
+- Every running session that is not archived stays on the board: the "Show N idle over 2h" fold is gone, so sessions idle for hours or days sit in their window section like the rest. Archived sessions (in Claude Code or with ⤓) are still put away
+- A typed filter says so: a line above the sections reads `Filter "<text>": n of N running sessions`, with a clear button
+- Rows show the agent name other Claude sessions use for a session (`cuvis-ai-6c`) when it differs from the title, and the details line carries it with a copy button
+
 ## 0.11.0
 
 - The board tells you when a session finishes its answer: the focused VS Code window shows a toast "<title>: done" with an Open button, next to the existing toast for a session that starts waiting

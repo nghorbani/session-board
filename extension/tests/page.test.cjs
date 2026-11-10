@@ -148,6 +148,8 @@ const SAMPLE = `(function () {
     dimmed: q('.row.archived').length,
     pendingEnd: JSON.parse(JSON.stringify(state.pendingEnd)),
     copied: window.__copied || null,
+    filterline: (function () { var e = document.getElementById('filterline'); return e && e.style.display !== 'none' ? e.textContent : null; })(),
+    agents: q('.row[data-session] .agent').map(function (a) { return a.closest('.row').getAttribute('data-session') + '=' + a.textContent; }),
     prompts: window.__prompts || [],
     sids: q('.row[data-session] .sid').map(function (b) { return b.closest('.row').getAttribute('data-session') + '=' + b.textContent; }),
     details: q('.row[data-session] .details').map(function (d) { return d.closest('.row').getAttribute('data-session') + '=' + d.textContent; }),
@@ -680,18 +682,62 @@ test('page: a typed filter keeps the muted chip and unfolds a folded section for
   await page.close();
 });
 
-test('page: stale idle rows fold per section behind their own button, and a header folds its section', opts, async () => {
+test('page: every running row stays in its section however long it has been idle; only archived rows are put away; a header folds its section', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, 'Fresh', 'idle', win(1, 'alpha')), row(B, 'Old', 'idle', Object.assign({ pid: 200, ageMinutes: 300 }, win(1, 'alpha'))), row(C, 'Older', 'idle', Object.assign({ pid: 300, ageMinutes: 400 }, win(2, 'beta')))]);
+  fake.snapshot = snapshotOf([
+    row(A, 'Fresh', 'idle', win(1, 'alpha')),
+    row(B, 'Idle three days', 'idle', Object.assign({ pid: 200, ageMinutes: 3 * 24 * 60 }, win(1, 'alpha'))),
+    row(C, 'Older', 'idle', Object.assign({ pid: 300, ageMinutes: 400 }, win(2, 'beta'))),
+    row(D, 'Archived', 'idle', Object.assign({ pid: 400, ageMinutes: 600, archived: true, archivedBy: 'claude-code' }, win(1, 'alpha'))),
+  ]);
   const page = await openPage();
   let s = await page.until((x) => x.sections.length === 2, 'two sections');
-  assert.deepEqual(s.sections.map((sec) => [sec.rows, sec.stale]), [[[A], 'Show 1 idle over 2h'], [[], 'Show 1 idle over 2h']]);
-  await page.click('#sections .section[data-section="w1"] button[data-act="stale"]');
-  s = await page.until((x) => x.sections[0].rows.length === 2, 'the stale row shown');
-  assert.deepEqual(s.sections.map((sec) => [sec.rows, sec.stale]), [[[A, B], 'Hide 1 idle over 2h'], [[], 'Show 1 idle over 2h']], 'the other section keeps its own toggle');
+  assert.deepEqual(s.sections.map((sec) => [sec.rows, sec.stale]), [[[A, B], null], [[C], null]], 'idle rows shown, no fold button');
+  assert.equal(s.toggleArchived, 'Show 1 archived', 'the archived row is the only one put away');
+  assert.equal(await page.eval('document.body.textContent.indexOf("idle over 2h") === -1'), true);
   await page.click('#sections > .section[data-section="w1"] > .section-head .fold');
   s = await page.until((x) => x.sections[0].folded, 'folded');
   assert.deepEqual([s.sections[0].expanded, s.sections[1].folded], ['false', false]);
+  await page.close();
+});
+
+test('page: a typed filter says so above the sections with "n of N" and a clear button; clear and Esc bring every row back; zero matches keep the line', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { name: 'cuvis-ai-6c' }), row(B, 'Other', 'idle', { pid: 200, name: 'gymetiq-88' }), row(C, 'Put away', 'idle', { pid: 300, archived: true, archivedBy: 'board' })]);
+  const page = await openPage();
+  let s = await page.until((x) => x.rows.length === 2, 'two rows');
+  assert.equal(s.filterline, null, 'no line without a query');
+  await page.type('cuvis-ai-6c');
+  s = await page.until((x) => x.rows.length === 1, 'filtered');
+  assert.deepEqual([s.rows, s.filterline], [[A], 'Filter “cuvis-ai-6c”: 1 of 3 running sessionsclear']);
+  await page.click('#filterline button[data-act="clearfilter"]');
+  s = await page.until((x) => x.rows.length === 2 && x.filterline === null, 'cleared by the button');
+  assert.equal(await page.eval('document.getElementById("q").value'), '');
+  await page.type('nothing <b>"here"</b>');
+  s = await page.until((x) => x.filterline !== null && x.rows.length === 0, 'no match');
+  assert.equal(s.filterline, 'Filter “nothing <b>"here"</b>”: 0 of 3 running sessionsclear', 'the query shows as text');
+  assert.equal(await page.eval('document.querySelectorAll("#filterline b").length'), 0);
+  await page.eval('document.getElementById("q").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true');
+  s = await page.until((x) => x.rows.length === 2 && x.filterline === null, 'cleared by Esc');
+  await page.close();
+});
+
+test('page: the agent name other sessions use shows on the row and in the details; left out when it is the title or missing; HTML in it stays text', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([
+    row(A, 'Lentils simple routes', 'idle', { name: 'cuvis-ai-6c' }),
+    row(B, 'V2 WUR Presentation', 'idle', { pid: 200, name: 'V2 WUR Presentation' }),
+    row(C, 'No name', 'idle', { pid: 300, name: null }),
+    row(D, 'Odd', 'idle', { pid: 400, name: '<i>x</i>' }),
+  ]);
+  const page = await openPage();
+  let s = await page.until((x) => x.rows.length === 4, 'the rows');
+  assert.deepEqual(s.agents.sort(), [A + '=cuvis-ai-6c', D + '=<i>x</i>'].sort());
+  assert.equal(await page.eval('document.querySelectorAll(".row .agent i").length'), 0, 'rendered as text');
+  await page.click(rowSel(A) + ' .sid');
+  s = await page.until((x) => x.details.length === 1, 'the details line');
+  assert.ok(s.details[0].includes('agentcuvis-ai-6c⧉'), s.details[0]);
+  await page.click(rowSel(A) + ' .details .copyval:nth-of-type(1)');
   await page.close();
 });
 
@@ -758,17 +804,17 @@ test('page: Alt+Down on a focused row posts /api/order with the complete list of
   fake.calls.length = 0;
   fake.snapshot = snapshotOf(manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]), { order: { mode: 'manual' } });
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 4, 'manual rows');
-  assert.deepEqual([s.sections[0].rows, s.sections[0].stale], [[D, C, B, A], 'Show 1 idle over 2h']);
+  let s = await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 5, 'manual rows');
+  assert.deepEqual([s.sections[0].rows, s.sections[0].stale], [[D, C, B, A, F], null], 'the row idle for 5 h is shown in its rank');
   await page.key(C, 'ArrowDown');
   s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
-  assert.deepEqual([s.sections[0].rows, s.focused], [[D, B, C, A], C], 'the row moved and kept the focus');
+  assert.deepEqual([s.sections[0].rows, s.focused], [[D, B, C, A, F], C], 'the row moved and kept the focus');
   await page.until(() => orderCalls().length === 1, 'the POST');
-  assert.deepEqual(orderCalls(), [[D, B, C, A, F]], 'the whole group: the shown rows in their new order, then the folded stale row');
+  assert.deepEqual(orderCalls(), [[D, B, C, A, F]], 'the whole group in its new order');
   await page.key(D, 'ArrowUp');
   await sleep(300);
   s = await page.sample();
-  assert.deepEqual([s.sections[0].rows, orderCalls().length], [[D, B, C, A], 1], 'the top row and Alt+Up: nothing happens');
+  assert.deepEqual([s.sections[0].rows, orderCalls().length], [[D, B, C, A, F], 1], 'the top row and Alt+Up: nothing happens');
   fake.snapshot = snapshotOf([
     row(D, 'Delta new busy', 'busy', { pid: 400, rank: 0, ageMinutes: 1 }), row(B, 'Beta ranked waits', 'waiting', { pid: 200, rank: 1, ageMinutes: 20 }),
     row(C, 'Gamma new idle', 'idle', { pid: 300, rank: 2, ageMinutes: 5 }), row(A, 'Alpha ranked idle', 'idle', { rank: 3, ageMinutes: 10 }),
@@ -776,7 +822,7 @@ test('page: Alt+Down on a focused row posts /api/order with the complete list of
   ], { order: { mode: 'manual' } });
   await sleep(600);
   s = await page.sample();
-  assert.deepEqual(s.sections[0].rows, [D, B, C, A], 'the snapshot agrees');
+  assert.deepEqual(s.sections[0].rows, [D, B, C, A, F], 'the snapshot agrees');
   await page.close();
 });
 

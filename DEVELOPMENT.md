@@ -300,7 +300,7 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   by `rank` (a row without one sits on top, newest first); by activity it is waiting,
   busy, unseen, idle, then age. A move (the ⋮⋮ handle, HTML5 drag and drop on the handle
   only, or Alt+Up/Down on the focused row) ends in `applyOrder(key, ids)`: the whole group's
-  ids (the shown rows in their new order, then the folded stale rows), held in
+  ids in their new order, held in
   `state.pendingOrder[key]` until a snapshot agrees or 10 s pass, sent as `order` to the host
   or `POST /api/order?ids=` (comma-joined, 8000 characters at most; core caps the list at
   500). `setOrder()` checks every id before the first write, then writes
