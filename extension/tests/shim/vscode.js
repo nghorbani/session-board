@@ -7,6 +7,34 @@
  */
 const disposable = () => ({ dispose() {} });
 
+/* A fake webview panel: records postMessage calls, lets a test fire onDidReceiveMessage,
+   reveal()/dispose() update __revealed/__disposed so a test can assert panel life cycle. */
+function makePanel(viewType, title, opts) {
+  const messageHandlers = [];
+  const disposeHandlers = [];
+  const panel = {
+    viewType,
+    title,
+    options: opts,
+    webview: {
+      html: '',
+      cspSource: 'vscode-webview:',
+      options: {},
+      postMessage: (m) => { panel.__posted.push(m); return Promise.resolve(true); },
+      onDidReceiveMessage: (fn) => { messageHandlers.push(fn); return disposable(); },
+      asWebviewUri: (u) => u,
+    },
+    __posted: [],
+    __revealed: 0,
+    __disposed: false,
+    reveal: () => { panel.__revealed += 1; },
+    onDidDispose: (fn) => { disposeHandlers.push(fn); return disposable(); },
+    dispose: () => { panel.__disposed = true; for (const fn of disposeHandlers) fn(); },
+    __fireMessage: (m) => { for (const fn of messageHandlers) fn(m); },
+  };
+  return panel;
+}
+
 const api = {
   __providers: [],     // webview view providers, in registration order
   __commands: Object.create(null),
@@ -22,6 +50,7 @@ const api = {
   __windowState: [],   // onDidChangeWindowState listeners
   __answer: undefined, // what showWarningMessage / showInformationMessage resolve to
   __pick: undefined,   // what showQuickPick resolves to (an index into the items, or undefined)
+  __panels: [],        // every webview panel created, in creation order
   __reset() {
     api.__providers.length = 0;
     api.__status.length = 0;
@@ -33,6 +62,7 @@ const api = {
     api.__executed.length = 0;
     api.__clipboard.length = 0;
     api.__windowState.length = 0;
+    api.__panels.length = 0;
     for (const k of Object.keys(api.__config)) delete api.__config[k];
     api.window.state.focused = true;
     api.__answer = undefined;
@@ -57,6 +87,11 @@ const api = {
     showQuickPick: async (items) => (api.__pick === undefined ? undefined : items[api.__pick]),
     showInputBox: async (opts) => { api.__inputs.push(opts); return api.__inputAnswer; },
     withProgress: (opts, fn) => fn({ report() {} }, { isCancellationRequested: false, onCancellationRequested: () => disposable() }),
+    createWebviewPanel: (viewType, title, showOptions, opts) => {
+      const panel = makePanel(viewType, title, opts);
+      api.__panels.push(panel);
+      return panel;
+    },
   },
   commands: {
     registerCommand: (id, fn) => { api.__commands[id] = fn; return disposable(); },
@@ -68,6 +103,7 @@ const api = {
     getConfiguration: (section) => ({ get: (key, dflt) => { const k = section + '.' + key; return k in api.__config ? api.__config[k] : dflt; } }),
   },
   ProgressLocation: { Notification: 15 },
+  ViewColumn: { Active: -1, Beside: -2, One: 1 },
   Uri: {
     file: (p) => ({ fsPath: p, toString: () => p }),
     parse: (s) => ({ toString: () => s }),

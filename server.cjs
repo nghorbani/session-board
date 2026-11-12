@@ -15,11 +15,45 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const core = require('./extension/core.cjs');
+const { createStepsService } = require('./extension/steps-service.cjs');
 
 const PORT = Number(process.env.SESSION_DASHBOARD_PORT) || 4317;
 const INDEX_HTML = path.join(__dirname, 'extension', 'index.html');
+const STEPS_HTML = path.join(__dirname, 'extension', 'steps.html');
 const TOKEN = crypto.randomBytes(16).toString('hex');
 const HOST = '127.0.0.1:' + PORT;
+const STEPS_BODY_LIMIT = 64 * 1024;   // the one route in this file that parses a body
+
+// Pushes (follow, indexing progress) have no open socket to ride on in the browser front end,
+// so each session keeps a small bounded queue the page drains by polling; a push past the cap
+// drops the oldest rather than growing without bound.
+const PUSH_QUEUE_CAP = 500;
+const pushQueues = new Map();   // sessionId -> { seq, items: [{ seq, msg }] }
+
+function queuePush(sessionId, msg) {
+  let q = pushQueues.get(sessionId);
+  if (!q) { q = { seq: 0, items: [] }; pushQueues.set(sessionId, q); }
+  q.seq += 1;
+  q.items.push({ seq: q.seq, msg });
+  if (q.items.length > PUSH_QUEUE_CAP) q.items.splice(0, q.items.length - PUSH_QUEUE_CAP);
+}
+
+const stepsService = createStepsService({
+  resolveTranscript: (sessionId) => core.transcriptIndex().get(sessionId)
+    || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0] || null,
+  sessionTitle: (sessionId) => {
+    const row = core.lastGoodRows().find((r) => r.sessionId === sessionId);
+    return (row && (row.title || row.name)) || null;
+  },
+  dataDir: core.DATA_DIR,
+  rg: { probe: () => core.rgProbe(), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
+});
+let stepsSubscribed = new Set();
+function ensureStepsSubscription(sessionId) {
+  if (stepsSubscribed.has(sessionId)) return;
+  stepsSubscribed.add(sessionId);
+  stepsService.subscribe(sessionId, (msg) => queuePush(sessionId, msg));
+}
 
 function sendJson(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -37,6 +71,28 @@ function safeDecode(s) {
   try { return decodeURIComponent(s); } catch (_) { return null; }
 }
 
+/** A request body up to `limit` bytes, or { tooLarge: true } once it is exceeded. The rest of
+    the body is drained rather than the socket destroyed, so the 413 response the caller writes
+    still reaches the client instead of looking like a dropped connection. Every other route in
+    this file parses its input from the query string; this is the one place that reads a body,
+    because steps messages (open/body/search/seen/close) carry structured fields a query string
+    cannot hold cleanly. */
+function readBoundedBody(req, limit) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let total = 0;
+    let tooLarge = false;
+    req.on('data', (chunk) => {
+      if (tooLarge) return;   // still draining so 'end' fires; the bytes themselves are dropped
+      total += chunk.length;
+      if (total > limit) { tooLarge = true; resolve({ tooLarge: true }); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => { if (!tooLarge) resolve({ text: Buffer.concat(chunks).toString('utf8') }); });
+    req.on('error', () => { if (!tooLarge) resolve({ text: '' }); });
+  });
+}
+
 async function handle(req, res) {
   const parsed = new URL(req.url || '/', 'http://' + HOST);
   const route = parsed.pathname;
@@ -47,6 +103,19 @@ async function handle(req, res) {
       res.writeHead(500, { 'content-type': 'text/plain' }); res.end('extension/index.html missing'); return;
     }
     html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '">');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(html);
+    return;
+  }
+
+  if (route === '/steps') {
+    let html;
+    try {
+      html = fs.readFileSync(STEPS_HTML, 'utf8');
+    } catch (_) {
+      html = '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+        + '<body style="font-family: sans-serif; padding: 2em;">Steps viewer coming soon.</body></html>';
+    }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(html);
     return;
@@ -186,6 +255,26 @@ async function handle(req, res) {
     req.on('close', () => { if (!res.writableEnded) ac.abort(); });   // a closed tab stops the rg children
     const result = await core.searchSessions(q, { content, requestId, signal: ac.signal });
     return sendJson(res, 200, result);
+  }
+
+  if (route === '/api/steps' && req.method === 'POST') {
+    const body = await readBoundedBody(req, STEPS_BODY_LIMIT);
+    if (body.tooLarge) return sendJson(res, 413, { error: 'body too large' });
+    let msg;
+    try { msg = JSON.parse(body.text); } catch (_) { return sendJson(res, 400, { error: 'invalid JSON' }); }
+    if (!msg || typeof msg !== 'object') return sendJson(res, 400, { error: 'invalid JSON' });
+    if (msg.sessionId) ensureStepsSubscription(String(msg.sessionId));
+    const reply = await stepsService.handle(msg);
+    return sendJson(res, 200, reply);
+  }
+
+  if (route === '/api/steps/poll' && req.method === 'GET') {
+    const sessionId = String(parsed.searchParams.get('session') || '');
+    if (!core.UUID_RE.test(sessionId)) return sendJson(res, 400, { error: 'not a session id' });
+    const after = Number(parsed.searchParams.get('after') || 0) || 0;
+    const q = pushQueues.get(sessionId);
+    const items = q ? q.items.filter((it) => it.seq > after) : [];
+    return sendJson(res, 200, { seq: q ? q.seq : after, pushes: items.map((it) => it.msg) });
   }
 
   return sendJson(res, 404, { error: 'not found' });

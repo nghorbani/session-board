@@ -269,6 +269,25 @@ test('an unparsable line is skipped and counted; an unknown block type becomes "
   assert.equal(other.blockType, 'mystery_block');
 });
 
+test('known bookkeeping system subtypes (stop_hook_summary, informational) are left out; an unknown subtype still shows as "other"', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'hi'),
+    { type: 'system', uuid: uuid(2), parentUuid: uuid(1), subtype: 'stop_hook_summary', content: 'hook ran', timestamp: new Date(2026, 0, 1, 0, 3).toISOString() },
+    { type: 'system', uuid: uuid(3), parentUuid: uuid(2), subtype: 'informational', content: 'fyi', timestamp: new Date(2026, 0, 1, 0, 3).toISOString() },
+    { type: 'system', uuid: uuid(4), parentUuid: uuid(3), subtype: 'some_future_kind', content: 'mystery', timestamp: new Date(2026, 0, 1, 0, 3).toISOString() },
+    assistantLine(uuid(5), uuid(4), 'm1', [{ type: 'text', text: 'done' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const kinds = idx.steps().map((x) => x.kind);
+  assert.equal(kinds.filter((k) => k === 'other').length, 1, 'only the unknown subtype becomes other');
+  const other = idx.steps().find((x) => x.kind === 'other');
+  assert.equal(other.blockType, 'system:some_future_kind');
+  assert.equal(kinds.includes('you'), true);
+  assert.equal(kinds.includes('text'), true);
+});
+
 test('missing fields never throw: a line with absent message/content/timestamp indexes cleanly', async () => {
   const file = newFile();
   writeLines(file, [

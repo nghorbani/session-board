@@ -14,6 +14,7 @@ const path = require('path');
 const vscode = require('vscode');
 const core = require('./core.cjs');
 const { createNotifier } = require('./notify.cjs');
+const { createStepsService } = require('./steps-service.cjs');
 
 const VIEW_ID = 'sessionBoard.view';
 const POLL_VISIBLE_MS = 5000;
@@ -37,6 +38,17 @@ class BoardProvider {
     this.searchRequestId = null;
     this.accountError = null;  // the account probe failure last logged, so it is said once per change
     this.claudeArchiveError = null;   // same for the read of Claude Code's archive
+    this.stepsService = createStepsService({
+      resolveTranscript: (sessionId) => core.transcriptIndex().get(sessionId)
+        || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0] || null,
+      sessionTitle: (sessionId) => {
+        const row = this.sessionRow(sessionId);
+        return (row && (row.title || row.name)) || null;
+      },
+      dataDir: core.DATA_DIR,
+      rg: { probe: (appRoot) => core.rgProbe(appRoot), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
+    });
+    this.stepsPanels = new Map();   // sessionId -> panel, one per session (E9)
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -98,6 +110,7 @@ class BoardProvider {
         case 'archivePast': if (core.UUID_RE.test(sid)) return await this.archivePast(sid); return;
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
         case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
+        case 'steps': if (core.UUID_RE.test(sid)) return await this.openSteps(sid); return;
         default: return;
       }
     } catch (e) {
@@ -389,6 +402,63 @@ class BoardProvider {
     if (choice === 'Open folder in new window') {
       await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(cwd), { forceNewWindow: true });
     }
+  }
+
+  // -- steps panel -------------------------------------------------------------------------
+
+  /**
+   * "Steps" on a row: one webview panel per session (asking again reveals it), titled
+   * "Steps: <title>", wired so page messages reach stepsService.handle and service pushes
+   * (follow, indexing progress) reach the panel. Everything the service holds for this
+   * session (its index, its follow timer) is released once the panel is disposed and no
+   * other subscriber is left.
+   */
+  async openSteps(sessionId) {
+    const existing = this.stepsPanels.get(sessionId);
+    if (existing) { existing.reveal(); return; }
+    const row = this.sessionRow(sessionId);
+    const title = (row && (row.title || row.name)) || sessionId.slice(0, 8);
+    const panel = vscode.window.createWebviewPanel(
+      'sessionBoard.steps', 'Steps: ' + title, vscode.ViewColumn.Beside,
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
+    );
+    this.stepsPanels.set(sessionId, panel);
+    panel.webview.html = this.stepsHtml(panel.webview);
+    const unsubscribe = this.stepsService.subscribe(sessionId, (msg) => {
+      try { panel.webview.postMessage(msg); } catch (_) { /* panel gone */ }
+    });
+    panel.webview.onDidReceiveMessage(async (msg) => {
+      if (!msg || typeof msg !== 'object') return;
+      const reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
+      try { panel.webview.postMessage(reply); } catch (_) { /* panel gone */ }
+    });
+    panel.onDidDispose(() => {
+      unsubscribe();
+      this.stepsPanels.delete(sessionId);
+      this.stepsService.handle({ type: 'close', sessionId }).catch(() => { /* best effort */ });
+    });
+  }
+
+  /** The Steps page itself is a later part; until extension/steps.html exists, a one-line
+   *  placeholder loads in its place, through the same CSP and nonce approach as the board page. */
+  stepsHtml(webview) {
+    const stepsHtmlPath = path.join(this.context.extensionPath, 'steps.html');
+    let html;
+    try {
+      html = fs.readFileSync(stepsHtmlPath, 'utf8');
+    } catch (_) {
+      html = '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+        + '<body style="font-family: sans-serif; padding: 2em;">Steps viewer coming soon.</body></html>';
+    }
+    const alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let nonce = '';
+    for (let i = 0; i < 32; i++) nonce += alphabet[Math.floor(Math.random() * alphabet.length)];
+    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+      + 'style-src ' + webview.cspSource + ' \'unsafe-inline\'; '
+      + 'script-src \'nonce-' + nonce + '\';">';
+    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp);
+    html = html.replace('<script>', '<script nonce="' + nonce + '">');
+    return html;
   }
 
   // -- ending ----------------------------------------------------------------------------

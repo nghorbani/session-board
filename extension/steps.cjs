@@ -40,6 +40,9 @@
 const nodeFs = require('fs');
 
 const TREE_TYPES = new Set(['user', 'assistant', 'system', 'attachment']);
+// system subtypes that are known bookkeeping (hook summaries, informational notes): left out
+// of the steps entirely, same as attachments, rather than shown as a folded "other" step.
+const KNOWN_HOOK_SUBTYPES = new Set(['stop_hook_summary', 'informational']);
 const BODY_LIMIT = 200 * 1024;
 const DEFAULT_TAIL_BYTES = 2 * 1024 * 1024;
 const DEFAULT_CHUNK_BYTES = 1024 * 1024;
@@ -536,6 +539,8 @@ function createStepIndex(file, deps) {
           out.push(makeStep(node, 0, 'compaction', { preview: 'Context compacted: ' + (m.preTokens || '?') + ' to ' + (m.postTokens || '?') + ' tokens' }));
         } else if (o.subtype === 'api_error') {
           out.push(makeStep(node, 0, 'error', { preview: previewOf(String(o.content || 'API error')) }));
+        } else if (KNOWN_HOOK_SUBTYPES.has(o.subtype)) {
+          // bookkeeping the reader already understands and deliberately leaves out, not "other".
         } else {
           out.push(makeStep(node, 0, 'other', { preview: '', blockType: 'system:' + String(o.subtype || 'unknown') }));
         }
@@ -630,12 +635,21 @@ function createStepIndex(file, deps) {
     return { byKind, unreadable };
   }
 
+  /* The byte range of the tree line a node was read from, for callers (search) that map a raw
+     byte offset in the file back to the step(s) built from that line. undefined when the node
+     is not currently held (a different generation, or never ingested). */
+  function nodeRange(nodeUuid) {
+    const node = nodes.get(nodeUuid);
+    return node ? { offset: node.offset, length: node.length } : undefined;
+  }
+
   return {
     open,
     poll,
     steps() { return path.slice(); },
     body,
     counts,
+    nodeRange,
     generation() { return generation; },
   };
 }
