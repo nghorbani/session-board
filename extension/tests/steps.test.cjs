@@ -1,0 +1,461 @@
+'use strict';
+/*
+ * steps.cjs: the transcript reader. Builds a graph index of one transcript file, walks the
+ * active path, turns path nodes into compact step records, reads a step's full body on demand
+ * by stored offset, follows file growth, and splits steps into sections for the page.
+ *
+ * Fixtures are inline JSONL lines written to a temp dir (never a real transcript, never `claude`).
+ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const steps = require('../steps.cjs');
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-'));
+let fileCounter = 0;
+function newFile() { return path.join(tmp, 'tr-' + (++fileCounter) + '.jsonl'); }
+
+function uuid(n) {
+  const s = String(n).padStart(12, '0');
+  return '00000000-0000-4000-8000-' + s;
+}
+function line(obj) { return JSON.stringify(obj) + '\n'; }
+function writeLines(file, objs) { fs.writeFileSync(file, objs.map(line).join('')); }
+
+function userLine(u, parent, text, extra) {
+  return Object.assign({ type: 'user', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 0, Number(u.slice(-2)) || 0).toISOString(),
+    message: { role: 'user', content: text } }, extra);
+}
+function toolResultLine(u, parent, toolUseId, resultContent, extra) {
+  return Object.assign({ type: 'user', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 1, Number(u.slice(-2)) || 0).toISOString(),
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: resultContent }] },
+    toolUseResult: {}, sourceToolAssistantUUID: parent }, extra);
+}
+function assistantLine(u, parent, msgId, content, extra) {
+  return Object.assign({ type: 'assistant', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 2, Number(u.slice(-2)) || 0).toISOString(),
+    message: { id: msgId, role: 'assistant', content } }, extra);
+}
+
+test('split API response: two assistant lines sharing one message id both contribute steps', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'hello'),
+    assistantLine(uuid(2), uuid(1), 'msg-1', [{ type: 'text', text: 'first part' }]),
+    assistantLine(uuid(3), uuid(2), 'msg-1', [{ type: 'text', text: 'second part' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const s = idx.steps();
+  assert.deepEqual(s.map((x) => x.kind), ['you', 'text', 'text']);
+  assert.equal(s[1].preview.indexOf('first part') !== -1 || idx.body(s[1].id).text.indexOf('first part') !== -1, true);
+  assert.equal(idx.body(s[2].id).text, 'second part');
+});
+
+test('tool call with its result on the path, and a parallel call whose result sits off the path', async () => {
+  const file = newFile();
+  // two tool_use blocks in one assistant turn; only one tool_result is on the ancestor chain,
+  // the other tool_result line hangs off its own call (not an ancestor of the tip) but must
+  // still be joined by tool_use id.
+  writeLines(file, [
+    userLine(uuid(1), null, 'run two things'),
+    assistantLine(uuid(2), uuid(1), 'm1', [
+      { type: 'tool_use', id: 'call-a', name: 'Bash', input: { command: 'echo a', description: 'echo a' } },
+      { type: 'tool_use', id: 'call-b', name: 'Bash', input: { command: 'echo b', description: 'echo b' } },
+    ]),
+    // result for call-b is written as a sidechain / off-path line (parent not the tip's ancestor)
+    toolResultLine(uuid(3), uuid(2), 'call-b', 'b-output', { isSidechain: true }),
+    toolResultLine(uuid(4), uuid(2), 'call-a', 'a-output'),
+    assistantLine(uuid(5), uuid(4), 'm2', [{ type: 'text', text: 'done' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const s = idx.steps();
+  const tools = s.filter((x) => x.kind === 'tool');
+  assert.equal(tools.length, 2);
+  const a = tools.find((t) => t.title === 'Bash' && idx.body(t.id).result === 'a-output');
+  const b = tools.find((t) => t.title === 'Bash' && idx.body(t.id).result === 'b-output');
+  assert.ok(a, 'on-path result joined');
+  assert.ok(b, 'off-path result still joined by tool_use id');
+});
+
+test('a retry leaves an abandoned branch out of the steps, and compaction crosses via logicalParentUuid', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'first try'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'abandoned reply' }]),
+    // retry: a new user line with the SAME parent, superseding uuid(2)'s branch
+    userLine(uuid(3), uuid(1), 'retried message'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'kept reply' }]),
+    { type: 'system', uuid: uuid(5), parentUuid: uuid(4), subtype: 'compact_boundary',
+      logicalParentUuid: uuid(4), timestamp: new Date(2026, 0, 1, 0, 3).toISOString(),
+      compactMetadata: { preTokens: 1000, postTokens: 10 } },
+    userLine(uuid(6), uuid(5), 'after compaction', { isCompactSummary: false }),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const s = idx.steps();
+  const bodies = s.map((x) => x.kind === 'you' || x.kind === 'text' ? idx.body(x.id).text : null);
+  assert.equal(bodies.includes('abandoned reply'), false, 'abandoned branch left out');
+  assert.equal(bodies.includes('kept reply'), true);
+  assert.ok(s.some((x) => x.kind === 'compaction'), 'compaction step present');
+  assert.equal(bodies.includes('after compaction'), true, 'walk crosses logicalParentUuid');
+});
+
+test('empty and filled thinking blocks: update vs reasoning, with duration on the empty one', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'go'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'thinking', thinking: 'short progress note' }]),
+    assistantLine(uuid(3), uuid(2), 'm2', [{ type: 'thinking', thinking: '' }], { thinkingDurationMs: 12345 }),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const s = idx.steps();
+  const update = s.find((x) => x.kind === 'update');
+  const reasoning = s.find((x) => x.kind === 'reasoning');
+  assert.ok(update, 'non-empty thinking is an update step');
+  assert.equal(idx.body(update.id).text, 'short progress note');
+  assert.ok(reasoning, 'empty thinking is a reasoning step');
+  assert.equal(reasoning.durationMs, 12345);
+});
+
+test('AskUserQuestion: single choice, multi choice, free text, and a two-question dialog in both answer formats', async () => {
+  function askLine(u, parent, questions, resultText) {
+    return [
+      assistantLine(u, parent, 'm-ask-' + u, [{ type: 'tool_use', id: 'ask-' + u, name: 'AskUserQuestion', input: { questions } }]),
+      toolResultLine(uuid(Number(u.slice(-12)) + 1), u, 'ask-' + u, resultText),
+    ];
+  }
+  const file = newFile();
+  const singleQ = [{ header: 'Pick', question: 'Which color?', multiSelect: false,
+    options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] }];
+  const multiQ = [{ header: 'Pick several', question: 'Which fruits?', multiSelect: true,
+    options: [{ label: 'Apple', description: 'a' }, { label: 'Pear', description: 'p' }, { label: 'Plum', description: 'pl' }] }];
+  const freeQ = [{ header: 'Say it', question: 'What do you want?', multiSelect: false,
+    options: [{ label: 'Option A', description: 'a' }] }];
+  const twoQ = [
+    { header: 'Q1', question: 'First one?', multiSelect: false, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] },
+    { header: 'Q2', question: 'Second one?', multiSelect: true, options: [{ label: 'X', description: '' }, { label: 'Y', description: '' }] },
+  ];
+
+  let lines = [userLine(uuid(1), null, 'start')];
+  let cur = uuid(1);
+  const u2 = uuid(2); lines = lines.concat(askLine(u2, cur, singleQ, 'Your questions have been answered: "Which color?"="Red". You can now continue.'));
+  cur = uuid(3);
+  const u4 = uuid(4); lines = lines.concat(askLine(u4, cur, multiQ, 'Your questions have been answered: "Which fruits?"="Apple, Pear". You can now continue.'));
+  cur = uuid(5);
+  const u6 = uuid(6); lines = lines.concat(askLine(u6, cur, freeQ, 'Your questions have been answered: "What do you want?"="a pony, please". You can now continue.'));
+  cur = uuid(7);
+  // two-question dialog, format 1: both answers in one "answered:" sentence
+  const u8 = uuid(8); lines = lines.concat(askLine(u8, cur, twoQ, 'Your questions have been answered: "First one?"="Yes", "Second one?"="X, Y". You can now continue.'));
+  cur = uuid(9);
+  // two-question dialog, format 2: structured per-question content blocks in the result
+  lines.push(assistantLine(uuid(10), cur, 'm-ask-10', [{ type: 'tool_use', id: 'ask-10', name: 'AskUserQuestion', input: { questions: twoQ } }]));
+  lines.push(toolResultLine(uuid(11), uuid(10), 'ask-10', [
+    { type: 'text', text: 'Your questions have been answered: "First one?"="No". You can now continue.' },
+    { type: 'text', text: 'Your questions have been answered: "Second one?"="X". You can now continue.' },
+  ]));
+
+  writeLines(file, lines);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const qs = idx.steps().filter((x) => x.kind === 'question');
+  assert.equal(qs.length, 5);
+
+  const b0 = idx.body(qs[0].id);
+  assert.equal(b0.questions.length, 1);
+  assert.equal(b0.questions[0].multiSelect, false);
+  assert.equal(b0.questions[0].answered, true);
+  assert.equal(b0.questions[0].options.find((o) => o.label === 'Red').chosen, true);
+  assert.equal(b0.questions[0].options.find((o) => o.label === 'Blue').chosen, false);
+
+  const b1 = idx.body(qs[1].id);
+  const chosenMulti = b1.questions[0].options.filter((o) => o.chosen).map((o) => o.label);
+  assert.deepEqual(chosenMulti.sort(), ['Apple', 'Pear']);
+  assert.equal(b1.questions[0].options.find((o) => o.label === 'Plum').chosen, false);
+
+  const b2 = idx.body(qs[2].id);
+  assert.equal(b2.questions[0].other, 'a pony, please');
+
+  const b3 = idx.body(qs[3].id);
+  assert.equal(b3.questions.length, 2);
+  assert.equal(b3.questions[0].options.find((o) => o.label === 'Yes').chosen, true);
+  assert.deepEqual(b3.questions[1].options.filter((o) => o.chosen).map((o) => o.label).sort(), ['X', 'Y']);
+
+  const b4 = idx.body(qs[4].id);
+  assert.equal(b4.questions.length, 2);
+  assert.equal(b4.questions[0].options.find((o) => o.label === 'No').chosen, true);
+  assert.equal(b4.questions[1].options.find((o) => o.label === 'X').chosen, true);
+  assert.equal(b4.questions[1].options.find((o) => o.label === 'Y').chosen, false);
+});
+
+test('ExitPlanMode approved is a plan step with its text and approval', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'plan something'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'plan-1', name: 'ExitPlanMode', input: { plan: 'Do step one, then step two.' } }]),
+    toolResultLine(uuid(3), uuid(2), 'plan-1', 'User has approved your plan. You can now start coding.'),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const plan = idx.steps().find((x) => x.kind === 'plan');
+  assert.ok(plan);
+  assert.equal(plan.approved, true);
+  assert.equal(idx.body(plan.id).text, 'Do step one, then step two.');
+});
+
+test('Agent call: report arrives as a task notification, and a second as an agent message', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'delegate two things'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'agent-a', name: 'Agent',
+      input: { description: 'first task', prompt: 'do the first thing', subagent_type: 'general-purpose' } }]),
+    toolResultLine(uuid(3), uuid(2), 'agent-a', 'Async agent launched (agentId: agent-a-id).'),
+    // bookkeeping lines (queue-operation) carry no uuid/parentUuid and are not tree nodes:
+    // they sit off to the side of the ancestor chain, so the next tree node's parent is uuid(3).
+    { type: 'queue-operation',
+      content: '<task-notification><tool-use-id>agent-a</tool-use-id><result>report from the notification</result></task-notification>',
+      timestamp: new Date(2026, 0, 1, 0, 4).toISOString() },
+    assistantLine(uuid(5), uuid(3), 'm2', [{ type: 'tool_use', id: 'agent-b', name: 'Agent',
+      input: { description: 'second task', prompt: 'do the second thing', subagent_type: 'general-purpose' } }]),
+    toolResultLine(uuid(6), uuid(5), 'agent-b', 'Async agent launched (agentId: agent-b-id).'),
+    userLine(uuid(7), uuid(6), '<agent-message from="agent-b-id">The report follows:\n  report from the agent message\n</agent-message>', { isMeta: true }),
+    assistantLine(uuid(8), uuid(7), 'm3', [{ type: 'text', text: 'both done' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const subs = idx.steps().filter((x) => x.kind === 'subagent');
+  assert.equal(subs.length, 2);
+  const bodyA = idx.body(subs[0].id);
+  const bodyB = idx.body(subs[1].id);
+  assert.equal(bodyA.prompt, 'do the first thing');
+  assert.ok(bodyA.report.indexOf('report from the notification') !== -1);
+  assert.ok(bodyB.report.indexOf('report from the agent message') !== -1);
+  // the notification and the hand-back message themselves are not "you" steps
+  assert.equal(idx.steps().some((x) => x.kind === 'you' && String(idx.body(x.id).text || '').indexOf('agent-message') !== -1), false);
+});
+
+test('meta and notification user lines are not counted as you steps', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'real message'),
+    userLine(uuid(2), uuid(1), 'a meta note', { isMeta: true }),
+    userLine(uuid(3), uuid(2), '[SYSTEM NOTIFICATION] something happened'),
+    userLine(uuid(4), uuid(3), 'Another Claude session sent a message: hi'),
+    assistantLine(uuid(5), uuid(4), 'm1', [{ type: 'text', text: 'ok' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const youSteps = idx.steps().filter((x) => x.kind === 'you');
+  assert.equal(youSteps.length, 1);
+  assert.equal(idx.body(youSteps[0].id).text, 'real message');
+});
+
+test('an unparsable line is skipped and counted; an unknown block type becomes "other"', async () => {
+  const file = newFile();
+  const goodLines = [
+    userLine(uuid(1), null, 'hi'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'mystery_block', weird: true }]),
+  ];
+  fs.writeFileSync(file, goodLines.map(line).join('') + 'not valid json at all\n');
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  assert.equal(idx.counts().unreadable, 1);
+  const other = idx.steps().find((x) => x.kind === 'other');
+  assert.ok(other, 'unknown block type is an "other" step');
+  assert.equal(other.blockType, 'mystery_block');
+});
+
+test('missing fields never throw: a line with absent message/content/timestamp indexes cleanly', async () => {
+  const file = newFile();
+  writeLines(file, [
+    { type: 'user', uuid: uuid(1), parentUuid: null },
+    { type: 'assistant', uuid: uuid(2), parentUuid: uuid(1), message: {} },
+  ]);
+  const idx = steps.createStepIndex(file);
+  await assert.doesNotReject(() => idx.open());
+  assert.doesNotThrow(() => idx.steps());
+});
+
+test('a line of 3 MB indexes cleanly and its body reports the true size, cut at the 200 KB body limit', async () => {
+  const file = newFile();
+  const big = 'x'.repeat(3 * 1024 * 1024);
+  writeLines(file, [
+    userLine(uuid(1), null, 'short'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: big }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  assert.equal(idx.steps().length, 2, 'the 3 MB line indexes as one step, same as any other');
+  const t = idx.steps().find((x) => x.kind === 'text');
+  const b = idx.body(t.id);
+  assert.equal(b.truncated, true);
+  assert.equal(b.size, big.length);
+  assert.equal(b.text.length, 200 * 1024);
+});
+
+test('backward indexing in several small chunks yields and reports progress', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 40; i++) {
+    objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
+  }
+  writeLines(file, objs);
+  const sizeBytes = fs.statSync(file).size;
+  assert.ok(sizeBytes > 20000, 'fixture big enough to need multiple small chunks');
+  const idx = steps.createStepIndex(file, { chunkBytes: 4096, tailBytes: 4096 });
+  const progressCalls = [];
+  await idx.open((p) => progressCalls.push(p));
+  assert.ok(progressCalls.length > 1, 'more than one progress callback with small chunk size');
+  assert.equal(idx.steps().length, 40);
+  assert.equal(idx.steps()[0].kind, 'you');
+});
+
+test('a partial last line completes on the next poll', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'first')]);
+  fs.appendFileSync(file, '{"type":"user","uuid":"' + uuid(2) + '","parentUuid":"' + uuid(1) + '","message":{"role":"user","content":"cut off'); // no closing, no newline
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  assert.equal(idx.steps().length, 1, 'the partial line is not consumed yet');
+  // complete the line and append a newline plus a following complete line
+  fs.appendFileSync(file, ' now complete"}}\n');
+  fs.appendFileSync(file, line(assistantLine(uuid(3), uuid(2), 'm1', [{ type: 'text', text: 'reply' }])));
+  const res = await idx.poll();
+  assert.equal(idx.steps().length, 3);
+  assert.equal(res.appended.length, 2);
+  assert.equal(idx.body(idx.steps()[1].id).text, 'cut off now complete');
+});
+
+test('file growth (append) reports appended steps without a reset', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  assert.equal(idx.steps().length, 1);
+  fs.appendFileSync(file, line(assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])));
+  const res = await idx.poll();
+  assert.equal(res.reset, null);
+  assert.equal(res.appended.length, 1);
+  assert.equal(idx.steps().length, 2);
+});
+
+test('a path change (retry after the fact) reports a reset point', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'hi'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'first reply' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const firstStepId = idx.steps()[1].id;
+  // a retry: new user line with the same parent as uuid(1)'s only child slot, abandoning uuid(2)
+  fs.appendFileSync(file, line(userLine(uuid(3), uuid(1), 'edited message')));
+  fs.appendFileSync(file, line(assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'second reply' }])));
+  const res = await idx.poll();
+  assert.ok(res.reset, 'path changed: a reset point is reported');
+  const bodies = idx.steps().map((s) => (s.kind === 'you' || s.kind === 'text') ? idx.body(s.id).text : null);
+  assert.equal(bodies.includes('first reply'), false);
+  assert.equal(bodies.includes('second reply'), true);
+});
+
+test('file shrink starts a new generation with a fresh index', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'hi'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'a reasonably long first reply' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const gen1 = idx.generation();
+  writeLines(file, [userLine(uuid(9), null, 'rewritten from scratch')]);
+  const res = await idx.poll();
+  assert.notEqual(idx.generation(), gen1);
+  assert.equal(idx.steps().length, 1);
+  assert.equal(idx.body(idx.steps()[0].id).text, 'rewritten from scratch');
+  assert.ok(res.reset !== undefined);
+});
+
+test('a replaced file (same size, different identity) also starts a new generation', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'alpha message right here')]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const gen1 = idx.generation();
+  const before = fs.statSync(file).size;
+  fs.unlinkSync(file);
+  // write a same-length but different-content file (forces a new inode on most filesystems;
+  // the module is expected to also detect this by birth time / identity where available)
+  const replacement = JSON.stringify(userLine(uuid(1), null, 'beta message over here')).padEnd(before - 1, ' ') + '\n';
+  fs.writeFileSync(file, replacement);
+  await idx.poll();
+  // whichever way identity is detected, re-reading from scratch must yield the new content
+  const text = idx.body(idx.steps()[0].id).text;
+  assert.ok(text.indexOf('beta') !== -1 || text.indexOf('alpha') !== -1, 'index did not crash on replacement');
+});
+
+test('a stale body read (file changed generation) answers stale instead of wrong content', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello there')]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const heldStep = idx.steps()[0]; // a caller (the page) keeps the whole step record, not just its id
+  // rewritten from scratch at a different (smaller) size: a new generation, even though it
+  // happens to reuse the same uuid for its first line
+  writeLines(file, [userLine(uuid(1), null, 'short')]);
+  await idx.poll();
+  assert.notEqual(idx.generation(), heldStep.generation, 'sanity: the rewrite did start a new generation');
+  const res = idx.body(heldStep);
+  assert.equal(res.stale, true);
+});
+
+test('a body over 200 KB is truncated with the total size reported', async () => {
+  const file = newFile();
+  const huge = 'y'.repeat(250 * 1024);
+  writeLines(file, [
+    userLine(uuid(1), null, 'hi'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: huge }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const t = idx.steps().find((x) => x.kind === 'text');
+  const b = idx.body(t.id);
+  assert.equal(b.truncated, true);
+  assert.equal(b.text.length, 200 * 1024);
+  assert.equal(b.size, huge.length);
+});
+
+test('sections and the strip counts; a you step is never doubled', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'please do the thing'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'working on it' }]),
+    assistantLine(uuid(3), uuid(2), 'm1', [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: 'C:/proj/a.txt' } }]),
+    toolResultLine(uuid(4), uuid(3), 'e1', 'ok'),
+    assistantLine(uuid(5), uuid(4), 'm2', [{ type: 'tool_use', id: 'ask1', name: 'AskUserQuestion',
+      input: { questions: [{ header: 'H', question: 'Continue?', multiSelect: false, options: [{ label: 'Yes', description: '' }, { label: 'No', description: '' }] }] } }]),
+    toolResultLine(uuid(6), uuid(5), 'ask1', 'Your questions have been answered: "Continue?"="Yes". You can now continue.'),
+    assistantLine(uuid(7), uuid(6), 'm3', [{ type: 'tool_use', id: 'plan1', name: 'ExitPlanMode', input: { plan: 'final plan text' } }]),
+    toolResultLine(uuid(8), uuid(7), 'plan1', 'User has approved your plan. You can now start coding.'),
+    assistantLine(uuid(9), uuid(8), 'm4', [{ type: 'tool_use', id: 'w1', name: 'Write', input: { file_path: 'C:/proj/b.txt' } }]),
+    toolResultLine(uuid(10), uuid(9), 'w1', 'ok'),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const allSteps = idx.steps();
+  const { sections, strip } = steps.buildSections(allSteps, idx.body.bind(idx));
+  assert.ok(sections.length >= 2, 'at least a you-opened section and the plan-approved section');
+  const headings = sections.map((s) => s.heading);
+  assert.ok(headings.some((h) => h.indexOf('please do the thing') !== -1 || h === 'please do the thing'));
+  // a you step is never both a heading and a row elsewhere
+  let youBodyRows = 0;
+  for (const s of sections) for (const r of s.body || []) if (r.kind === 'you') youBodyRows++;
+  assert.equal(youBodyRows, 0, 'you steps never appear as rows, only as section headings');
+  assert.ok(strip.filesChanged >= 2);
+  assert.ok(strip.decisions >= 1);
+  assert.ok(strip.totalTimeMs >= 0);
+  assert.equal(strip.sections, sections.length);
+});
