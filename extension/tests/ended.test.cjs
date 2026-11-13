@@ -30,6 +30,8 @@ process.env.SB_WINDOW_MAP = JSON.stringify({ 1: { windowId: 1, exthostPid: W1 },
 const REPO = 'd:/code/repo';
 const WT = 'd:/code/wt-feature';
 process.env.SB_WORKTREES = JSON.stringify({ [REPO]: [REPO, WT], [WT]: [REPO, WT] });
+process.env.SB_SHIM_AGENTS = '[]';   // the CLI stand-in: no running sessions (a CI runner has no claude)
+process.env.PATH = path.join(__dirname, 'shim') + path.delimiter + process.env.PATH;
 const core = require('../core.cjs');
 
 const id = (n) => n.repeat(8) + '-1111-4111-8111-111111111111';
