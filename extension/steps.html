@@ -1382,7 +1382,11 @@ function flushBodyBatch() {
       delete state.bodiesPending[item.stepId];
       if (!item.stale) state.bodies[item.stepId] = item;
     });
-    renderVisibleBodiesOnly();
+    // the lens may have switched to files while this batch was in flight; the reader then
+    // holds no [data-step-body] nodes for renderVisibleBodiesOnly to refresh, so the files
+    // view would stay without a path it was only waiting on, never asking again
+    if (state.lens === 'files') renderFilesView();
+    else renderVisibleBodiesOnly();
   });
 }
 

@@ -17,6 +17,7 @@ const http = require('http');
 const net = require('net');
 const { spawn, execFileSync } = require('child_process');
 const { browser } = require('../../tools/screenshot.cjs');
+const chromeLock = require('./shim/chrome-lock.cjs');
 
 let CHROME = null;
 try { CHROME = browser(); } catch (_) { CHROME = null; }
@@ -118,6 +119,7 @@ let userDataDir = null;
 
 test.before(async () => {
   if (!CHROME) return;
+  await chromeLock.acquire(); // page.test.cjs drives its own Chrome too; one at a time keeps both off a shared CPU budget
   PORT = await freePort();
   server = http.createServer((req, res) => { serve(req, res).catch((e) => json(res, 500, { error: String(e) })); });
   await new Promise((res) => server.listen(PORT, '127.0.0.1', res));
@@ -139,6 +141,7 @@ test.after(async () => {
     await sleep(300);
     try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* leave it to the OS temp cleanup */ }
   }
+  if (CHROME) chromeLock.release();
 });
 
 const SAMPLE = `(function () {
@@ -166,6 +169,7 @@ const SAMPLE = `(function () {
     railOpen: document.getElementById('rail').classList.contains('open'),
     domRowCount: q('.row, .sec-stub').length,
     openLinkCalls: window.__openLinkCalls || 0,
+    lnkCount: q('a.lnk').length,
     workSums: q('.worksum').map(function (e) { return e.textContent; }),
     restateCount: q('.row.k-you .restate').length,
     youMsgCount: q('.row.k-you .you-msg').length,
@@ -353,7 +357,7 @@ test('page: the owner\'s message appears once per section, in the heading card, 
   });
   fake.body = () => ({ text: longMsg, truncated: false, size: longMsg.length });
   const page = await openPage(A);
-  const s = await page.until((x) => x.youMsgCount > 0, 'the you message to render');
+  const s = await page.until((x) => x.showAllYou, 'the you message body to load and offer Show all');
   assert.equal(s.restateCount, 1, 'one heading card for the you step');
   assert.equal(s.youMsgCount, 1, 'the full message lives in that one card, not a second block');
   assert.ok(s.showAllYou, 'a message past about six lines offers Show all rather than showing unfolded');
@@ -484,7 +488,7 @@ test('page: a markdown link click sends openLink, never navigates', opts, async 
   const page = await openPage(A);
   await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
   await page.eval('window.__openLinkCalls = 0; var orig = dispatchLink; dispatchLink = function (k, t) { window.__openLinkCalls++; return orig(k, t); };');
-  await page.until((x) => true, 'noop'); // ensure body batch landed
+  await page.until((x) => x.lnkCount > 0, 'the markdown link to render once the body batch lands');
   await page.click('a.lnk');
   const s = await page.until((x) => x.openLinkCalls > 0, 'the link click to call dispatchLink');
   assert.ok(s.openLinkCalls > 0);

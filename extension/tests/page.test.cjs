@@ -18,6 +18,7 @@ const http = require('http');
 const net = require('net');
 const { spawn, execFileSync } = require('child_process');
 const { browser } = require('../../tools/screenshot.cjs');
+const chromeLock = require('./shim/chrome-lock.cjs');
 
 let CHROME = null;
 try { CHROME = browser(); } catch (_) { CHROME = null; }
@@ -96,6 +97,7 @@ let userDataDir = null;
 
 test.before(async () => {
   if (!CHROME) return;
+  await chromeLock.acquire(); // steps-page.test.cjs drives its own Chrome too; one at a time keeps both off a shared CPU budget
   PORT = await freePort();
   server = http.createServer(serve);
   await new Promise((res) => server.listen(PORT, '127.0.0.1', res));
@@ -127,6 +129,7 @@ test.after(async () => {
     await sleep(300);
     try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* leave it to the OS temp cleanup */ }
   }
+  if (CHROME) chromeLock.release();
 });
 
 const SAMPLE = `(function () {
