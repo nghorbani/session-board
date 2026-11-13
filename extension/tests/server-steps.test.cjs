@@ -189,7 +189,7 @@ test('a note just under the 16 KB cap is accepted over the 64 KB body limit', as
   assert.equal(r.body.ok, true, JSON.stringify(r.body));
 });
 
-// -- B4: the browser transport's deliver (copy only) ---------------------------------------
+// -- the browser transport's deliver (copy only) ---------------------------------------
 
 test('noteSend over the browser transport always answers copy-only: ok false, the clipboard line, no sent record', async () => {
   const opened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: A }) });

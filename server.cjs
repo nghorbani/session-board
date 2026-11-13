@@ -51,9 +51,9 @@ const stepsService = createStepsService({
   },
   dataDir: core.DATA_DIR,
   rg: { probe: () => core.rgProbe(), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
-  // B4: the browser front end has no clipboard or chat box of its own to reach; it always
+  // The browser front end has no clipboard or chat box of its own to reach; it always
   // answers "copy only" and the page does the actual clipboard write (the server cannot).
-  // ok: false here is deliberate -- noteSend/notesSendAll only record a note as "sent" when the
+  // ok: false here is deliberate: noteSend/notesSendAll only record a note as "sent" when the
   // text reached a chat box, and a browser copy never does.
   deliver: async () => ({ ok: false, message: 'On the clipboard. Paste it into the session.' }),
 });

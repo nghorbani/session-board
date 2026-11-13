@@ -1890,11 +1890,11 @@ async function openUriForPid(sessionId, pid) {
 }
 
 /**
- * vscode://<board>/steer?session=<id>&note=<claimId>, for B3's one-shot hand-over to a session
+ * vscode://<board>/steer?session=<id>&note=<claimId>, for the one-shot hand-over to a session
  * owned by another window: always through the board running there (Claude Code itself has no
  * /steer route), and only when that board is 0.12.0 or newer (the version that reads a claim at
  * all); null otherwise, so the caller falls back to clipboard plus the existing open. The text
- * itself never rides in the URL -- only the claim id, written separately by writeSteerClaim.
+ * itself never rides in the URL, only the claim id, written separately by writeSteerClaim.
  */
 function steerUri(sessionId, windowId, viaBoard, claimId) {
   if (!UUID_RE.test(String(sessionId)) || !Number.isInteger(windowId)) return null;
@@ -1920,7 +1920,7 @@ function focusSession(sessionId, windowId, opts) {
   return openUrlViaCode(target);
 }
 
-/** B3: opens the owning window's /steer route with a fresh claim already written for it. */
+/** Opens the owning window's /steer route with a fresh claim already written for it. */
 function steerToWindow(sessionId, windowId, viaBoard, claimId) {
   const target = steerUri(sessionId, windowId, viaBoard, claimId);
   if (!target) return Promise.reject(new Error('refusing to build a URI from unchecked input'));
@@ -1983,7 +1983,7 @@ function releaseNotice(sessionId, kind, at) {
 }
 
 /*
- * B3: the one-shot /steer claim. A sending window that does not own the target session writes
+ * The one-shot /steer claim. A sending window that does not own the target session writes
  * the hand-over text here (never into the URL, which another process could log or replay) and
  * opens a vscode://<board>/steer?session=<id>&note=<claimId> URI the owning window routes to;
  * that window reads the claim, acts on it only when it is younger than STEER_CLAIM_MAX_AGE_MS,

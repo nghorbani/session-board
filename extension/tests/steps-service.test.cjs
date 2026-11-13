@@ -606,7 +606,7 @@ test('search also matches note text; a hit lands on the note\'s step', async () 
   assert.ok(res.stepIds.indexOf(youStepId) !== -1);
 });
 
-// -- B2: noteSend / notesSendAll ---------------------------------------------------------
+// -- noteSend / notesSendAll ---------------------------------------------------------
 
 function fakeDeliver(result) {
   const calls = [];
@@ -740,7 +740,7 @@ test('notesSendAll with no notes answers unsuccessful without calling deliver', 
   assert.equal(deliver.calls.length, 0);
 });
 
-// -- B1: the hand-over text builder -----------------------------------------------------
+// -- the hand-over text builder -----------------------------------------------------
 
 test('buildNoteSendText: "About your step at HH:MM (\\"excerpt\\"): note"', () => {
   const at = new Date(2026, 0, 1, 14, 5, 0).toISOString();

@@ -454,7 +454,7 @@ function onPush(msg) {
    stable key (its opener step's id, or null for the lead section, which is always sections[0]):
    a push can safely replace the whole array, because the keys of sections already rendered are
    unchanged across a push, only new ones are appended (or, on a reset, the array is shorter
-   than before and some keys drop away) -- the per-section DOM nodes below are rebuilt from
+   than before and some keys drop away): the per-section DOM nodes below are rebuilt from
    this array by key, not diffed field by field, so a replace here is enough. */
 function mergeSections(sections, strip, isReset) {
   state.sections = sections || [];
@@ -511,7 +511,7 @@ function renderIndexNote() {
   el.classList.toggle('show', Boolean(state.indexing));
 }
 
-// -- markdown / highlighting (ported from the wireframe's own small renderer) ----------------
+// -- markdown / highlighting (a small renderer that builds DOM nodes only) -----------------
 
 var URL_RE = /^https?:\/\/[^\s<>"')\]]+/i;
 var ABS_RE = /^(?:[A-Za-z]:[\\/]|~[\\/])[^\s<>"']*/;
@@ -1137,7 +1137,7 @@ function buildNoteBox(stepId, existing) {
   function afterSave() { state.noteBoxFor = null; renderReader(); queueVisibleBodies(); }
 
   /* Saves the box's current text (new or edited), waits for that write, then returns the saved
-     note's id -- noteSend needs a real noteId, so a just-typed note is kept first rather than
+     note's id: noteSend needs a real noteId, so a just-typed note is kept first rather than
      sent by its (not yet existing) text alone. */
   function saveThenGetNoteId(text) {
     var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });

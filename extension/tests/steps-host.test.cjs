@@ -373,7 +373,7 @@ test('revealHere with a prompt passes it as the command\'s own second argument',
   assert.deepEqual(call[6], { programmatic: 'honor-preferred-location' });
 });
 
-// -- B3: deliverToSession (the steps-service "deliver" hand-over) -------------------------
+// -- deliverToSession (the steps-service "deliver" hand-over) -------------------------
 
 const runningWindow = () => { const l = last(); Object.assign(l.sessions[0], { window: { id: 3, exthostPid: 4242, label: 'x' } }); return l; };
 const terminalRow = () => last();   // window: null already, from LAST
@@ -491,7 +491,7 @@ test('deliverToSession always writes to the clipboard, whichever branch it takes
   }
 });
 
-// -- B3: the owning side of /steer ---------------------------------------------------------
+// -- the owning side of /steer ---------------------------------------------------------
 
 test('handleSteerUri: a fresh claim is read, the stowed transcript restored first, and the session revealed with the text as the prompt', async () => {
   const restored = [];

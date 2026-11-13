@@ -10,7 +10,7 @@
  * runner, the transcript lookup, the session title) is injected like notify.cjs, so the host
  * tests never touch a real transcript, a real `claude` or a real ripgrep.
  *
- * One index per open session, kept only while a viewer is open (steps.cjs's E2 rule): open()
+ * One index per open session, kept only while a viewer is open: open()
  * creates or reuses it, close() releases it (and the follow timer) once no subscriber is left.
  */
 
@@ -45,7 +45,7 @@ function oneLineExcerpt(text, max) {
   return s.length > max ? s.slice(0, max) : s;
 }
 
-/* B1: the text handed to a session for one note, built in this one place so the single-note
+/* The text handed to a session for one note, built in this one place so the single-note
    send and "send all" share the exact same phrasing. stepText is whatever the step shows as its
    own body (steps-service's stepVisibleText, or the compact preview when the body has not
    loaded); stepAt is the step's ISO timestamp. */
@@ -80,7 +80,7 @@ function createStepsService(deps) {
   const createStepIndex = deps.createStepIndex || stepsMod.createStepIndex;
   const buildSections = deps.buildSections || stepsMod.buildSections;
   const notes = deps.notes || createNotesStore({ fs, dataDir });
-  /* B2/B3: hands the built text to whichever transport this host runs over. The webview host
+  /* Hands the built text to whichever transport this host runs over. The webview host
      passes its own VS Code `revealHere`/clipboard routine; server.cjs passes its clipboard-only
      one; a test passes a fake and asserts on what it was called with. meta carries context a
      transport may want (stepId, noteId, kind: 'single' | 'all') without steps-service needing to
@@ -357,14 +357,14 @@ function createStepsService(deps) {
     return { type: 'closeResult', ok: true, sessionId };
   }
 
-  // -- B2: send to session --------------------------------------------------------------------
+  // -- send to session ------------------------------------------------------------------------
 
   /* The step a note is filed against, as buildNoteSendText needs it: its timestamp and its own
      visible text (falling back to the compact preview when the body is not loaded, same as the
      page's Work line summaries do, so a send never waits on a body round trip that never
      resolves because the step fell off the path). Returns null when the session or the step is
      not currently held (closed, re-indexed): a send then still writes the sent record (the note
-     itself does not require its step to still be on the path, E7), but the text falls back to
+     itself does not require its step to still be on the path), but the text falls back to
      the note's own words alone. */
   function stepContextFor(s, stepId) {
     if (!s || !s.index) return null;
@@ -438,7 +438,7 @@ function createStepsService(deps) {
   /* A hit's visible text is confirmed by checking it actually occurs (case-insensitively) in
      the step's rendered body, so a byte-offset that landed inside a tool call's raw JSON input
      (an id, a path, a signature) rather than text the page shows does not count as a hit.
-     Stated limit (plan E16): a match has to sit inside one stored field, the way Claude Code
+     Stated limit, also in the README: a match has to sit inside one stored field, the way Claude Code
      wrote it (JSON.stringify: printable and non-ASCII letters literal, quotes/backslashes/
      control characters escaped, the same encoding jsonEscaped produces). A query that only
      matches across the join of two fields this function concatenates (a tool's title and its
@@ -467,7 +467,7 @@ function createStepsService(deps) {
     if (controller.signal.aborted) return { cancelled: true };
 
     if (rgInfo && rgInfo.path && s.file) {
-      // E6: --byte-offset --only-matching --fixed-strings --ignore-case, two -e patterns (the
+      // rg runs with --byte-offset --only-matching --fixed-strings --ignore-case and two -e patterns (the
       // literal query and its JSON-escaped form, the way the string is actually stored), never
       // --json (a single stored line can run to megabytes). Offsets name candidate steps by the
       // byte range of the tree line they fall in; every tree-line step built from that line is a

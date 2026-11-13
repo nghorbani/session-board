@@ -84,7 +84,7 @@ class BoardProvider {
       rg: { probe: (appRoot) => core.rgProbe(appRoot), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
       deliver: (sessionId, text, meta) => this.deliverToSession(sessionId, text, meta),
     });
-    this.stepsPanels = new Map();   // sessionId -> panel, one per session (E9)
+    this.stepsPanels = new Map();   // sessionId -> panel, one per session
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -344,7 +344,7 @@ class BoardProvider {
    * argument marks the call as programmatic; called bare it opens an editor tab and rewrites
    * the preference to "panel". `primaryEditor.open` is the fallback (always an editor tab).
    *
-   * `prompt`, when given, is passed as the command's own second argument (B3: the Steps
+   * `prompt`, when given, is passed as the command's own second argument (the Steps
    * viewer's "Send to session" hand-over). The call without a prompt keeps its exact six
    * arguments unchanged (a regression the host suite pins), since `undefined` and an omitted
    * argument are the same thing to `executeCommand` either way, but writing it out keeps that
@@ -373,11 +373,11 @@ class BoardProvider {
     }
   }
 
-  // -- B3: send to session (the steps-service "deliver" hand-over) -----------------------
+  // -- send to session (the steps-service "deliver" hand-over) ---------------------------
 
   /**
    * The Claude Code extension version from which `claude-vscode.editor.open`'s prompt argument
-   * is known to fill the chat box (the plan's spike, E13): below it, or when the extension is
+   * is known to fill the chat box (read from the 2.1.322 webview code): below it, or when the extension is
    * missing altogether, hand-over is never attempted and the text goes to the clipboard plus
    * the existing open instead.
    */
@@ -403,9 +403,9 @@ class BoardProvider {
   }
 
   /**
-   * B2's `deliver(sessionId, text, meta)`: the text always lands on the clipboard; whether it
+   * The steps service's `deliver(sessionId, text, meta)`: the text always lands on the clipboard; whether it
    * also reaches the session's own chat box depends on where the session runs and whether this
-   * window's Claude Code is new enough (E13, the spike's own finding that "fill" cannot be
+   * window's Claude Code is new enough (filling the box cannot be
    * guaranteed on an older or missing extension). Returns { ok, message } where message is
    * exactly the line steps.html shows under the note.
    *   - a terminal or background session (no VS Code window at all): clipboard only.

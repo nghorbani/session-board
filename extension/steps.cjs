@@ -49,7 +49,7 @@ const DEFAULT_CHUNK_BYTES = 1024 * 1024;
 // first window when looking backward for a line start; it doubles until a newline turns up
 const LINE_SEARCH_BYTES = 64 * 1024;
 
-/* ---------- small text helpers (ported in spirit from the wireframe script) ---------- */
+/* ---------- small text helpers (shared by the reader and the section builder) ---------- */
 
 function textOf(content) {
   if (typeof content === 'string') return content.trim().startsWith('<') ? '' : content;
@@ -762,11 +762,11 @@ function durMs(a, b) {
 }
 const ACTIVE_GAP_CAP_MS = 10 * 60 * 1000;
 /* Active time: the sum of the gaps between consecutive steps, each gap counted up to the cap, so
-   an idle stretch (inside a section or between them) never inflates it -- a session left open
+   an idle stretch (inside a section or between them) never inflates it: a session left open
    for a day with one hour of real work still reads about one hour. Applied once over the whole
    step sequence rather than per section, so a long pause that happens to fall at a section
-   boundary is capped the same as one inside a section (A6: one rule everywhere a timing fact is
-   shown, not a looser one for cross-section gaps). */
+   boundary is capped the same as one inside a section: one rule everywhere a timing fact is
+   shown, not a looser one for gaps between sections. */
 function activeTimeOf(idsInOrder, byId) {
   let ms = 0;
   for (let i = 1; i < idsInOrder.length; i++) {
@@ -858,7 +858,7 @@ function buildSections(stepsArr, bodyFn) {
     }
     return ids;
   }
-  // Active time (A6): the sum of the gaps between consecutive steps of the whole session, each
+  // Active time: the sum of the gaps between consecutive steps of the whole session, each
   // gap counted up to activeTimeOf's cap, so an idle stretch does not inflate it even when it
   // falls inside one section. Each section gets the same figure over its own steps, so a facts
   // line built from a section object reads by the identical rule as the header tile.
