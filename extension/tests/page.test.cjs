@@ -146,6 +146,7 @@ const SAMPLE = `(function () {
     mutedRows: q('.row.muted[data-session]').map(function (r) { return r.getAttribute('data-session'); }),
     mutedChips: q('.row .chip.muted').length,
     actionsOverflow: q('.row .actions').filter(function (a) { return a.scrollWidth > a.clientWidth; }).length,
+    actionKinds: q('.row[data-session]').map(function (r) { return r.getAttribute('data-session') + '=' + Array.prototype.slice.call(r.querySelectorAll('.actions button[data-act]')).map(function (b) { return b.getAttribute('data-act'); }).join(','); }),
     notes: window.__notes || null,
     titles: q('.row[data-session]').map(function (r) { var t = r.querySelector('.title'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
     statusWords: q('.row[data-session]').map(function (r) { var t = r.querySelector('.status span:last-child'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
@@ -1064,5 +1065,19 @@ test('page: in activity mode there are no handles and Alt+arrows do nothing; wit
   s = await page.until((x) => x.sections[0].rows.length === 4 && x.handles === 4, 'the filter cleared');
   await page.key(C, 'ArrowDown');
   await page.until(() => orderCalls().length === 1, 'moving works again');
+  await page.close();
+});
+
+test('page: rows still render their buttons, with Steps in place for a session that has a transcript (regression)', opts, async () => {
+  fake.snapshot = snapshotOf([
+    row(A, 'With transcript', 'idle', { transcriptPath: 'C:\\x\\a.jsonl' }),
+    row(B, 'No transcript', 'idle', { pid: 200, transcriptPath: null }),
+  ]);
+  const page = await openPage();
+  const s = await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
+  const kindsOf = (sid) => (s.actionKinds.find((x) => x.indexOf(sid + '=') === 0) || '').split('=')[1].split(',');
+  assert.deepEqual(kindsOf(A), ['steps', 'copy', 'retitle', 'mute', 'archive', 'end'], 'the row with a transcript carries Steps ahead of the other buttons, order otherwise unchanged');
+  assert.deepEqual(kindsOf(B), ['copy', 'retitle', 'mute', 'archive', 'end'], 'no transcript: no Steps button, the rest unchanged');
+  await page.click(rowSel(A) + ' .iconbtn.steps');
   await page.close();
 });

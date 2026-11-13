@@ -55,6 +55,11 @@ function ensureStepsSubscription(sessionId) {
   stepsService.subscribe(sessionId, (msg) => queuePush(sessionId, msg));
 }
 
+/** Escapes a value for use inside a double-quoted HTML attribute. */
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function sendJson(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(obj));
@@ -102,7 +107,11 @@ async function handle(req, res) {
     try { html = fs.readFileSync(INDEX_HTML, 'utf8'); } catch (_) {
       res.writeHead(500, { 'content-type': 'text/plain' }); res.end('extension/index.html missing'); return;
     }
-    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '">');
+    // a replacer FUNCTION, never a plain replacement string: String.replace expands $-patterns
+    // ($&, $', $`, $1...) in a string argument, which would turn a token or session id holding
+    // one into unintended output; a function's return value is inserted literally.
+    const boardMeta = '<meta charset="utf-8"><meta name="board-token" content="' + escapeAttr(TOKEN) + '">';
+    html = html.replace('<meta charset="utf-8">', () => boardMeta);
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(html);
     return;
@@ -118,10 +127,18 @@ async function handle(req, res) {
     }
     // the session id comes from ?session=, the same way the board page carries its token: a
     // meta tag the page reads once at load, not a query string it would have to keep parsing.
-    const sessionId = String(parsed.searchParams.get('session') || '').replace(/"/g, '&quot;');
-    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">'
-      + '<meta name="board-token" content="' + TOKEN + '">'
-      + '<meta name="steps-session" content="' + sessionId + '">');
+    // Only a well-formed session id is ever written into the page; anything else becomes an
+    // empty value, which the page then reads as "no session" rather than as attacker HTML.
+    const rawSessionId = String(parsed.searchParams.get('session') || '');
+    const sessionId = core.UUID_RE.test(rawSessionId) ? rawSessionId : '';
+    // matches the webview's CSP as far as a browser page can: no inline scripts (the page has
+    // none), fetch calls to this origin for the /api/steps round trip and the poll route.
+    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; '
+      + 'style-src \'self\' \'unsafe-inline\'; script-src \'self\'; connect-src \'self\';">';
+    const stepsMeta = '<meta charset="utf-8">' + csp
+      + '<meta name="board-token" content="' + escapeAttr(TOKEN) + '">'
+      + '<meta name="steps-session" content="' + escapeAttr(sessionId) + '">';
+    html = html.replace('<meta charset="utf-8">', () => stepsMeta);
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(html);
     return;
@@ -269,6 +286,11 @@ async function handle(req, res) {
     let msg;
     try { msg = JSON.parse(body.text); } catch (_) { return sendJson(res, 400, { error: 'invalid JSON' }); }
     if (!msg || typeof msg !== 'object') return sendJson(res, 400, { error: 'invalid JSON' });
+    // openLink/openText have no host to act on in the browser: a web link opens client side
+    // with window.open (the page never asks the server for that), and a path or a long text
+    // has nowhere to go here, so the page copies it to the clipboard and says so.
+    if (msg.type === 'openLink') return sendJson(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
+    if (msg.type === 'openText') return sendJson(res, 200, { type: 'openTextResult', ok: false, notAvailable: true });
     if (msg.sessionId) ensureStepsSubscription(String(msg.sessionId));
     const reply = await stepsService.handle(msg);
     return sendJson(res, 200, reply);

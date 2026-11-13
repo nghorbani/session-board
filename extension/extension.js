@@ -17,6 +17,11 @@ const { createNotifier } = require('./notify.cjs');
 const { createStepsService } = require('./steps-service.cjs');
 
 const VIEW_ID = 'sessionBoard.view';
+/** Escapes a value for use inside a double-quoted HTML attribute. */
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 const POLL_VISIBLE_MS = 5000;
 const POLL_HIDDEN_MS = 15000;
 const USAGE_VISIBLE_MS = 5 * 60 * 1000;
@@ -73,8 +78,11 @@ class BoardProvider {
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
       + 'style-src ' + webview.cspSource + ' \'unsafe-inline\'; '
       + 'script-src \'nonce-' + nonce + '\';">';
-    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp);
-    html = html.replace('<script>', '<script nonce="' + nonce + '">');
+    // a replacer FUNCTION, never a plain replacement string: String.replace expands $-patterns
+    // ($&, $', $`, $1...) in a string argument, so anything built from outside data has to go
+    // in through a function's return value, inserted literally, not as that second argument.
+    html = html.replace('<meta charset="utf-8">', () => '<meta charset="utf-8">' + csp);
+    html = html.replace('<script>', () => '<script nonce="' + nonce + '">');
     return html;
   }
 
@@ -429,7 +437,10 @@ class BoardProvider {
     });
     panel.webview.onDidReceiveMessage(async (msg) => {
       if (!msg || typeof msg !== 'object') return;
-      const reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
+      let reply;
+      if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
+      else if (msg.type === 'openText') reply = await this.openStepsText(String(msg.title || ''), String(msg.text || ''));
+      else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
       try { panel.webview.postMessage(reply); } catch (_) { /* panel gone */ }
     });
     panel.onDidDispose(() => {
@@ -458,10 +469,88 @@ class BoardProvider {
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
       + 'style-src ' + webview.cspSource + ' \'unsafe-inline\'; '
       + 'script-src \'nonce-' + nonce + '\';">';
-    const sessionMeta = '<meta name="steps-session" content="' + String(sessionId).replace(/"/g, '&quot;') + '">';
-    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp + sessionMeta);
-    html = html.replace('<script>', '<script nonce="' + nonce + '">');
+    // sessionId is the board's own session id (already checked against core.UUID_RE before
+    // openSteps is ever called), but it is escaped and inserted through a replacer function
+    // all the same: a session id is still a value from outside this function's own control,
+    // and a plain replacement string would expand any $-pattern it happened to carry.
+    const sessionMeta = '<meta name="steps-session" content="' + escapeAttr(sessionId) + '">';
+    const headMeta = '<meta charset="utf-8">' + csp + sessionMeta;
+    html = html.replace('<meta charset="utf-8">', () => headMeta);
+    html = html.replace('<script>', () => '<script nonce="' + nonce + '">');
     return html;
+  }
+
+  /**
+   * A link clicked in the Steps viewer. `kind: 'url'` opens only http and https with
+   * openExternal; anything else is refused rather than handed to the OS. `kind: 'path'` is
+   * resolved (absolute as given, `~` against the home directory, relative against the
+   * session's own working directory from the board's last snapshot when one is known) and then
+   * `stat`-ed: a folder is revealed in the OS file explorer, a file opens in an editor tab (a
+   * `.md` file with the Markdown preview instead), and a trailing `:line` or `#Lline` moves the
+   * cursor there. A path that does not exist, or that resolves outside anything the stat call
+   * can read, answers with a plain message the page shows; nothing here ever executes a file or
+   * passes a path to openExternal.
+   */
+  async openStepsLink(sessionId, kind, target) {
+    if (kind === 'url') {
+      if (!/^https?:\/\//i.test(target)) return { type: 'openLinkResult', ok: false, message: 'that link is not web or not openable here' };
+      try { await vscode.env.openExternal(vscode.Uri.parse(target)); return { type: 'openLinkResult', ok: true }; }
+      catch (e) { return { type: 'openLinkResult', ok: false, message: String((e && e.message) || e) }; }
+    }
+    if (kind !== 'path') return { type: 'openLinkResult', ok: false, message: 'unknown link kind' };
+    const m = /^(.*?)(?::(\d+)|#L(\d+))$/.exec(target);
+    const rawPath = m ? m[1] : target;
+    const line = m ? Number(m[2] || m[3]) : null;
+    const resolved = this.resolveStepsPath(sessionId, rawPath);
+    let stat;
+    try { stat = await vscode.workspace.fs.stat(vscode.Uri.file(resolved)); }
+    catch (_) { return { type: 'openLinkResult', ok: false, message: 'that path does not exist: ' + resolved }; }
+    try {
+      if (stat.type === vscode.FileType.Directory) {
+        await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(resolved));
+        return { type: 'openLinkResult', ok: true };
+      }
+      if (/\.md$/i.test(resolved)) {
+        await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(resolved));
+        return { type: 'openLinkResult', ok: true };
+      }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));
+      const editor = await vscode.window.showTextDocument(doc);
+      if (line && editor && editor.selection !== undefined) {
+        // best-effort cursor placement; a fake editor in a test has no selection API to call.
+        const pos = new vscode.Position(Math.max(0, line - 1), 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        if (editor.revealRange) editor.revealRange(new vscode.Range(pos, pos));
+      }
+      return { type: 'openLinkResult', ok: true };
+    } catch (e) {
+      return { type: 'openLinkResult', ok: false, message: String((e && e.message) || e) };
+    }
+  }
+
+  /** Absolute as given, `~` against the home directory, else relative against the session's
+   *  own working directory from the board's last snapshot (when known; otherwise unresolved,
+   *  which the later stat call then simply fails on). */
+  resolveStepsPath(sessionId, rawPath) {
+    if (path.isAbsolute(rawPath)) return rawPath;
+    if (rawPath === '~' || rawPath.startsWith('~/') || rawPath.startsWith('~\\')) {
+      return path.join(require('os').homedir(), rawPath.slice(1));
+    }
+    const row = this.sessionRow(sessionId);
+    const base = row && row.cwd ? row.cwd : null;
+    return base ? path.resolve(base, rawPath) : rawPath;
+  }
+
+  /** openText { title, text }: an untitled document, the host side of "Open full text in an
+   *  editor tab" for a truncated body. */
+  async openStepsText(title, text) {
+    try {
+      const doc = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });
+      await vscode.window.showTextDocument(doc);
+      return { type: 'openTextResult', ok: true };
+    } catch (e) {
+      return { type: 'openTextResult', ok: false, message: String((e && e.message) || e) };
+    }
   }
 
   // -- ending ----------------------------------------------------------------------------

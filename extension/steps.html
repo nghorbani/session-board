@@ -1223,14 +1223,24 @@ function renderRailForFiles() {
   rail.appendChild(top);
 }
 
+/* The files-changed lens needs the body (specifically its `path`) of every Edit/Write tool
+   step, which may not have loaded yet if that step's Work line was never scrolled into view
+   under the normal "all" lens. Rather than depend on that, this lens requests any bodies it is
+   still missing itself and re-renders once they land, the same batched way queueVisibleBodies
+   does for the reader. */
 function renderFilesView() {
   var reader = document.getElementById('readerInner');
   reader.textContent = '';
   var view = document.createElement('div'); view.className = 'files-view';
+  var missing = [];
   state.sections.forEach(function (sec, i) {
     var files = [];
     (sec.body || []).forEach(function (row) {
       if (row.kind !== 'work') return;
+      row.items.forEach(function (id) {
+        var c = state.compactById && state.compactById[id];
+        if (c && c.kind === 'tool' && (c.title === 'Edit' || c.title === 'Write') && !state.bodies[id] && !state.bodiesPending[id]) missing.push(id);
+      });
       files = files.concat(filesTouchedIn(row.items));
     });
     if (!files.length) return;
@@ -1250,6 +1260,16 @@ function renderFilesView() {
     view.appendChild(empty);
   }
   reader.appendChild(view);
+  if (missing.length) {
+    missing.forEach(function (id) { state.bodiesPending[id] = true; });
+    call({ type: 'bodies', stepIds: missing, generation: state.generation }).then(function (reply) {
+      ((reply && reply.items) || []).forEach(function (item) {
+        delete state.bodiesPending[item.stepId];
+        if (!item.stale) state.bodies[item.stepId] = item;
+      });
+      if (state.lens === 'files') renderFilesView();
+    });
+  }
 }
 
 // -- body batching: load texts for sections near the viewport --------------------------------

@@ -104,11 +104,29 @@ test('GET /api/steps/poll drains pushes queued for the session since a given seq
   assert.ok(seen, 'a stepsChanged push arrived through the poll route');
 });
 
-test('GET /steps serves the placeholder page (steps.html does not exist yet)', async () => {
-  const r = await fetch('http://127.0.0.1:' + port + '/steps');
+test('GET /steps serves the page with the token and session id in their meta tags', async () => {
+  const r = await fetch('http://127.0.0.1:' + port + '/steps?session=' + A);
   assert.equal(r.status, 200);
   const text = await r.text();
   assert.ok(/Steps viewer coming soon/.test(text) || /<html/.test(text));
+  assert.ok(text.indexOf('name="steps-session" content="' + A + '"') !== -1, 'a valid session id is passed through');
+  assert.ok(text.indexOf('name="board-token"') !== -1);
+});
+
+test('GET /steps never injects markup from the session query, however it is crafted', async () => {
+  const attempts = [
+    '"><script>window.__pwned=1</script>',
+    '$&$\'$`',   // String.replace's own special replacement patterns, passed as a session id
+  ];
+  for (const bad of attempts) {
+    const r = await fetch('http://127.0.0.1:' + port + '/steps?session=' + encodeURIComponent(bad));
+    assert.equal(r.status, 200);
+    const text = await r.text();
+    assert.equal(/<script>window\.__pwned/.test(text), false, 'no injected script tag for ' + JSON.stringify(bad));
+    assert.equal(text.indexOf('"><script>') !== -1, false, 'the raw attempt never lands verbatim in the page');
+    // not a well-formed session id, so the page gets an empty value rather than attacker text
+    assert.ok(text.indexOf('name="steps-session" content="">') !== -1, 'an invalid session id becomes an empty meta value for ' + JSON.stringify(bad));
+  }
 });
 
 test('a bad session id on /api/steps/poll is a 400', async () => {

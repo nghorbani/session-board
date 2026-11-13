@@ -51,6 +51,11 @@ const api = {
   __answer: undefined, // what showWarningMessage / showInformationMessage resolve to
   __pick: undefined,   // what showQuickPick resolves to (an index into the items, or undefined)
   __panels: [],        // every webview panel created, in creation order
+  __openedExternal: [], // every vscode.env.openExternal(uri) call
+  __openedDocs: [],     // every vscode.workspace.openTextDocument(...) call
+  __shownDocs: [],      // every vscode.window.showTextDocument(doc) call
+  __statRejects: Object.create(null),   // fsPath -> error, so a test can make workspace.fs.stat fail for a path
+  __statTypes: Object.create(null),     // fsPath -> FileType (default: File) for a path that should stat ok
   __reset() {
     api.__providers.length = 0;
     api.__status.length = 0;
@@ -63,6 +68,11 @@ const api = {
     api.__clipboard.length = 0;
     api.__windowState.length = 0;
     api.__panels.length = 0;
+    api.__openedExternal.length = 0;
+    api.__openedDocs.length = 0;
+    api.__shownDocs.length = 0;
+    for (const k of Object.keys(api.__statRejects)) delete api.__statRejects[k];
+    for (const k of Object.keys(api.__statTypes)) delete api.__statTypes[k];
     for (const k of Object.keys(api.__config)) delete api.__config[k];
     api.window.state.focused = true;
     api.__answer = undefined;
@@ -92,22 +102,40 @@ const api = {
       api.__panels.push(panel);
       return panel;
     },
+    showTextDocument: async (doc) => { api.__shownDocs.push(doc); return {}; },
   },
   commands: {
     registerCommand: (id, fn) => { api.__commands[id] = fn; return disposable(); },
     executeCommand: async (id, ...args) => { api.__executed.push([id, ...args]); return undefined; },
   },
-  env: { appRoot: '', clipboard: { writeText: async (t) => { api.__clipboard.push(t); } } },
+  env: {
+    appRoot: '',
+    clipboard: { writeText: async (t) => { api.__clipboard.push(t); } },
+    openExternal: async (uri) => { api.__openedExternal.push(uri); return true; },
+  },
   workspace: {
     workspaceFolders: [],
     getConfiguration: (section) => ({ get: (key, dflt) => { const k = section + '.' + key; return k in api.__config ? api.__config[k] : dflt; } }),
+    openTextDocument: async (opts) => { api.__openedDocs.push(opts); return { uri: opts && opts.content !== undefined ? { scheme: 'untitled' } : (opts && opts.fsPath ? opts : { fsPath: String(opts) }) }; },
+    fs: {
+      stat: async (uri) => {
+        const fsPath = uri && uri.fsPath;
+        if (fsPath in api.__statRejects) throw api.__statRejects[fsPath];
+        const type = fsPath in api.__statTypes ? api.__statTypes[fsPath] : 1; // FileType.File
+        return { type };
+      },
+    },
   },
+  FileType: { File: 1, Directory: 2 },
   ProgressLocation: { Notification: 15 },
   ViewColumn: { Active: -1, Beside: -2, One: 1 },
   Uri: {
     file: (p) => ({ fsPath: p, toString: () => p }),
     parse: (s) => ({ toString: () => s }),
   },
+  Position: function (line, character) { this.line = line; this.character = character; },
+  Range: function (start, end) { this.start = start; this.end = end; },
+  Selection: function (anchor, active) { this.anchor = anchor; this.active = active; },
 };
 
 module.exports = api;
