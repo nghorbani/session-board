@@ -577,4 +577,181 @@ test('search also matches note text; a hit lands on the note\'s step', async () 
   assert.ok(res.stepIds.indexOf(youStepId) !== -1);
 });
 
+// -- B2: noteSend / notesSendAll ---------------------------------------------------------
+
+function fakeDeliver(result) {
+  const calls = [];
+  const fn = async (sessionId, text, meta) => { calls.push({ sessionId, text, meta }); return result; };
+  fn.calls = calls;
+  return fn;
+}
+
+test('noteSend: builds the hand-over text, hands it to deliver, writes a sent record on success, and answers deliver\'s own message', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'please fix the login bug'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'looking at it' }]),
+  ]);
+  const deliver = fakeDeliver({ ok: true, message: 'In the chat box and on the clipboard.' });
+  const deps = makeDeps({ deliver });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const stepId = opened.steps[0].id;
+  const added = await svc.handle({ type: 'noteAdd', sessionId: A, stepId, text: 'why this approach?' });
+  const noteId = added.note.id;
+
+  const sent = await svc.handle({ type: 'noteSend', sessionId: A, noteId });
+  assert.equal(sent.type, 'noteSendResult');
+  assert.equal(sent.ok, true);
+  assert.equal(sent.message, 'In the chat box and on the clipboard.');
+  assert.equal(deliver.calls.length, 1);
+  assert.equal(deliver.calls[0].sessionId, A);
+  assert.ok(deliver.calls[0].text.indexOf('please fix the login bug') !== -1, deliver.calls[0].text);
+  assert.ok(deliver.calls[0].text.indexOf('why this approach?') !== -1, deliver.calls[0].text);
+  assert.equal(deliver.calls[0].meta.noteId, noteId);
+
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.equal(reopened.notes[0].sent.length, 1);
+  assert.equal(reopened.notes[0].sent[0].kind, 'steer');
+});
+
+test('noteSend: a failed deliver answers unsuccessful and writes no sent record', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'please fix the login bug')]);
+  const deliver = fakeDeliver({ ok: false, message: 'the session is not reachable' });
+  const deps = makeDeps({ deliver });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const stepId = opened.steps[0].id;
+  const added = await svc.handle({ type: 'noteAdd', sessionId: A, stepId, text: 'why this?' });
+
+  const sent = await svc.handle({ type: 'noteSend', sessionId: A, noteId: added.note.id });
+  assert.equal(sent.ok, false);
+  assert.equal(sent.message, 'the session is not reachable');
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.deepEqual(reopened.notes[0].sent, []);
+});
+
+test('noteSend on a note that is gone answers unsuccessful without calling deliver', async () => {
+  const deliver = fakeDeliver({ ok: true, message: 'ok' });
+  const deps = makeDeps({ deliver });
+  deps.__files.set(A, newFile());
+  fs.writeFileSync(deps.__files.get(A), JSON.stringify(userLine(uuid(1), null, 'hi')) + '\n');
+  const svc = svcMod.createStepsService(deps);
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const sent = await svc.handle({ type: 'noteSend', sessionId: A, noteId: 'f'.repeat(32) });
+  assert.equal(sent.ok, false);
+  assert.equal(deliver.calls.length, 0);
+});
+
+test('notesSendAll: one deliver call with every note in step order, sent records written for all on success', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'first message'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'ack' }]),
+    userLine(uuid(3), uuid(2), 'second message'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'ack again' }]),
+  ]);
+  const deliver = fakeDeliver({ ok: true, message: 'In the chat box and on the clipboard.' });
+  const deps = makeDeps({ deliver });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const firstStepId = opened.steps.find((s) => s.kind === 'you' && s.preview.indexOf('first') !== -1).id;
+  const secondStepId = opened.steps.find((s) => s.kind === 'you' && s.preview.indexOf('second') !== -1).id;
+  // added out of step order, to prove notesSendAll sorts by step position, not creation time
+  const addedSecond = await svc.handle({ type: 'noteAdd', sessionId: A, stepId: secondStepId, text: 'note on the second message' });
+  const addedFirst = await svc.handle({ type: 'noteAdd', sessionId: A, stepId: firstStepId, text: 'note on the first message' });
+
+  const result = await svc.handle({ type: 'notesSendAll', sessionId: A });
+  assert.equal(result.type, 'notesSendAllResult');
+  assert.equal(result.ok, true);
+  assert.equal(deliver.calls.length, 1, 'one message for all notes, not one call per note');
+  const text = deliver.calls[0].text;
+  const firstAt = text.indexOf('first message');
+  const secondAt = text.indexOf('second message');
+  assert.ok(firstAt !== -1 && secondAt !== -1 && firstAt < secondAt, 'step order, not creation order: ' + text);
+  assert.ok(text.indexOf('\n\n') !== -1, 'one paragraph per note: ' + text);
+
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  const byId = Object.fromEntries(reopened.notes.map((n) => [n.id, n]));
+  assert.equal(byId[addedFirst.note.id].sent.length, 1);
+  assert.equal(byId[addedSecond.note.id].sent.length, 1);
+});
+
+test('notesSendAll: a failed deliver answers unsuccessful and writes no sent records', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'only message')]);
+  const deliver = fakeDeliver({ ok: false, message: 'clipboard write failed' });
+  const deps = makeDeps({ deliver });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  await svc.handle({ type: 'noteAdd', sessionId: A, stepId: opened.steps[0].id, text: 'a note' });
+
+  const result = await svc.handle({ type: 'notesSendAll', sessionId: A });
+  assert.equal(result.ok, false);
+  assert.equal(result.message, 'clipboard write failed');
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.deepEqual(reopened.notes[0].sent, []);
+});
+
+test('notesSendAll with no notes answers unsuccessful without calling deliver', async () => {
+  const deliver = fakeDeliver({ ok: true, message: 'ok' });
+  const deps = makeDeps({ deliver });
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const result = await svc.handle({ type: 'notesSendAll', sessionId: A });
+  assert.equal(result.ok, false);
+  assert.equal(deliver.calls.length, 0);
+});
+
+// -- B1: the hand-over text builder -----------------------------------------------------
+
+test('buildNoteSendText: "About your step at HH:MM (\\"excerpt\\"): note"', () => {
+  const at = new Date(2026, 0, 1, 14, 5, 0).toISOString();
+  const text = svcMod.buildNoteSendText(at, 'please fix the login bug', 'why this approach?');
+  assert.equal(text, 'About your step at 14:05 ("please fix the login bug"): why this approach?');
+});
+
+test('buildNoteSendText cuts the step excerpt to 120 characters and collapses newlines to one line', () => {
+  const at = new Date(2026, 0, 1, 9, 0, 0).toISOString();
+  const long = 'a'.repeat(150);
+  const text = svcMod.buildNoteSendText(at, long, 'note');
+  const quoted = text.slice(text.indexOf('("') + 2, text.indexOf('"):'));
+  assert.equal(quoted.length, 120);
+  assert.equal(quoted, 'a'.repeat(120));
+
+  const multiline = 'line one\nline two\n\nline three';
+  const text2 = svcMod.buildNoteSendText(at, multiline, 'note');
+  assert.ok(text2.indexOf('\n') === -1, 'the step excerpt never carries a newline into the one-line quote: ' + JSON.stringify(text2));
+  assert.ok(text2.indexOf('line one line two line three') !== -1, text2);
+});
+
+test('buildNoteSendText trims the note text and tolerates an unparsable timestamp', () => {
+  const text = svcMod.buildNoteSendText('not a real date', 'a step', '  padded note  ');
+  assert.equal(text, 'About your step at  ("a step"): padded note');
+});
+
+test('buildNotesSendAllText: one paragraph per note, in the given (step) order, same form as a single send', () => {
+  const at1 = new Date(2026, 0, 1, 9, 0, 0).toISOString();
+  const at2 = new Date(2026, 0, 1, 9, 5, 0).toISOString();
+  const text = svcMod.buildNotesSendAllText([
+    { at: at1, stepText: 'first step', noteText: 'first note' },
+    { at: at2, stepText: 'second step', noteText: 'second note' },
+  ]);
+  assert.equal(text,
+    'About your step at 09:00 ("first step"): first note\n\n' +
+    'About your step at 09:05 ("second step"): second note');
+});
+
+test('buildNotesSendAllText on an empty list is an empty string', () => {
+  assert.equal(svcMod.buildNotesSendAllText([]), '');
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

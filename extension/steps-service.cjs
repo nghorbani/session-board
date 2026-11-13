@@ -26,6 +26,40 @@ function uuidOk(sessionId) {
   return typeof sessionId === 'string' && /^[0-9a-f-]{8,64}$/i.test(sessionId);
 }
 
+/* "HH:MM" in local time, the same way the page's fmtClock reads a step's timestamp; an
+   unparsable or missing "at" reads as an empty clock rather than "NaN:NaN". */
+function clockOf(at) {
+  const d = new Date(at);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n) => (n < 10 ? '0' : '') + n;
+  return pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+/* The step's own words, on one line, cut to 120 characters: what "About your step at ..." quotes
+   back so the owner on the other end recognises which step the note is about without reading the
+   whole transcript again. Collapses internal newlines to spaces first, since the quoted form in
+   the hand-over text is always one line. */
+function oneLineExcerpt(text, max) {
+  max = max || 120;
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+/* B1: the text handed to a session for one note, built in this one place so the single-note
+   send and "send all" share the exact same phrasing. stepText is whatever the step shows as its
+   own body (steps-service's stepVisibleText, or the compact preview when the body has not
+   loaded); stepAt is the step's ISO timestamp. */
+function buildNoteSendText(stepAt, stepText, noteText) {
+  return 'About your step at ' + clockOf(stepAt) + ' ("' + oneLineExcerpt(stepText) + '"): ' + String(noteText || '').trim();
+}
+
+/* "Send all notes": every note in step order (the order its step occurs in the transcript, not
+   note creation time), each in buildNoteSendText's own form, one per paragraph. items is
+   [{ at, stepText, noteText }, ...] already sorted by the caller. */
+function buildNotesSendAllText(items) {
+  return items.map((it) => buildNoteSendText(it.at, it.stepText, it.noteText)).join('\n\n');
+}
+
 function createStepsService(deps) {
   deps = deps || {};
   const fs = deps.fs || nodeFs;
@@ -41,6 +75,13 @@ function createStepsService(deps) {
   const createStepIndex = deps.createStepIndex || stepsMod.createStepIndex;
   const buildSections = deps.buildSections || stepsMod.buildSections;
   const notes = deps.notes || createNotesStore({ fs, dataDir });
+  /* B2/B3: hands the built text to whichever transport this host runs over. The webview host
+     passes its own VS Code `revealHere`/clipboard routine; server.cjs passes its clipboard-only
+     one; a test passes a fake and asserts on what it was called with. meta carries context a
+     transport may want (stepId, noteId, kind: 'single' | 'all') without steps-service needing to
+     know what either transport does with it. Resolves to { ok, message } (message is the line the
+     page shows, e.g. "In the chat box and on the clipboard."); never throws. */
+  const deliver = deps.deliver || (async () => ({ ok: false, message: 'no send-to-session transport configured' }));
 
   const sessions = new Map(); // sessionId -> { index, file, subscribers: Set, timer, searchRun }
 
@@ -309,6 +350,79 @@ function createStepsService(deps) {
     return { type: 'closeResult', ok: true, sessionId };
   }
 
+  // -- B2: send to session --------------------------------------------------------------------
+
+  /* The step a note is filed against, as buildNoteSendText needs it: its timestamp and its own
+     visible text (falling back to the compact preview when the body is not loaded, same as the
+     page's Work line summaries do, so a send never waits on a body round trip that never
+     resolves because the step fell off the path). Returns null when the session or the step is
+     not currently held (closed, re-indexed): a send then still writes the sent record (the note
+     itself does not require its step to still be on the path, E7), but the text falls back to
+     the note's own words alone. */
+  function stepContextFor(s, stepId) {
+    if (!s || !s.index) return null;
+    const stepsArr = s.index.steps();
+    const step = stepsArr.find((st) => st.id === stepId);
+    if (!step) return null;
+    return { at: step.at, text: stepVisibleText(s, stepId) || step.preview || '' };
+  }
+
+  async function handleNoteSend(msg) {
+    const sessionId = String(msg.sessionId || '');
+    const noteId = String(msg.noteId || '');
+    const s = sessions.get(sessionId);
+    let note;
+    try { note = notes.get(sessionId, noteId); } catch (e) { return { type: 'noteSendResult', ok: false, sessionId, noteId, message: errorMessage(e) }; }
+    if (!note) return { type: 'noteSendResult', ok: false, sessionId, noteId, message: 'that note is gone' };
+    const ctx = stepContextFor(s, note.stepId) || { at: '', text: '' };
+    const text = buildNoteSendText(ctx.at, ctx.text, note.text);
+    let result;
+    try {
+      result = await deliver(sessionId, text, { stepId: note.stepId, noteId, kind: 'single' });
+    } catch (e) {
+      return { type: 'noteSendResult', ok: false, sessionId, noteId, message: errorMessage(e) };
+    }
+    if (result && result.ok) {
+      try { notes.addSent(sessionId, noteId, 'steer'); } catch (_) { /* the reply still reports success to the page */ }
+      pushNotesChanged(sessionId);
+    }
+    return { type: 'noteSendResult', ok: !!(result && result.ok), sessionId, noteId, message: (result && result.message) || 'nothing happened' };
+  }
+
+  async function handleNotesSendAll(msg) {
+    const sessionId = String(msg.sessionId || '');
+    const s = sessions.get(sessionId);
+    let list;
+    try { list = notes.list(sessionId); } catch (e) { return { type: 'notesSendAllResult', ok: false, sessionId, message: errorMessage(e) }; }
+    if (!list.length) return { type: 'notesSendAllResult', ok: false, sessionId, message: 'no notes to send' };
+    // step order: the order each note's own step occurs in the transcript, not note creation
+    // time. A note whose step fell off the path (not found by stepContextFor) sorts after every
+    // note still on the path, in the order notes.list already returned (by creation time).
+    const stepsArr = s && s.index ? s.index.steps() : [];
+    const indexOf = new Map(stepsArr.map((st, i) => [st.id, i]));
+    const ordered = list.slice().sort((a, b) => {
+      const ia = indexOf.has(a.stepId) ? indexOf.get(a.stepId) : Infinity;
+      const ib = indexOf.has(b.stepId) ? indexOf.get(b.stepId) : Infinity;
+      return ia - ib;
+    });
+    const items = ordered.map((n) => {
+      const ctx = stepContextFor(s, n.stepId) || { at: '', text: '' };
+      return { at: ctx.at, stepText: ctx.text, noteText: n.text, noteId: n.id };
+    });
+    const text = buildNotesSendAllText(items);
+    let result;
+    try {
+      result = await deliver(sessionId, text, { noteIds: items.map((it) => it.noteId), kind: 'all' });
+    } catch (e) {
+      return { type: 'notesSendAllResult', ok: false, sessionId, message: errorMessage(e) };
+    }
+    if (result && result.ok) {
+      for (const it of items) { try { notes.addSent(sessionId, it.noteId, 'steer'); } catch (_) { /* best effort per note */ } }
+      pushNotesChanged(sessionId);
+    }
+    return { type: 'notesSendAllResult', ok: !!(result && result.ok), sessionId, message: (result && result.message) || 'nothing happened' };
+  }
+
   // -- search ------------------------------------------------------------------------------
 
   /* A hit's visible text is confirmed by checking it actually occurs (case-insensitively) in
@@ -476,6 +590,8 @@ function createStepsService(deps) {
       case 'noteAdd': return handleNoteAdd(msg);
       case 'noteEdit': return handleNoteEdit(msg);
       case 'noteDelete': return handleNoteDelete(msg);
+      case 'noteSend': return handleNoteSend(msg);
+      case 'notesSendAll': return handleNotesSendAll(msg);
       case 'close': return handleClose(msg);
       default: return { type: 'errorResult', message: 'unknown message type: ' + String(msg.type) };
     }
@@ -501,4 +617,4 @@ function createStepsService(deps) {
   return { handle, subscribe };
 }
 
-module.exports = { createStepsService };
+module.exports = { createStepsService, buildNoteSendText, buildNotesSendAllText };
