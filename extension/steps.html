@@ -711,7 +711,7 @@ function dispatchLink(kind, target) {
   call({ type: 'openLink', kind: kind, target: target }).then(function (reply) {
     if (reply && reply.ok === false && reply.notAvailable) {
       copyToClipboard(target);
-      flashNotice('not available in the browser — path copied: ' + target);
+      flashNotice('not available in the browser, path copied: ' + target);
     } else if (reply && reply.message) {
       flashNotice(reply.message);
     }
@@ -723,7 +723,7 @@ function openFullText(stepId, title) {
   var text = (b && b.text) || '';
   if (vsapi) { send({ type: 'openText', title: title || 'Step text', text: text }); return; }
   call({ type: 'openText', title: title || 'Step text', text: text }).then(function (reply) {
-    if (reply && reply.notAvailable) { copyToClipboard(text); flashNotice('not available in the browser — text copied'); }
+    if (reply && reply.notAvailable) { copyToClipboard(text); flashNotice('not available in the browser, text copied'); }
   });
 }
 
@@ -1512,7 +1512,7 @@ function fillWorkBody(body, items, key) {
   var toolIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'tool'; });
   if (toolIds.length) {
     var detailBtn = document.createElement('button'); detailBtn.className = 'detailbtn';
-    detailBtn.textContent = 'Details — ' + toolIds.length + (toolIds.length === 1 ? ' call' : ' calls');
+    detailBtn.textContent = 'Details: ' + toolIds.length + (toolIds.length === 1 ? ' call' : ' calls');
     var list = document.createElement('div'); list.className = 'worklist' + (state.openWork[key] || state.showAllTools ? ' open' : '');
     toolIds.forEach(function (id) { list.appendChild(buildWorkListItem(id)); });
     detailBtn.addEventListener('click', function () {
@@ -1887,7 +1887,7 @@ function updateEdgeBars() {
     pill.textContent = secs.length > 1 ? 'You are at the end. ' + (secs.length - 1) + ' sections above.' : 'You are at the end.';
   } else {
     var below = Math.max(0, secs.length - 1 - anchorIndex);
-    pill.textContent = 'Jump to the end (' + below + ' section' + (below === 1 ? '' : 's') + ' below)';
+    pill.textContent = below ? 'Jump to the end (' + below + ' section' + (below === 1 ? '' : 's') + ' below)' : 'Jump to the end';
   }
 }
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.0
+
+- Steps: a new row button opens a session's story in its own editor tab, beside the chat. It reads the session's transcript and shows what the chat scrolls away: your messages, the texts Claude Code printed, the short updates between tool calls, questions with your answers, and plans. A running session is followed live
+- The story is cut into sections, one per input of yours, headed in your own words. Tool calls fold into one "Work" line per run that says what was done; "Details" opens the calls with their commands and results
+- A question shows as it was asked: header, full text, every option with its description, and your choice marked
+- Texts are rendered as Markdown. A link to a web page opens in the browser, a folder in Explorer, a file in the editor, a Markdown file in the preview. Network paths are refused and copied instead; a path outside the session's folder, the workspace and your home folder asks first
+- A strip on top shows active time, sections, decisions, files changed and notes. Decisions, files changed and notes are switches: decisions keeps your messages, the questions and the plans; files changed lists the files per section with clickable names
+- Search by words inside the session, with a hit count and next and previous. It covers the options of questions and your notes
+- "New since you last looked" marks where you stopped reading the last time, per session
+- Notes: write a note on any step. "Keep note" stores it; "Send to session" puts it into that session's chat box, with a line saying which step it is about, and onto the clipboard; "Send all notes" sends the unsent ones as one message. Notes are kept per session under `%LOCALAPPDATA%\SessionBoard\notes` and go when the session's transcript is gone
+- "Send to session" needs Claude Code 2.1.322 or newer in the window that owns the session, and a board 0.12.0 or newer there when it is another window; otherwise the text is on the clipboard and the session opens
+- Subagent calls show the task and the report the subagent sent back, as formatted text; their inner steps are not shown
+- Browser page: `/steps?session=<id>`, `POST /api/steps` (JSON body, 64 KB at most) and `GET /api/steps/poll`. Sending to a session copies the text there
 ## 0.11.3
 
 - Three filters in the header instead of two: running (only the running sessions), open (the default: what Claude Code's own list shows, the running sessions and the ended ones that are not archived) and all (the archived sessions too, each with its chip; ⤒ brings back one the board archived)
