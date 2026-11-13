@@ -316,6 +316,25 @@ test('page: a question card shows every option and marks the chosen ones', opts,
   await page.close();
 });
 
+test('page: a cancelled-turn marker shows as a quiet line inside its section, not a you row', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('u2:0', 'interrupted'), step('u3:0', 'you')],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'start the long task', 'u1:0', [{ kind: 'interrupted', stepId: 'u2:0' }]),
+      section('you', 'actually do something else', 'u3:0', []),
+    ],
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.sectionHeadings.length >= 2, 'the outline to render');
+  assert.equal(s.sectionHeadings.some((h) => h.indexOf('Interrupted') !== -1), false, 'the marker never becomes a section heading');
+  const row = await page.eval('(function () { var r = document.getElementById("step-u2:0"); return r ? r.className : null; })()');
+  assert.equal(row, 'row k-interrupted', 'rendered as its own quiet kind, not a you row');
+  const text = await page.eval('(function () { var r = document.getElementById("step-u2:0"); return r ? r.textContent.trim() : null; })()');
+  assert.equal(text, 'Interrupted');
+  await page.close();
+});
+
 // -- strip switches ---------------------------------------------------------------------
 
 test('page: the Decisions switch narrows the outline to you/question/plan sections', opts, async () => {

@@ -625,3 +625,43 @@ test('a queued message (attachment prompt) whose content is a list of blocks rea
   assert.ok(typedSection, 'it still opens its own section');
   assert.equal(typedSection.heading.indexOf('[object Object]'), -1, 'the heading never stringifies a block');
 });
+
+test('a "[Request interrupted by user]" line is a quiet marker, not a you step, and does not open a section', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'start the long task'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'sleep 60' } }]),
+    userLine(uuid(3), uuid(2), [{ type: 'text', text: '[Request interrupted by user]' }]),
+    userLine(uuid(4), uuid(3), 'actually do something else'),
+    assistantLine(uuid(5), uuid(4), 'm2', [{ type: 'text', text: 'switching to that now' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const allSteps = idx.steps();
+  const kinds = allSteps.map((s) => s.kind);
+  assert.deepEqual(kinds.filter((k) => k === 'you'), ['you', 'you'], 'the interrupted line is not counted as a you step');
+  const marker = allSteps.find((s) => s.nodeUuid === uuid(3));
+  assert.ok(marker, 'the interrupted line still produced a step');
+  assert.equal(marker.kind, 'interrupted');
+  assert.equal(idx.body(marker.id).text, 'Interrupted');
+
+  const { sections } = steps.buildSections(allSteps, idx.body.bind(idx));
+  assert.equal(sections.some((s) => s.openerId === marker.id), false, 'the marker never opens its own section');
+  const owningSection = sections.find((s) => (s.body || []).some((r) => r.stepId === marker.id));
+  assert.ok(owningSection, 'the marker sits inside the section it interrupted');
+  assert.equal(owningSection.body.find((r) => r.stepId === marker.id).kind, 'interrupted');
+});
+
+test('"[Request interrupted by user for tool use]" is recognised the same way', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'run the long build'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'build' } }]),
+    userLine(uuid(3), uuid(2), [{ type: 'text', text: '[Request interrupted by user for tool use]' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const marker = idx.steps().find((s) => s.nodeUuid === uuid(3));
+  assert.ok(marker, 'the step was built');
+  assert.equal(marker.kind, 'interrupted');
+});

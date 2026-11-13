@@ -103,6 +103,8 @@
   .row.k-qa .chip, .row.k-plan .chip { color: var(--plan); border-color: var(--plan); }
   .row.k-plan .body { border-left: 3px solid var(--plan); padding-left: 10px; }
   .row.cur-hit { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  .row.k-interrupted { padding: 4px 0; border-bottom: none; }
+  .row.k-interrupted .interrupted-line { color: var(--faint); font-size: 11px; font-style: italic; }
   .you-msg { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; }
   .you-msg.folded-you { max-height: 150px; overflow: hidden; position: relative; }
   .you-msg.folded-you:not(.open)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(to bottom, transparent, var(--panel)); }
@@ -1216,7 +1218,20 @@ function buildBodyRow(row, sec) {
   if (row.kind === 'work') return buildWorkRow(row, sec);
   if (row.kind === 'question') return buildQuestionRow(row);
   if (row.kind === 'plan') return buildPlanRow(row);
+  if (row.kind === 'interrupted') return buildInterruptedRow(row);
   return buildClaudeRow(row);
+}
+
+/** A quiet one-line marker for a turn the owner cancelled: never one of their messages, never a
+    full Claude row, just a note at the point in the story where it happened. */
+function buildInterruptedRow(row) {
+  var div = document.createElement('div');
+  div.className = 'row k-interrupted';
+  div.setAttribute('data-step', row.stepId);
+  div.id = 'step-' + row.stepId;
+  var line = document.createElement('div'); line.className = 'interrupted-line'; line.textContent = 'Interrupted';
+  div.appendChild(line);
+  return div;
 }
 
 function buildClaudeRow(row) {

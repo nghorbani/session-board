@@ -179,6 +179,13 @@ function fullQuestions(input, parsed) {
 function isNotificationUserText(t) {
   return t.indexOf('Another Claude session sent a message') === 0 || t.indexOf('[SYSTEM NOTIFICATION') === 0;
 }
+// A line the system writes when a turn is cancelled mid-flight, not a word the owner typed: it
+// must not read as one of their messages or open a section. Exact match only, the way Claude
+// Code itself writes this single-block text content.
+const INTERRUPTED_MARKERS = new Set(['[Request interrupted by user]', '[Request interrupted by user for tool use]']);
+function isInterruptedMarkerText(t) {
+  return INTERRUPTED_MARKERS.has(String(t || '').trim());
+}
 
 /* ---------- the graph node (one per tree line) ----------
  * Kept compact on purpose: no message bodies, only what active-path walking, result joining and
@@ -519,6 +526,9 @@ function createStepIndex(file, deps) {
         if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) continue;
         const t = ownerText(content).trim();
         if (!t || isNotificationUserText(t)) continue;
+        // A cancelled-turn line the system writes, never a word the owner typed: it must not
+        // read as one of their messages or open a section (A3).
+        if (isInterruptedMarkerText(t)) { out.push(makeStep(node, 0, 'interrupted', { preview: 'Interrupted' })); continue; }
         out.push(makeStep(node, 0, 'you', { preview: previewOf(t) }));
       } else if (o.type === 'assistant') {
         if (o.isApiErrorMessage) {
@@ -620,6 +630,7 @@ function createStepIndex(file, deps) {
     const b = blocks[step.blockIndex];
 
     if (step.kind === 'you') return textBody(o.type === 'attachment' ? ownerText(o.attachment && o.attachment.prompt) : ownerText(content));
+    if (step.kind === 'interrupted') return textBody('Interrupted');
     if (step.kind === 'error') return textBody(textOf(content) || String(o.content || 'API error'));
     if (step.kind === 'compaction') return textBody(step.preview);
     if (step.kind === 'text') return textBody(b ? b.text : '');
@@ -764,7 +775,7 @@ function buildSections(stepsArr, bodyFn) {
       if (s.approved) openSection('approve', 'Plan approved', s.at, s.id);
       continue;
     }
-    if (s.kind === 'text' || s.kind === 'error' || s.kind === 'compaction') {
+    if (s.kind === 'text' || s.kind === 'error' || s.kind === 'compaction' || s.kind === 'interrupted') {
       flushQuiet();
       cur.body.push({ kind: s.kind, stepId: s.id });
       continue;
