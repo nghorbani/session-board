@@ -22,6 +22,25 @@ function escapeAttr(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+/** True for a UNC path (`\\host\share\...` or `//host/share/...`), either Windows device
+ *  prefix (`\\?\` or `\\.\`), or a value that carries its own URI scheme (`file://host/...`,
+ *  or any other `scheme://...`) rather than being a plain local path. A drive letter such as
+ *  `Z:\...` is local path syntax, not a scheme, and is deliberately not matched here: a mapped
+ *  drive stays allowed, since Windows resolves it without a network round trip of its own (the
+ *  round trip already happened when the drive was mapped). Stat-ing or revealing a UNC path
+ *  makes Windows contact that host to authenticate, which can leak credentials to a host named
+ *  only in untrusted transcript text, so this check runs before anything touches the path, on
+ *  both the raw value and the value after it has been resolved (a relative path or one with
+ *  `..` segments must not be able to resolve into a UNC path and slip past a check that only
+ *  ran on the original string). */
+function isNetworkOrUriPath(p) {
+  const s = String(p || '');
+  if (/^\\\\/.test(s) || /^\/\//.test(s)) return true;          // \\host\share or //host/share
+  if (/^\\\\[?.]\\/.test(s)) return true;                        // \\?\ or \\.\ device prefixes
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(s)) return true;      // scheme://... (file://, http://, ...)
+  return false;
+}
+
 const POLL_VISIBLE_MS = 5000;
 const POLL_HIDDEN_MS = 15000;
 const USAGE_VISIBLE_MS = 5 * 60 * 1000;
@@ -490,6 +509,16 @@ class BoardProvider {
    * cursor there. A path that does not exist, or that resolves outside anything the stat call
    * can read, answers with a plain message the page shows; nothing here ever executes a file or
    * passes a path to openExternal.
+   *
+   * A path is untrusted transcript text, not something the user typed, so a network path
+   * (UNC, a device prefix, or a value carrying its own URI scheme) is refused before the raw
+   * value or its resolved form ever reaches `stat`: Windows resolving `\\host\share\...`
+   * contacts that host and can hand it the user's NTLM credentials, and that must not happen
+   * just because some text in a transcript looked like a path. A path outside the session's
+   * own working directory, the open workspace folders and the home directory still opens, but
+   * only after asking once, since it is still a local path a legitimate link could reasonably
+   * point outside those (a `cd`'d-to build folder, say); only the network case is refused
+   * outright with no way to proceed.
    */
   async openStepsLink(sessionId, kind, target) {
     if (kind === 'url') {
@@ -501,7 +530,13 @@ class BoardProvider {
     const m = /^(.*?)(?::(\d+)|#L(\d+))$/.exec(target);
     const rawPath = m ? m[1] : target;
     const line = m ? Number(m[2] || m[3]) : null;
+    if (isNetworkOrUriPath(rawPath)) return this.refuseNetworkPath(rawPath);
     const resolved = this.resolveStepsPath(sessionId, rawPath);
+    if (isNetworkOrUriPath(resolved)) return this.refuseNetworkPath(resolved);
+    if (!this.isStepsPathTrusted(sessionId, resolved)) {
+      const choice = await vscode.window.showWarningMessage('Open ' + resolved + '?', { modal: true }, 'Open');
+      if (choice !== 'Open') return { type: 'openLinkResult', ok: false, message: 'cancelled' };
+    }
     let stat;
     try { stat = await vscode.workspace.fs.stat(vscode.Uri.file(resolved)); }
     catch (_) { return { type: 'openLinkResult', ok: false, message: 'that path does not exist: ' + resolved }; }
@@ -526,6 +561,23 @@ class BoardProvider {
     } catch (e) {
       return { type: 'openLinkResult', ok: false, message: String((e && e.message) || e) };
     }
+  }
+
+  /** A network path is refused outright, never stat-ed or opened; the page copies it instead. */
+  async refuseNetworkPath(p) {
+    await vscode.env.clipboard.writeText(p);
+    return { type: 'openLinkResult', ok: false, message: 'Network paths are not opened from here. The path is on the clipboard.' };
+  }
+
+  /** True when `resolved` sits inside the session's own working directory, an open workspace
+   *  folder, or the home directory: the roots a link can open without asking first. */
+  isStepsPathTrusted(sessionId, resolved) {
+    const row = this.sessionRow(sessionId);
+    const roots = [];
+    if (row && row.cwd) roots.push(row.cwd);
+    for (const f of vscode.workspace.workspaceFolders || []) if (f && f.uri && f.uri.fsPath) roots.push(f.uri.fsPath);
+    roots.push(require('os').homedir());
+    return roots.some((root) => core.isInside(resolved, root) || path.resolve(resolved) === path.resolve(root));
   }
 
   /** Absolute as given, `~` against the home directory, else relative against the session's

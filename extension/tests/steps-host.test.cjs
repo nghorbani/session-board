@@ -14,6 +14,11 @@ const A = '11111111-2222-4333-8444-555555555555';
 const B = '66666666-7777-4888-9999-000000000000';
 const LAST = { sessions: [{ sessionId: A, pid: 100, title: 'My session', name: 'my-session', status: 'idle', unseen: false, cwd: 'C:\\x', window: null, archived: false }], limits: {}, usage: null };
 const last = () => JSON.parse(JSON.stringify(LAST));
+/** A fixture whose session's cwd is `cwd`, so a path under it is a trusted root and opens
+    without the confirmation prompt. */
+function lastWithCwd(cwd) {
+  return { sessions: [{ sessionId: A, pid: 100, title: 'My session', name: 'my-session', status: 'idle', unseen: false, cwd, window: null, archived: false }], limits: {}, usage: null };
+}
 
 function fakeService(overrides) {
   const handled = [];
@@ -113,27 +118,29 @@ test('openLink url: any other scheme is refused, never handed to openExternal', 
   assert.equal(vscode.__openedExternal.length, 0, 'nothing but http/https ever reaches openExternal');
 });
 
-test('openLink path: a folder is revealed in the OS file explorer', async () => {
-  const { provider } = boot({}, { last: last() });
+test('openLink path: a folder under the session\'s working directory is revealed directly, no prompt', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statTypes['C:\\proj\\folder'] = vscode.FileType.Directory;
   const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\folder');
   assert.equal(r.ok, true);
+  assert.equal(vscode.__warnings.length, 0, 'a trusted path never asks first');
   const call = vscode.__executed.find((c) => c[0] === 'revealFileInOS');
   assert.ok(call);
   assert.equal(call[1].fsPath, 'C:\\proj\\folder');
 });
 
-test('openLink path: a file opens in an editor tab', async () => {
-  const { provider } = boot({}, { last: last() });
+test('openLink path: a file under the working directory opens in an editor tab, no prompt', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statTypes['C:\\proj\\foo.py'] = vscode.FileType.File;
   const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\foo.py');
   assert.equal(r.ok, true);
+  assert.equal(vscode.__warnings.length, 0);
   assert.equal(vscode.__openedDocs.length, 1);
   assert.equal(vscode.__shownDocs.length, 1);
 });
 
 test('openLink path: a .md file opens with the Markdown preview instead of an editor tab', async () => {
-  const { provider } = boot({}, { last: last() });
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statTypes['C:\\proj\\readme.md'] = vscode.FileType.File;
   const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\readme.md');
   assert.equal(r.ok, true);
@@ -143,19 +150,100 @@ test('openLink path: a .md file opens with the Markdown preview instead of an ed
 });
 
 test('openLink path: a file:line suffix moves the cursor to that line', async () => {
-  const { provider } = boot({}, { last: last() });
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statTypes['C:\\proj\\foo.py'] = vscode.FileType.File;
   const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\foo.py:42');
   assert.equal(r.ok, true);
   assert.equal(vscode.__openedDocs[0] && vscode.__openedDocs[0].fsPath, 'C:\\proj\\foo.py', 'the :line suffix is stripped before resolving the path');
 });
 
+// -- trusted roots and the confirmation gate -----------------------------------------------
+
+test('openLink path: a drive-letter path under the session\'s working directory opens without asking', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('Z:\\mapped\\proj') });
+  vscode.__statTypes['Z:\\mapped\\proj\\foo.py'] = vscode.FileType.File;
+  const r = await provider.openStepsLink(A, 'path', 'Z:\\mapped\\proj\\foo.py');
+  assert.equal(r.ok, true);
+  assert.equal(vscode.__warnings.length, 0, 'a mapped drive letter is local path syntax, not a network path');
+});
+
+test('openLink path: a path outside the session\'s working directory, the workspace folders and home asks first, and only opens on yes', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  vscode.__statTypes['D:\\elsewhere\\foo.py'] = vscode.FileType.File;
+  vscode.__answer = undefined;   // the user has not answered the prompt yet: Escape/no
+  let r = await provider.openStepsLink(A, 'path', 'D:\\elsewhere\\foo.py');
+  assert.equal(r.ok, false);
+  assert.equal(vscode.__warnings.length, 1, 'one confirmation prompt');
+  assert.ok(/Open D:\\elsewhere\\foo\.py\?/.test(vscode.__warnings[0]));
+  assert.equal(vscode.__openedDocs.length, 0, 'nothing opens without a yes');
+  vscode.__answer = 'Open';
+  r = await provider.openStepsLink(A, 'path', 'D:\\elsewhere\\foo.py');
+  assert.equal(r.ok, true);
+  assert.equal(vscode.__openedDocs.length, 1, 'opens once the user says yes');
+});
+
+// -- network paths: refused before any stat -------------------------------------------------
+
+test('openLink path: a UNC path is refused before stat is ever called', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  const r = await provider.openStepsLink(A, 'path', '\\\\evilhost\\share\\x.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Network paths/);
+  assert.equal(vscode.__statTypes['\\\\evilhost\\share\\x.txt'] !== undefined, false);
+  assert.equal(vscode.__openedDocs.length, 0);
+});
+
+test('openLink path: a //host/share path is refused before stat is ever called', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  const r = await provider.openStepsLink(A, 'path', '//evilhost/share/x.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Network paths/);
+  assert.equal(vscode.__openedDocs.length, 0);
+});
+
+test('openLink path: the \\\\?\\ device prefix is refused', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  const r = await provider.openStepsLink(A, 'path', '\\\\?\\C:\\proj\\x.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Network paths/);
+});
+
+test('openLink path: the \\\\.\\ device prefix is refused', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  const r = await provider.openStepsLink(A, 'path', '\\\\.\\C:\\proj\\x.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Network paths/);
+});
+
+test('openLink path: a file://host/ value is refused', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  const r = await provider.openStepsLink(A, 'path', 'file://evilhost/share/x.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Network paths/);
+  assert.equal(vscode.__openedDocs.length, 0);
+});
+
+test('openLink path: a relative path that resolves to a UNC path is refused, caught after resolving', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('\\\\evilhost\\share') });
+  const r = await provider.openStepsLink(A, 'path', 'x.txt');
+  assert.equal(r.ok, false);
+  assert.match(r.message, /Network paths/);
+  assert.equal(vscode.__openedDocs.length, 0);
+});
+
+test('openLink path: a network refusal copies the path to the clipboard', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  await provider.openStepsLink(A, 'path', '\\\\evilhost\\share\\x.txt');
+  assert.deepEqual(vscode.__clipboard, ['\\\\evilhost\\share\\x.txt']);
+});
+
 test('openLink path: a path that does not exist answers a plain message, not a throw', async () => {
-  const { provider } = boot({}, { last: last() });
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statRejects['C:\\proj\\missing.txt'] = new Error('ENOENT');
   const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\missing.txt');
   assert.equal(r.ok, false);
   assert.ok(r.message);
+  assert.equal(r.message.indexOf('Network paths') === -1, true, 'reached the stat failure, not a network refusal');
 });
 
 test('openLink path: a relative path resolves against the session\'s own working directory', async () => {
@@ -178,9 +266,10 @@ test('openLink path: ~ resolves against the home directory', async () => {
 });
 
 test('openLink path: an absolute path is used as given, never run as a command', async () => {
-  const { provider } = boot({}, { last: last() });
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statTypes['C:\\proj\\foo.py'] = vscode.FileType.File;
-  await provider.openStepsLink(A, 'path', 'C:\\proj\\foo.py');
+  const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\foo.py');
+  assert.equal(r.ok, true);
   assert.equal(vscode.__executed.some((c) => c[0] !== 'revealFileInOS' && c[0] !== 'markdown.showPreview'), false, 'no shell or run command is ever executed for a path link');
 });
 
@@ -205,7 +294,7 @@ test('openText opens an untitled document with the given text', async () => {
 
 test('openLink and openText sent from the panel are answered by the host, not forwarded to the service', async () => {
   const service = fakeService();
-  const { provider } = boot({}, { last: last() });
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   vscode.__statTypes['C:\\proj\\foo.py'] = vscode.FileType.File;
   provider.stepsService = service;
   await provider.onMessage({ type: 'steps', sessionId: A });
