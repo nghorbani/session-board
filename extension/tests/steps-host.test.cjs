@@ -447,6 +447,7 @@ test('deliverToSession, another window without a current board (old or no board)
   }, { last: runningWindow() });
   const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
   assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+  assert.deepEqual(vscode.__clipboard, ['text']);
 });
 
 test('deliverToSession, another window with a board older than 0.12.0: clipboard only', async () => {
@@ -458,6 +459,7 @@ test('deliverToSession, another window with a board older than 0.12.0: clipboard
   }, { last: runningWindow() });
   const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
   assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+  assert.deepEqual(vscode.__clipboard, ['text']);
 });
 
 test('deliverToSession, a terminal or background session (no VS Code window at all): clipboard only', async () => {
