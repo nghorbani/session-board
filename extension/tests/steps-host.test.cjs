@@ -182,52 +182,43 @@ test('openLink path: a path outside the session\'s working directory, the worksp
   assert.equal(vscode.__openedDocs.length, 1, 'opens once the user says yes');
 });
 
-// -- network paths: refused before any stat -------------------------------------------------
+// -- network paths: refused before any stat, by shape, not by name --------------------------
+//
+// safeLocalFileUri is an allow list (only a drive-letter root on Windows, or a single leading
+// separator elsewhere, ever passes), checked on the fully resolved path; these refusal cases
+// cover the shapes an earlier deny-list version of this check missed (mixed separators, the NT
+// object prefix) alongside the ones it did catch, each asserted against vscode.__statCalls so a
+// refusal is provably never followed by a stat, not just by its result.
 
-test('openLink path: a UNC path is refused before stat is ever called', async () => {
-  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
-  const r = await provider.openStepsLink(A, 'path', '\\\\evilhost\\share\\x.txt');
-  assert.equal(r.ok, false);
-  assert.match(r.message, /Network paths/);
-  assert.equal(vscode.__statTypes['\\\\evilhost\\share\\x.txt'] !== undefined, false);
-  assert.equal(vscode.__openedDocs.length, 0);
-});
+const REFUSED_PATHS = [
+  ['\\/host\\share\\x', 'mixed separators (leading \\/ )'],
+  ['/\\host/share/x', 'mixed separators (leading /\\ )'],
+  ['\\??\\UNC\\host\\share\\x', 'the NT object prefix'],
+  ['\\\\?\\UNC\\host\\share\\x', 'the \\\\?\\ device prefix'],
+  ['\\\\.\\pipe\\x', 'the \\\\.\\ device prefix'],
+  ['\\foo\\bar', 'a rooted path with no drive letter'],
+  ['//host/share', 'a // UNC form'],
+  ['\\\\host\\share', 'a \\\\ UNC form'],
+  ['file://evilhost/share/x', 'a file:// URI used as a path'],
+];
 
-test('openLink path: a //host/share path is refused before stat is ever called', async () => {
-  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
-  const r = await provider.openStepsLink(A, 'path', '//evilhost/share/x.txt');
-  assert.equal(r.ok, false);
-  assert.match(r.message, /Network paths/);
-  assert.equal(vscode.__openedDocs.length, 0);
-});
+for (const [target, label] of REFUSED_PATHS) {
+  test('openLink path: ' + label + ' is refused, and stat is never called', async () => {
+    const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+    const r = await provider.openStepsLink(A, 'path', target);
+    assert.equal(r.ok, false);
+    assert.match(r.message, /Network paths/);
+    assert.deepEqual(vscode.__statCalls, [], 'stat was never reached for ' + JSON.stringify(target));
+    assert.equal(vscode.__openedDocs.length, 0);
+  });
+}
 
-test('openLink path: the \\\\?\\ device prefix is refused', async () => {
-  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
-  const r = await provider.openStepsLink(A, 'path', '\\\\?\\C:\\proj\\x.txt');
-  assert.equal(r.ok, false);
-  assert.match(r.message, /Network paths/);
-});
-
-test('openLink path: the \\\\.\\ device prefix is refused', async () => {
-  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
-  const r = await provider.openStepsLink(A, 'path', '\\\\.\\C:\\proj\\x.txt');
-  assert.equal(r.ok, false);
-  assert.match(r.message, /Network paths/);
-});
-
-test('openLink path: a file://host/ value is refused', async () => {
-  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
-  const r = await provider.openStepsLink(A, 'path', 'file://evilhost/share/x.txt');
-  assert.equal(r.ok, false);
-  assert.match(r.message, /Network paths/);
-  assert.equal(vscode.__openedDocs.length, 0);
-});
-
-test('openLink path: a relative path that resolves to a UNC path is refused, caught after resolving', async () => {
+test('openLink path: a relative path that resolves outside any drive root is refused, caught after resolving', async () => {
   const { provider } = boot({}, { last: lastWithCwd('\\\\evilhost\\share') });
   const r = await provider.openStepsLink(A, 'path', 'x.txt');
   assert.equal(r.ok, false);
   assert.match(r.message, /Network paths/);
+  assert.deepEqual(vscode.__statCalls, [], 'a UNC working directory must not make a relative path trust it');
   assert.equal(vscode.__openedDocs.length, 0);
 });
 
@@ -235,6 +226,38 @@ test('openLink path: a network refusal copies the path to the clipboard', async 
   const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
   await provider.openStepsLink(A, 'path', '\\\\evilhost\\share\\x.txt');
   assert.deepEqual(vscode.__clipboard, ['\\\\evilhost\\share\\x.txt']);
+});
+
+// -- still allowed: drive letters, both separator styles, and the working directory ---------
+
+test('openLink path: a drive-letter path (backslash form) under the working directory opens', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  vscode.__statTypes['C:\\proj\\dir\\file.md'] = vscode.FileType.File;
+  const r = await provider.openStepsLink(A, 'path', 'C:\\proj\\dir\\file.md');
+  assert.equal(r.ok, true);
+  assert.ok(vscode.__statCalls.length >= 1);
+});
+
+test('openLink path: a mapped drive letter (Z:\\...) opens, a mapped drive is local path syntax', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('Z:\\dir') });
+  vscode.__statTypes['Z:\\dir'] = vscode.FileType.Directory;
+  const r = await provider.openStepsLink(A, 'path', 'Z:\\dir');
+  assert.equal(r.ok, true);
+});
+
+test('openLink path: a drive-letter path with forward slashes opens', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\dir') });
+  vscode.__statTypes['C:\\dir\\file.txt'] = vscode.FileType.File;
+  const r = await provider.openStepsLink(A, 'path', 'c:/dir/file.txt');
+  assert.equal(r.ok, true);
+});
+
+test('openLink path: a relative path under the session\'s working directory opens, no prompt', async () => {
+  const { provider } = boot({}, { last: lastWithCwd('C:\\proj') });
+  vscode.__statTypes['C:\\proj\\sub\\file.txt'] = vscode.FileType.File;
+  const r = await provider.openStepsLink(A, 'path', 'sub\\file.txt');
+  assert.equal(r.ok, true);
+  assert.equal(vscode.__warnings.length, 0);
 });
 
 test('openLink path: a path that does not exist answers a plain message, not a throw', async () => {

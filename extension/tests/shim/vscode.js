@@ -56,6 +56,7 @@ const api = {
   __shownDocs: [],      // every vscode.window.showTextDocument(doc) call
   __statRejects: Object.create(null),   // fsPath -> error, so a test can make workspace.fs.stat fail for a path
   __statTypes: Object.create(null),     // fsPath -> FileType (default: File) for a path that should stat ok
+  __statCalls: [],                      // every fsPath workspace.fs.stat was asked about, in order
   __reset() {
     api.__providers.length = 0;
     api.__status.length = 0;
@@ -73,6 +74,7 @@ const api = {
     api.__shownDocs.length = 0;
     for (const k of Object.keys(api.__statRejects)) delete api.__statRejects[k];
     for (const k of Object.keys(api.__statTypes)) delete api.__statTypes[k];
+    api.__statCalls.length = 0;
     for (const k of Object.keys(api.__config)) delete api.__config[k];
     api.window.state.focused = true;
     api.__answer = undefined;
@@ -120,6 +122,7 @@ const api = {
     fs: {
       stat: async (uri) => {
         const fsPath = uri && uri.fsPath;
+        api.__statCalls.push(fsPath);
         if (fsPath in api.__statRejects) throw api.__statRejects[fsPath];
         const type = fsPath in api.__statTypes ? api.__statTypes[fsPath] : 1; // FileType.File
         return { type };

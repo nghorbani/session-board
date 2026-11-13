@@ -22,23 +22,37 @@ function escapeAttr(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-/** True for a UNC path (`\\host\share\...` or `//host/share/...`), either Windows device
- *  prefix (`\\?\` or `\\.\`), or a value that carries its own URI scheme (`file://host/...`,
- *  or any other `scheme://...`) rather than being a plain local path. A drive letter such as
- *  `Z:\...` is local path syntax, not a scheme, and is deliberately not matched here: a mapped
- *  drive stays allowed, since Windows resolves it without a network round trip of its own (the
- *  round trip already happened when the drive was mapped). Stat-ing or revealing a UNC path
- *  makes Windows contact that host to authenticate, which can leak credentials to a host named
- *  only in untrusted transcript text, so this check runs before anything touches the path, on
- *  both the raw value and the value after it has been resolved (a relative path or one with
- *  `..` segments must not be able to resolve into a UNC path and slip past a check that only
- *  ran on the original string). */
-function isNetworkOrUriPath(p) {
-  const s = String(p || '');
-  if (/^\\\\/.test(s) || /^\/\//.test(s)) return true;          // \\host\share or //host/share
-  if (/^\\\\[?.]\\/.test(s)) return true;                        // \\?\ or \\.\ device prefixes
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(s)) return true;      // scheme://... (file://, http://, ...)
-  return false;
+/**
+ * An allow list, not a deny list: a path clicked in the viewer comes from transcript text, not
+ * from something the user typed, and a UNC form (plain, mixed-separator, an NT object path, or
+ * either Windows device prefix) makes Windows contact a named host to authenticate just for the
+ * stat call, which can leak the user's NTLM credentials. Enumerating the ways to spell a network
+ * path keeps missing one (`\/host\share`, `/\host/share` and `\??\UNC\...` all slipped past an
+ * earlier version of this check that matched only `\\`, `//` and `\\?\`/`\\.\`), so this instead
+ * demands the shape a trusted local path has to have and refuses everything else.
+ *
+ * `resolved` must already be the fully resolved absolute path (home expansion and the session's
+ * own working directory both applied); this only classifies that final string, normalised with
+ * `path.win32.normalize` on Windows so every `/` becomes `\` before the shape check runs (a
+ * mixed-separator UNC form is still a UNC form once its separators agree). On Windows the one
+ * allowed shape is a drive letter root (`C:\...`); a rooted path with no drive (`\foo`), any
+ * path starting with two separators in any mix, an NT object prefix (`\??\`), and the `\\?\` /
+ * `\\.\` device prefixes are all refused by simply not matching that shape, not by naming each
+ * of them. On other platforms the one allowed shape is a path starting with exactly one `/`.
+ * Returns the `vscode.Uri.file(...)` built from the checked, normalised value, so the same Uri
+ * the shape check approved is what every caller passes on to stat, revealFileInOS, the editor
+ * and the preview, never a second parse of the original string; returns null when the path is
+ * refused, including when the Uri's authority is not empty (a `file://host/...` spelling that
+ * reached this far through some other route would carry a host there).
+ */
+function safeLocalFileUri(resolved) {
+  const isWindows = process.platform === 'win32';
+  const normalized = isWindows ? path.win32.normalize(String(resolved || '')) : String(resolved || '');
+  const shapeOk = isWindows ? /^[A-Za-z]:\\(?!\\)/.test(normalized) : /^\/(?!\/)/.test(normalized);
+  if (!shapeOk) return null;
+  const uri = vscode.Uri.file(normalized);
+  if (uri.authority) return null;   // defence in depth: a Uri that still carries a host is refused too
+  return uri;
 }
 
 const POLL_VISIBLE_MS = 5000;
@@ -503,22 +517,25 @@ class BoardProvider {
    * A link clicked in the Steps viewer. `kind: 'url'` opens only http and https with
    * openExternal; anything else is refused rather than handed to the OS. `kind: 'path'` is
    * resolved (absolute as given, `~` against the home directory, relative against the
-   * session's own working directory from the board's last snapshot when one is known) and then
-   * `stat`-ed: a folder is revealed in the OS file explorer, a file opens in an editor tab (a
-   * `.md` file with the Markdown preview instead), and a trailing `:line` or `#Lline` moves the
+   * session's own working directory from the board's last snapshot when one is known), checked
+   * by `safeLocalFileUri` and, once that passes, `stat`-ed through the one `Uri` the check
+   * built: a folder is revealed in the OS file explorer, a file opens in an editor tab (a `.md`
+   * file with the Markdown preview instead), and a trailing `:line` or `#Lline` moves the
    * cursor there. A path that does not exist, or that resolves outside anything the stat call
    * can read, answers with a plain message the page shows; nothing here ever executes a file or
    * passes a path to openExternal.
    *
-   * A path is untrusted transcript text, not something the user typed, so a network path
-   * (UNC, a device prefix, or a value carrying its own URI scheme) is refused before the raw
-   * value or its resolved form ever reaches `stat`: Windows resolving `\\host\share\...`
-   * contacts that host and can hand it the user's NTLM credentials, and that must not happen
-   * just because some text in a transcript looked like a path. A path outside the session's
-   * own working directory, the open workspace folders and the home directory still opens, but
-   * only after asking once, since it is still a local path a legitimate link could reasonably
-   * point outside those (a `cd`'d-to build folder, say); only the network case is refused
-   * outright with no way to proceed.
+   * A path is untrusted transcript text, not something the user typed, so it is resolved and
+   * shape-checked before anything touches it: `safeLocalFileUri` only allows a path rooted at a
+   * drive letter (Windows) or a single leading separator (elsewhere), which rules out every
+   * network form (UNC, mixed separators, an NT object path, either device prefix, or a value
+   * carrying its own URI scheme) by construction rather than by naming each one. Stat-ing a
+   * network path makes Windows contact the named host to authenticate, which can leak the
+   * user's NTLM credentials just because some text in a transcript looked like a path, so a
+   * refused path is never passed to `stat` at all. A path outside the session's own working
+   * directory, the open workspace folders and the home directory still opens, but only after
+   * asking once, since it is still a local path a legitimate link could reasonably point
+   * outside those (a `cd`'d-to build folder, say); only the network case has no way to proceed.
    */
   async openStepsLink(sessionId, kind, target) {
     if (kind === 'url') {
@@ -530,26 +547,38 @@ class BoardProvider {
     const m = /^(.*?)(?::(\d+)|#L(\d+))$/.exec(target);
     const rawPath = m ? m[1] : target;
     const line = m ? Number(m[2] || m[3]) : null;
-    if (isNetworkOrUriPath(rawPath)) return this.refuseNetworkPath(rawPath);
+    // A value carrying its own URI scheme (file://host/..., or any other scheme://...) is
+    // refused on the raw text, before resolveStepsPath gets a chance to fold it into a
+    // relative path fragment under some trusted base, where it would read as harmless (nested
+    // under the session's own working directory, say) even though the author meant it as an
+    // absolute reference to somewhere else entirely; the resolved form is checked again below
+    // regardless, since a relative path or one with `..` segments must not reach a network
+    // path either.
+    // At least two characters before the "://": a single letter there is a Windows drive
+    // (`C://dir` is `C:/dir` with a doubled separator, still a plain local path), never a URI
+    // scheme in practice, so requiring two characters tells the two apart without a drive
+    // letter list of its own.
+    if (/^[A-Za-z][A-Za-z0-9+.-]{1,}:\/\//.test(rawPath)) return this.refuseNetworkPath(rawPath);
     const resolved = this.resolveStepsPath(sessionId, rawPath);
-    if (isNetworkOrUriPath(resolved)) return this.refuseNetworkPath(resolved);
-    if (!this.isStepsPathTrusted(sessionId, resolved)) {
-      const choice = await vscode.window.showWarningMessage('Open ' + resolved + '?', { modal: true }, 'Open');
+    const uri = safeLocalFileUri(resolved);
+    if (!uri) return this.refuseNetworkPath(resolved);
+    if (!this.isStepsPathTrusted(sessionId, uri.fsPath)) {
+      const choice = await vscode.window.showWarningMessage('Open ' + uri.fsPath + '?', { modal: true }, 'Open');
       if (choice !== 'Open') return { type: 'openLinkResult', ok: false, message: 'cancelled' };
     }
     let stat;
-    try { stat = await vscode.workspace.fs.stat(vscode.Uri.file(resolved)); }
-    catch (_) { return { type: 'openLinkResult', ok: false, message: 'that path does not exist: ' + resolved }; }
+    try { stat = await vscode.workspace.fs.stat(uri); }
+    catch (_) { return { type: 'openLinkResult', ok: false, message: 'that path does not exist: ' + uri.fsPath }; }
     try {
       if (stat.type === vscode.FileType.Directory) {
-        await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(resolved));
+        await vscode.commands.executeCommand('revealFileInOS', uri);
         return { type: 'openLinkResult', ok: true };
       }
-      if (/\.md$/i.test(resolved)) {
-        await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(resolved));
+      if (/\.md$/i.test(uri.fsPath)) {
+        await vscode.commands.executeCommand('markdown.showPreview', uri);
         return { type: 'openLinkResult', ok: true };
       }
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));
+      const doc = await vscode.workspace.openTextDocument(uri);
       const editor = await vscode.window.showTextDocument(doc);
       if (line && editor && editor.selection !== undefined) {
         // best-effort cursor placement; a fake editor in a test has no selection API to call.
