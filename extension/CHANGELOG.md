@@ -13,6 +13,7 @@
 - "Send to session" needs Claude Code 2.1.322 or newer in the window that owns the session, and a board 0.12.0 or newer there when it is another window; otherwise the text is on the clipboard and the session opens
 - Subagent calls show the task and the report the subagent sent back, as formatted text; their inner steps are not shown
 - Browser page: `/steps?session=<id>`, `POST /api/steps` (JSON body, 64 KB at most) and `GET /api/steps/poll`. Sending to a session copies the text there
+
 ## 0.11.3
 
 - Three filters in the header instead of two: running (only the running sessions), open (the default: what Claude Code's own list shows, the running sessions and the ended ones that are not archived) and all (the archived sessions too, each with its chip; ⤒ brings back one the board archived)

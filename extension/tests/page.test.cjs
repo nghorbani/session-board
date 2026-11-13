@@ -1077,8 +1077,8 @@ test('page: rows still render their buttons, with Steps in place for a session t
   const page = await openPage();
   const s = await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
   const kindsOf = (sid) => (s.actionKinds.find((x) => x.indexOf(sid + '=') === 0) || '').split('=')[1].split(',');
-  assert.deepEqual(kindsOf(A), ['steps', 'copy', 'retitle', 'mute', 'archive', 'end'], 'the row with a transcript carries Steps ahead of the other buttons, order otherwise unchanged');
-  assert.deepEqual(kindsOf(B), ['copy', 'retitle', 'mute', 'archive', 'end'], 'no transcript: no Steps button, the rest unchanged');
+  assert.deepEqual(kindsOf(A), ['steps', 'details', 'retitle', 'mute', 'archive', 'end'], 'the row with a transcript carries Steps ahead of the other buttons, order otherwise unchanged');
+  assert.deepEqual(kindsOf(B), ['details', 'retitle', 'mute', 'archive', 'end'], 'no transcript: no Steps button, the rest unchanged');
   const title = await page.eval('document.querySelector(' + JSON.stringify(rowSel(A) + ' .iconbtn.steps') + ').title');
   assert.equal(title, 'Steps', 'the row button\'s tooltip is just Steps');
   await page.click(rowSel(A) + ' .iconbtn.steps');
