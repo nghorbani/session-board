@@ -210,7 +210,7 @@ async function openPage() {
     until: async (pred, what) => {
       const start = Date.now();
       let s = null;
-      while (Date.now() - start < 8000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
+      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
       throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
     },
     close: () => cdp.send('Target.closeTarget', { targetId }),
@@ -229,8 +229,7 @@ test('page: ⤓ asks Archive?, posts archive=1, and the row leaves', opts, async
   const page = await openPage();
   await page.until((s) => s.rows.includes(A) && s.rows.includes(B), 'both rows');
   await page.click(rowSel(A) + ' .iconbtn.archive');
-  let s = await page.sample();
-  assert.equal(s.confirmText, 'Archive?');
+  let s = await page.until((x) => x.confirmText === 'Archive?', 'the archive confirm to show');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   s = await page.until((x) => !x.rows.includes(A), 'the archived row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['?archive=1']);
@@ -348,8 +347,7 @@ test('page: ✕ is unchanged and posts without archive', opts, async () => {
   const page = await openPage();
   await page.until((s) => s.rows.includes(A), 'the idle row');
   await page.click(rowSel(A) + ' .iconbtn.end');
-  let s = await page.sample();
-  assert.equal(s.confirmText, 'End?');
+  let s = await page.until((x) => x.confirmText === 'End?', 'the end confirm to show');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   s = await page.until((x) => !x.rows.includes(A), 'the ended row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['']);

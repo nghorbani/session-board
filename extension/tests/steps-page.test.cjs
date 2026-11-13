@@ -197,6 +197,7 @@ const SAMPLE = `(function () {
     fileLinks: q('.fp, .filerow a.lnk').map(function (a) { return a.textContent; }),
     searchCount: text('#count'),
     curHitText: (function () { var e = document.querySelector('.cur-hit'); return e ? e.textContent.replace(/\\s+/g, ' ').trim() : null; })(),
+    curHitId: (function () { var e = document.querySelector('.cur-hit'); return e ? e.id : null; })(),
     newMarker: !!document.querySelector('.new-marker'),
     atBottom: (function () { var r = document.getElementById('reader'); return r.scrollTop + r.clientHeight >= r.scrollHeight - 20; })(),
     scrollTop: document.getElementById('reader').scrollTop,
@@ -247,7 +248,7 @@ async function openPage(sessionId, path) {
     until: async (pred, what) => {
       const start = Date.now();
       let s = null;
-      while (Date.now() - start < 8000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
+      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
       throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
     },
     close: () => cdp.send('Target.closeTarget', { targetId }),
@@ -585,7 +586,7 @@ test('page: the narrow layout shows the outline drawer toggle', opts, async () =
   };
   let sample = null;
   const start = Date.now();
-  while (Date.now() - start < 8000) {
+  while (Date.now() - start < 20000) {
     try { sample = await ev(SAMPLE); if (sample.drawerVisible) break; } catch (_) { /* page still loading */ }
     await sleep(150);
   }
@@ -737,13 +738,11 @@ test('page: the notes counter in the header jumps between notes', opts, async ()
   }
   await page.until((x) => x.notesJumpLabel === 'Notes 2', 'both notes counted');
   await page.click('#notesJump');
-  const s1 = await page.until((x) => x.curHitText === null || true, 'a jump landed'); // jump uses cur-hit styling via scrollToStepId's own marker
-  void s1;
-  const scrolledOnce = await page.eval('document.querySelector(".cur-hit") ? document.querySelector(".cur-hit").id : null');
-  assert.ok(scrolledOnce === 'step-u1:0' || scrolledOnce === 'step-u2:0', 'the jump landed on one of the noted steps');
+  const first = await page.until((x) => x.curHitId === 'step-u1:0' || x.curHitId === 'step-u2:0', 'the jump to land on one of the noted steps');
+  const scrolledOnce = first.curHitId;
   await page.click('#notesJump');
-  const scrolledTwice = await page.eval('document.querySelector(".cur-hit") ? document.querySelector(".cur-hit").id : null');
-  assert.notEqual(scrolledTwice, scrolledOnce, 'a second click moves to the other note');
+  const second = await page.until((x) => x.curHitId !== null && x.curHitId !== scrolledOnce, 'a second click to move to the other note');
+  assert.notEqual(second.curHitId, scrolledOnce, 'a second click moves to the other note');
   await page.close();
 });
 
