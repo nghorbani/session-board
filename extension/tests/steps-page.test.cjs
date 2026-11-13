@@ -171,6 +171,7 @@ const SAMPLE = `(function () {
     youMsgCount: q('.row.k-you .you-msg').length,
     youMsgOpen: !!document.querySelector('.row.k-you .you-msg.open'),
     showAllYou: !!document.querySelector('.row.k-you .showall'),
+    indexNoteShown: document.getElementById('indexnote').classList.contains('show'),
   };
 })()`;
 
@@ -359,6 +360,25 @@ test('page: the owner\'s message appears once per section, in the heading card, 
   await page.click('.row.k-you .showall');
   const s2 = await page.until((x) => x.youMsgOpen === true, 'the message to unfold on Show all');
   assert.equal(s2.youMsgCount, 1, 'still one card after unfolding');
+  await page.close();
+});
+
+test('page: the "still indexing" line shows while indexing and disappears once it completes', opts, async () => {
+  fake.open = () => openReply({
+    indexing: true,
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [])],
+  });
+  const page = await openPage(A);
+  const s1 = await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  assert.equal(s1.indexNoteShown, true, 'shown while the backward pass is still running');
+  fake.pushes.push({
+    type: 'stepsProgress', sessionId: A, fraction: 1, done: true,
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [])],
+    strip: { totalTimeMs: 1000, sections: 1, decisions: 1, filesChanged: 0 },
+  });
+  const s2 = await page.until((x) => x.indexNoteShown === false, 'the note to clear once indexing finishes');
+  assert.equal(s2.indexNoteShown, false);
   await page.close();
 });
 
