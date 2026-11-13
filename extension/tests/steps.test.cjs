@@ -554,3 +554,74 @@ test('a message typed mid-turn (a queued_command attachment with a human origin)
   assert.ok(typedSection, 'the typed message opens its own section');
   assert.equal(typedSection.kind, 'you', 'labelled You, not Claude');
 });
+
+test('a you message whose content is a list of blocks (text plus a pasted image) reads as the text parts joined, with "(image)" for the image', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, [
+      { type: 'text', text: 'what do you make of this' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+    ]),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'looking at it now' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const you = idx.steps().find((s) => s.kind === 'you');
+  assert.ok(you, 'a you step was built');
+  assert.equal(idx.body(you.id).text, 'what do you make of this\n(image)');
+  assert.equal(you.preview.indexOf('[object Object]'), -1, 'the preview never stringifies a block');
+
+  const { sections } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  const youSection = sections.find((s) => s.kind === 'you');
+  assert.ok(youSection, 'the message still opens its own section');
+  assert.equal(youSection.heading.indexOf('[object Object]'), -1, 'the heading never stringifies a block');
+  assert.ok(youSection.heading.indexOf('what do you make of this') !== -1, 'the heading uses the text part');
+});
+
+test('a you message that is only a pasted image (no text block) reads as "(image)", not empty or "[object Object]"', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, [
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+    ]),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'got it' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const you = idx.steps().find((s) => s.kind === 'you');
+  assert.ok(you, 'an image-only message still becomes a you step');
+  assert.equal(idx.body(you.id).text, '(image)');
+});
+
+test('a queued message (attachment prompt) whose content is a list of blocks reads as the text parts joined, with "(image)" for the image', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'start the long task'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'sleep 60' } }]),
+    {
+      type: 'attachment', uuid: uuid(3), parentUuid: uuid(2), timestamp: new Date(2026, 0, 1, 0, 5).toISOString(),
+      attachment: {
+        type: 'queued_command', commandMode: 'prompt',
+        prompt: [
+          { type: 'text', text: 'also look at this screenshot' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+        ],
+        origin: { kind: 'human' },
+      },
+    },
+    toolResultLine(uuid(4), uuid(3), 'b1', 'done'),
+    assistantLine(uuid(5), uuid(4), 'm2', [{ type: 'text', text: 'checked it' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const allSteps = idx.steps();
+  const typed = allSteps.find((s) => s.nodeUuid === uuid(3));
+  assert.ok(typed, 'the queued list-content prompt produced a step');
+  assert.equal(idx.body(typed.id).text, 'also look at this screenshot\n(image)');
+  assert.equal(typed.preview.indexOf('[object Object]'), -1, 'the preview never stringifies a block');
+
+  const { sections } = steps.buildSections(allSteps, idx.body.bind(idx));
+  const typedSection = sections.find((s) => s.openerId === typed.id);
+  assert.ok(typedSection, 'it still opens its own section');
+  assert.equal(typedSection.heading.indexOf('[object Object]'), -1, 'the heading never stringifies a block');
+});

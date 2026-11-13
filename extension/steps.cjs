@@ -55,6 +55,23 @@ function textOf(content) {
   return content.filter((b) => b && b.type === 'text' && !String(b.text || '').trim().startsWith('<'))
     .map((b) => b.text || '').join('\n');
 }
+/* The owner's own words, however the line stored them: a plain string (the common case), or a
+   list of blocks (a pasted image, a file reference) for a message typed with an attachment or a
+   queued prompt sent while the model was still working. Text blocks are joined as textOf does;
+   an image block becomes the word "(image)" rather than vanishing or stringifying to
+   "[object Object]" (Array's default join calls String() on every element, and a plain object's
+   String() is exactly that). Any other block kind is left out, same as textOf already does for
+   non-text blocks. */
+function ownerText(content) {
+  if (typeof content === 'string') return content.trim().startsWith('<') ? '' : content;
+  if (!Array.isArray(content)) return '';
+  return content.map((b) => {
+    if (!b || typeof b !== 'object') return '';
+    if (b.type === 'text') return String(b.text || '').trim().startsWith('<') ? '' : (b.text || '');
+    if (b.type === 'image') return '(image)';
+    return '';
+  }).filter(Boolean).join('\n');
+}
 function rawText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -494,13 +511,13 @@ function createStepIndex(file, deps) {
         // whatever came next instead of to the owner.
         const att = o.attachment;
         if (att && att.type === 'queued_command' && att.origin && att.origin.kind === 'human') {
-          const t = String(att.prompt || '').trim();
+          const t = ownerText(att.prompt).trim();
           if (t && !isNotificationUserText(t)) out.push(makeStep(node, 0, 'you', { preview: previewOf(t) }));
         }
       } else if (o.type === 'user') {
         if (o.isMeta || o.isCompactSummary) continue;
         if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) continue;
-        const t = textOf(content).trim();
+        const t = ownerText(content).trim();
         if (!t || isNotificationUserText(t)) continue;
         out.push(makeStep(node, 0, 'you', { preview: previewOf(t) }));
       } else if (o.type === 'assistant') {
@@ -602,7 +619,7 @@ function createStepIndex(file, deps) {
     const blocks = Array.isArray(content) ? content : [];
     const b = blocks[step.blockIndex];
 
-    if (step.kind === 'you') return textBody(o.type === 'attachment' ? String((o.attachment && o.attachment.prompt) || '') : textOf(content));
+    if (step.kind === 'you') return textBody(o.type === 'attachment' ? ownerText(o.attachment && o.attachment.prompt) : ownerText(content));
     if (step.kind === 'error') return textBody(textOf(content) || String(o.content || 'API error'));
     if (step.kind === 'compaction') return textBody(step.preview);
     if (step.kind === 'text') return textBody(b ? b.text : '');
