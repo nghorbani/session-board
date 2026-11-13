@@ -872,6 +872,27 @@ test('page: adding a note through the box shows it under the step and makes the 
   await page.close();
 });
 
+test('page: an open note box keeps what was typed, and stays open, when pushes redraw the page', opts, async () => {
+  const sections = [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', []), section('you', 'second message', 'u2:0', [])];
+  fake.open = () => openReply({ steps: [step('u1:0', 'you'), step('u2:0', 'you')], sections });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'first paint');
+  await page.eval('(function () { document.getElementById("step-u2:0").querySelector(".add-note").click(); })()');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.eval('(function () { var ta = document.querySelector(".notebox textarea"); ta.value = "half a thought"; ta.dispatchEvent(new Event("input", { bubbles: true })); })()');
+  // the session goes on (a new section arrives) and another window keeps a note on another step
+  fake.pushes.push({
+    type: 'stepsChanged', sessionId: A, appended: ['u3:0'], steps: [step('u3:0', 'you')],
+    sections: sections.concat([section('you', 'third message', 'u3:0', [])]),
+    strip: { activeTimeMs: 2000, sections: 4, decisions: 3, filesChanged: 0 },
+  });
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: [{ id: 'n-other', stepId: 'u1:0', at: 1, text: 'from another window', sent: [] }] });
+  const s = await page.until((x) => x.sectionHeadings.length === 4 && x.notesTileNum === '1', 'both pushes to land');
+  assert.equal(s.noteBoxOpen, true, 'the box on a step without a note stays open');
+  assert.equal(s.noteBoxText, 'half a thought', 'and keeps what was typed');
+  await page.close();
+});
+
 test('page: a quick reply prefills the note text', opts, async () => {
   fake.open = () => openReply({
     steps: [step('u1:0', 'you')],

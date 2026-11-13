@@ -441,11 +441,9 @@ function onPush(msg) {
     return;
   }
   if (msg.type === 'notesChanged') {
-    // a push from this viewer's own change re-renders a note box it just emptied by deleting;
-    // one closed by the same action is fine to leave shut, so the box only reopens for a step
-    // that still carries a note after this update.
+    // an open note box stays open across this redraw with what was typed in it (its draft);
+    // the action that closes a box (keep, send, delete, the toggle) does so itself.
     state.notes = msg.notes || [];
-    if (state.noteBoxFor && !state.notes.some(function (n) { return n.stepId === state.noteBoxFor; })) state.noteBoxFor = null;
     renderStrip();
     renderAll();
     renderNotesJumpLabel();
@@ -1107,6 +1105,7 @@ function addNoteUi(rowDiv, stepId) {
   btn.addEventListener('click', function (ev) {
     ev.stopPropagation();
     state.noteBoxFor = state.noteBoxFor === stepId ? null : stepId;
+    state.noteDraft = null;
     renderReader();
     queueVisibleBodies();
   });
@@ -1147,7 +1146,12 @@ function buildNoteBox(stepId, existing) {
   quick.className = 'quick';
   var ta = document.createElement('textarea');
   ta.placeholder = 'What is wrong or worth keeping at this step?';
-  ta.value = existing ? existing.text : '';
+  // The box is rebuilt on every redraw (each push while the session runs), so what is being
+  // typed lives in state.noteDraft, with the caret, and is put back here.
+  var draft = state.noteDraft && state.noteDraft.stepId === stepId ? state.noteDraft : null;
+  ta.value = draft ? draft.text : (existing ? existing.text : '');
+  function keepDraft() { state.noteDraft = { stepId: stepId, text: ta.value, start: ta.selectionStart, end: ta.selectionEnd }; }
+  ['input', 'keyup', 'mouseup'].forEach(function (name) { ta.addEventListener(name, keepDraft); });
   QUICK_REPLIES.forEach(function (phrase) {
     var qb = document.createElement('button');
     qb.type = 'button';
@@ -1156,6 +1160,7 @@ function buildNoteBox(stepId, existing) {
       ta.value = ta.value ? ta.value.replace(/\s*$/, ' ') + phrase : phrase;
       ta.focus();
       ta.selectionStart = ta.selectionEnd = ta.value.length;
+      keepDraft();
     });
     quick.appendChild(qb);
   });
@@ -1169,7 +1174,7 @@ function buildNoteBox(stepId, existing) {
   var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
   branch.disabled = true; branch.title = 'Arrives with 0.13.0';
 
-  function afterSave() { state.noteBoxFor = null; renderReader(); queueVisibleBodies(); }
+  function afterSave() { state.noteBoxFor = null; state.noteDraft = null; renderReader(); queueVisibleBodies(); }
 
   /* Saves the box's current text (new or edited), waits for that write, then returns the saved
      note's id: noteSend needs a real noteId, so a just-typed note is kept first rather than
@@ -1219,7 +1224,10 @@ function buildNoteBox(stepId, existing) {
   box.appendChild(quick);
   box.appendChild(ta);
   box.appendChild(row2);
-  setTimeout(function () { ta.focus(); }, 0);
+  setTimeout(function () {
+    ta.focus();
+    if (draft && typeof draft.start === 'number') { ta.selectionStart = draft.start; ta.selectionEnd = draft.end; }
+  }, 0);
   return box;
 }
 
