@@ -122,7 +122,9 @@ async function serve(req, res) {
       .replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '"><meta name="steps-session" content="' + sessionId + '">')
       .replace('var POLL_MS = 1200;', 'var POLL_MS = 120;')
       .replace('var SEEN_DEBOUNCE_MS = 1500;', 'var SEEN_DEBOUNCE_MS = 200;')
-      .replace('var SEARCH_DEBOUNCE_MS = 150;', 'var SEARCH_DEBOUNCE_MS = 30;');
+      .replace('var SEARCH_DEBOUNCE_MS = 150;', 'var SEARCH_DEBOUNCE_MS = 30;')
+      // every notice the page showed, kept for the sampler: a timeout then says what the page saw
+      .replace('function flashNotice(text) {', 'function flashNotice(text) { (window.__notices = window.__notices || []).push(text);');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(html);
     return;
@@ -238,6 +240,7 @@ const SAMPLE = `(function () {
     openLinkCalls: window.__openLinkCalls || 0,
     lnkCount: q('a.lnk').length,
     workSums: q('.worksum').map(function (e) { return e.textContent; }),
+    notices: window.__notices || [],
     secLabels: q('.sec-head .lbl').map(function (e) { return e.textContent; }),
     rowTimes: q('.row .meta .time').map(function (e) { return e.textContent; }),
     facts: q('.facts').map(function (e) { return e.textContent; }),
