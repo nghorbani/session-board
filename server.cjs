@@ -131,14 +131,17 @@ async function handle(req, res) {
     // empty value, which the page then reads as "no session" rather than as attacker HTML.
     const rawSessionId = String(parsed.searchParams.get('session') || '');
     const sessionId = core.UUID_RE.test(rawSessionId) ? rawSessionId : '';
-    // matches the webview's CSP as far as a browser page can: no inline scripts (the page has
-    // none), fetch calls to this origin for the /api/steps round trip and the poll route.
+    // The same policy the webview gets: the page's one inline script runs through a nonce made
+    // for this response, nothing else may run, and fetch may only reach this origin (the
+    // /api/steps round trip and the poll route).
+    const nonce = crypto.randomBytes(18).toString('base64url');
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'; '
-      + 'style-src \'self\' \'unsafe-inline\'; script-src \'self\'; connect-src \'self\';">';
+      + 'style-src \'self\' \'unsafe-inline\'; script-src \'nonce-' + nonce + '\'; connect-src \'self\';">';
     const stepsMeta = '<meta charset="utf-8">' + csp
       + '<meta name="board-token" content="' + escapeAttr(TOKEN) + '">'
       + '<meta name="steps-session" content="' + escapeAttr(sessionId) + '">';
     html = html.replace('<meta charset="utf-8">', () => stepsMeta);
+    html = html.replace('<script>', () => '<script nonce="' + nonce + '">');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(html);
     return;

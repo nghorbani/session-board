@@ -129,6 +129,18 @@ test('GET /steps never injects markup from the session query, however it is craf
   }
 });
 
+test('GET /steps lets the page script run: the policy names a nonce and the script tag carries it', async () => {
+  const text = await (await fetch('http://127.0.0.1:' + port + '/steps?session=' + A)).text();
+  const m = /script-src 'nonce-([A-Za-z0-9_-]{16,})'/.exec(text);
+  assert.ok(m, 'the policy allows one nonce, not every inline script');
+  if (/<script/.test(text)) {
+    assert.ok(text.indexOf('<script nonce="' + m[1] + '">') !== -1, 'the page script carries that nonce');
+    assert.equal(/<script>/.test(text), false, 'no script tag is left without a nonce');
+  }
+  const again = await (await fetch('http://127.0.0.1:' + port + '/steps?session=' + A)).text();
+  assert.notEqual(/script-src 'nonce-([A-Za-z0-9_-]+)'/.exec(again)[1], m[1], 'a fresh nonce for every response');
+});
+
 test('a bad session id on /api/steps/poll is a 400', async () => {
   const r = await call('GET', '/api/steps/poll?session=not-a-uuid&after=0');
   assert.equal(r.status, 400);
