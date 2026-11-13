@@ -760,9 +760,31 @@ function buildSections(stepsArr, bodyFn) {
       }
     }
   }
-  const totalTimeMs = stepsArr.length ? durMs(stepsArr[0].at, stepsArr[stepsArr.length - 1].at) : 0;
+  // Working time: the sum over sections of the span from the owner's input (the section's
+  // opening step) to the last step inside that section, never the wall-clock gap between
+  // sections -- a session left open overnight must not read as hours of work. A section with
+  // no body steps of its own (its opener was the last thing that happened so far) contributes
+  // nothing.
+  function sectionStepIds(sec) {
+    const ids = sec.openerId ? [sec.openerId] : [];
+    for (const row of sec.body || []) {
+      if (row.stepId) ids.push(row.stepId);
+      if (row.items) ids.push(...row.items);
+    }
+    return ids;
+  }
+  let totalTimeMs = 0;
+  for (const sec of filtered) {
+    const ids = sectionStepIds(sec);
+    if (ids.length < 2) continue;
+    const first = byId.get(ids[0]);
+    const last = byId.get(ids[ids.length - 1]);
+    if (first && last) totalTimeMs += durMs(first.at, last.at);
+  }
+  const wallClockMs = stepsArr.length ? durMs(stepsArr[0].at, stepsArr[stepsArr.length - 1].at) : 0;
   const strip = {
     totalTimeMs,
+    wallClockMs,
     sections: filtered.length,
     decisions,
     filesChanged: filesChangedAll.size,

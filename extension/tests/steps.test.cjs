@@ -478,3 +478,25 @@ test('sections and the strip counts; a you step is never doubled', async () => {
   assert.ok(strip.totalTimeMs >= 0);
   assert.equal(strip.sections, sections.length);
 });
+
+test('total time is working time, not the wall-clock span: a session left open overnight does not read as hours', async () => {
+  const file = newFile();
+  const t0 = new Date(2026, 0, 1, 9, 0, 0);
+  const at = (mins) => new Date(t0.getTime() + mins * 60000).toISOString();
+  writeLines(file, [
+    // first section: 9:00 to 9:02, two minutes of real work
+    Object.assign(userLine(uuid(1), null, 'morning task'), { timestamp: at(0) }),
+    Object.assign(assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'on it' }]), { timestamp: at(2) }),
+    // left open overnight: next input is 18 hours later
+    Object.assign(userLine(uuid(3), uuid(2), 'next day task'), { timestamp: at(18 * 60) }),
+    Object.assign(assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'done' }]), { timestamp: at(18 * 60 + 3) }),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const { strip } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  // working time: ~2 minutes in the first section plus ~3 minutes in the second, nowhere near
+  // the 18-hour wall-clock span between the two inputs.
+  assert.ok(strip.totalTimeMs < 10 * 60 * 1000, 'the overnight gap must not be counted as working time: got ' + strip.totalTimeMs + 'ms');
+  assert.ok(strip.totalTimeMs >= 4 * 60 * 1000, 'the actual working spans should still be counted: got ' + strip.totalTimeMs + 'ms');
+  assert.ok(strip.wallClockMs >= 18 * 60 * 60000, 'the wall-clock span is kept too, for the tooltip');
+});
