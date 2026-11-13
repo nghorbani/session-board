@@ -191,6 +191,7 @@
   .notebox .quick button { font-size: 11px; color: var(--dim); }
   .saved-note { border-left: 3px solid var(--note); padding: 2px 0 2px 10px; margin-top: 8px; color: var(--note); white-space: pre-wrap; clear: both; overflow-wrap: anywhere; }
   .saved-note .off-path { display: block; color: var(--dim); font-style: italic; font-size: 11px; margin-top: 2px; }
+  .saved-note .sent-mark { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
 
   .allnotes-bar { display: none; align-items: center; gap: 8px; padding: 7px 14px; border-top: 1px solid var(--note); background: var(--panel); font-size: 12px; flex: 0 0 auto; }
   .allnotes-bar.show { display: flex; }
@@ -1066,6 +1067,13 @@ function buildSavedNote(stepId, note) {
     off.textContent = 'step not on the current path';
     div.appendChild(off);
   }
+  var sent = (note.sent || [])[note.sent ? note.sent.length - 1 : -1];
+  if (sent) {
+    var sentSpan = document.createElement('span');
+    sentSpan.className = 'sent-mark';
+    sentSpan.textContent = 'Sent ' + fmtClock(new Date(Number(sent.at) || 0).toISOString());
+    div.appendChild(sentSpan);
+  }
   return div;
 }
 
@@ -1096,29 +1104,39 @@ function buildNoteBox(stepId, existing) {
   var keep = document.createElement('button'); keep.type = 'button'; keep.textContent = 'Keep note';
   var send = document.createElement('button'); send.type = 'button'; send.className = 'primary';
   send.textContent = 'Send to session';
-  send.title = 'Sending arrives with the next step.';
+  send.title = 'Your click is the consent to send.';
   var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
   branch.disabled = true; branch.title = 'Arrives with 0.13.0';
 
   function afterSave() { state.noteBoxFor = null; renderReader(); queueVisibleBodies(); }
 
+  /* Saves the box's current text (new or edited), waits for that write, then returns the saved
+     note's id -- noteSend needs a real noteId, so a just-typed note is kept first rather than
+     sent by its (not yet existing) text alone. */
+  function saveThenGetNoteId(text) {
+    var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
+    return req.then(function (reply) {
+      if (reply && reply.ok && reply.note) { applyNoteLocally(reply.note); return reply.note.id; }
+      return null;
+    });
+  }
+
   keep.addEventListener('click', function () {
     var text = ta.value.trim();
     if (!text) return;
-    var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
-    req.then(function (reply) {
-      if (reply && reply.ok && reply.note) applyNoteLocally(reply.note);
-      afterSave();
-    });
+    saveThenGetNoteId(text).then(afterSave);
   });
   send.addEventListener('click', function () {
     var text = ta.value.trim();
     if (!text) return;
-    var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
-    req.then(function (reply) {
-      if (reply && reply.ok && reply.note) applyNoteLocally(reply.note);
-      flashNotice('Sending arrives with the next step.');
-      afterSave();
+    send.disabled = true;
+    saveThenGetNoteId(text).then(function (noteId) {
+      if (!noteId) { send.disabled = false; flashNotice('could not keep the note, so nothing was sent'); return; }
+      return call({ type: 'noteSend', noteId: noteId }).then(function (reply) {
+        if (reply && reply.message) flashNotice(reply.message);
+        if (reply && !reply.ok && reply.message === 'On the clipboard. Paste it into the session.' && reply.text) copyToClipboard(reply.text);
+        afterSave();
+      });
     });
   });
   row2.appendChild(keep);
@@ -1792,7 +1810,13 @@ document.getElementById('next').addEventListener('click', function () { moveHit(
 document.getElementById('prev').addEventListener('click', function () { moveHit(-1); });
 document.getElementById('notesJump').addEventListener('click', function () { jumpToNote(1); });
 document.getElementById('sendAllNotes').addEventListener('click', function () {
-  flashNotice('Sending arrives with the next step.');
+  var btn = document.getElementById('sendAllNotes');
+  btn.disabled = true;
+  call({ type: 'notesSendAll' }).then(function (reply) {
+    btn.disabled = false;
+    if (reply && reply.message) flashNotice(reply.message);
+    if (reply && !reply.ok && reply.message === 'On the clipboard. Paste it into the session.' && reply.text) copyToClipboard(reply.text);
+  });
 });
 document.getElementById('decisions').addEventListener('click', function () { toggleLens('decisions'); });
 document.getElementById('allTools').addEventListener('change', function (ev) { state.showAllTools = ev.target.checked; renderReader(); queueVisibleBodies(); });

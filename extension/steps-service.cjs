@@ -386,7 +386,10 @@ function createStepsService(deps) {
       try { notes.addSent(sessionId, noteId, 'steer'); } catch (_) { /* the reply still reports success to the page */ }
       pushNotesChanged(sessionId);
     }
-    return { type: 'noteSendResult', ok: !!(result && result.ok), sessionId, noteId, message: (result && result.message) || 'nothing happened' };
+    // text travels back even on a copy-only reply (ok: false from a transport that cannot reach
+    // a chat box): the browser page has no other way to learn the exact string it must put on
+    // its own clipboard, since deliver() built it, not the caller.
+    return { type: 'noteSendResult', ok: !!(result && result.ok), sessionId, noteId, text, message: (result && result.message) || 'nothing happened' };
   }
 
   async function handleNotesSendAll(msg) {
@@ -420,7 +423,7 @@ function createStepsService(deps) {
       for (const it of items) { try { notes.addSent(sessionId, it.noteId, 'steer'); } catch (_) { /* best effort per note */ } }
       pushNotesChanged(sessionId);
     }
-    return { type: 'notesSendAllResult', ok: !!(result && result.ok), sessionId, message: (result && result.message) || 'nothing happened' };
+    return { type: 'notesSendAllResult', ok: !!(result && result.ok), sessionId, text, message: (result && result.message) || 'nothing happened' };
   }
 
   // -- search ------------------------------------------------------------------------------

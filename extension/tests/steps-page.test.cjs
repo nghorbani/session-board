@@ -53,9 +53,13 @@ const fake = {
   bodies: (ids) => ids.map((id) => Object.assign({ stepId: id }, fake.body(id))),
   search: () => ({ stepIds: [], capped: false }),
   seen: () => ({ ok: true }),
+  // a scripted deliver outcome for noteSend/notesSendAll: { ok, message, text } the same shape
+  // steps-service answers with, so the page suite can drive both a successful hand-over and the
+  // browser's own copy-only reply without a real transport.
+  deliver: () => ({ ok: true, message: 'In the chat box and on the clipboard.' }),
   calls: [],
   pushes: [], // queued push messages the poll route drains in order
-  notes: new Map(), // noteId -> { id, stepId, at, text }
+  notes: new Map(), // noteId -> { id, stepId, at, text, sent: [] }
 };
 
 /* A minimal in-memory stand-in for notes.cjs, just enough for the page suite to drive a real
@@ -65,7 +69,7 @@ function noteList() { return [...fake.notes.values()].sort((a, b) => a.at - b.at
 function handleNoteMessage(msg) {
   if (msg.type === 'noteAdd') {
     const id = 'note-' + (++noteSeq);
-    const note = { id, stepId: msg.stepId, at: Date.now(), text: msg.text };
+    const note = { id, stepId: msg.stepId, at: Date.now(), text: msg.text, sent: [] };
     fake.notes.set(id, note);
     return { type: 'noteAddResult', ok: true, note };
   }
@@ -78,6 +82,22 @@ function handleNoteMessage(msg) {
   if (msg.type === 'noteDelete') {
     const removed = fake.notes.delete(msg.noteId);
     return { type: 'noteDeleteResult', ok: true, removed };
+  }
+  if (msg.type === 'noteSend') {
+    const note = fake.notes.get(msg.noteId);
+    if (!note) return { type: 'noteSendResult', ok: false, message: 'that note is gone' };
+    const d = fake.deliver();
+    const text = 'About your step at 00:00 ("x"): ' + note.text;
+    if (d.ok) note.sent = (note.sent || []).concat([{ kind: 'steer', at: Date.now() }]);
+    return { type: 'noteSendResult', ok: d.ok, noteId: note.id, text, message: d.message };
+  }
+  if (msg.type === 'notesSendAll') {
+    const list = noteList();
+    if (!list.length) return { type: 'notesSendAllResult', ok: false, message: 'no notes to send' };
+    const d = fake.deliver();
+    const text = list.map((n) => 'About your step at 00:00 ("x"): ' + n.text).join('\n\n');
+    if (d.ok) for (const n of list) n.sent = (n.sent || []).concat([{ kind: 'steer', at: Date.now() }]);
+    return { type: 'notesSendAllResult', ok: d.ok, text, message: d.message };
   }
   return null;
 }
@@ -128,7 +148,7 @@ async function serve(req, res) {
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return json(res, 200, { type: 'openTextResult', notAvailable: true });
-    if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete') {
+    if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete' || msg.type === 'noteSend' || msg.type === 'notesSendAll') {
       const reply = handleNoteMessage(msg);
       fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
       return json(res, 200, reply);
@@ -225,8 +245,12 @@ const SAMPLE = `(function () {
     noteBoxText: (function () { var t = document.querySelector('.notebox textarea'); return t ? t.value : null; })(),
     savedNoteText: (function () { var e = document.querySelector('.saved-note'); return e ? e.textContent : null; })(),
     savedNoteOffPath: !!document.querySelector('.saved-note .off-path'),
+    savedNoteSentText: (function () { var e = document.querySelector('.saved-note .sent-mark'); return e ? e.textContent : null; })(),
     noteMarkCount: q('.sec-entry .note-mark').length,
     allNotesBarShown: document.getElementById('allNotesBar').classList.contains('show'),
+    noticeText: (function () { var e = document.getElementById('indexnote'); return e && e.classList.contains('show') ? e.textContent : null; })(),
+    sendAllBusy: (function () { var b = document.getElementById('sendAllNotes'); return b ? b.disabled : null; })(),
+    sendButtonDisabled: (function () { var b = document.querySelector('.notebox .row2 button.primary'); return b ? b.disabled : null; })(),
     allNotesBarText: text('#allNotesN'),
     emptyStateText: text('.empty-state'),
   };
@@ -264,6 +288,7 @@ test.beforeEach(() => {
   fake.open = () => openReply();
   fake.body = (stepId) => ({ text: 'body of ' + stepId, truncated: false, size: 10 });
   fake.search = () => ({ stepIds: [], capped: false });
+  fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
   fake.notes.clear();
 });
 
@@ -720,6 +745,69 @@ test('page: a quick reply prefills the note text', opts, async () => {
   await page.click('.notebox .quick button'); // "Why this?"
   const s = await page.until((x) => x.noteBoxText, 'the quick reply to land in the box');
   assert.ok(s.noteBoxText.indexOf('Why this?') !== -1);
+  await page.close();
+});
+
+test('page: "Send to session" shows the reply line and "Sent HH:MM" under the note', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  await page.click('.row.k-you .add-note');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "why this approach?"; })()');
+  await page.click('.notebox .row2 button.primary'); // Send to session
+  const s = await page.until((x) => x.noticeText === 'In the chat box and on the clipboard.', 'the reply line to show');
+  const kept = await page.until((x) => x.savedNoteSentText, 'the Sent mark to show under the note');
+  assert.ok(kept.savedNoteSentText.indexOf('Sent ') === 0, kept.savedNoteSentText);
+  assert.equal(s.notedRows >= 1, true);
+  await page.close();
+});
+
+test('page: a copy-only reply from "Send to session" shows that line instead, with no Sent mark', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  fake.deliver = () => ({ ok: false, message: 'On the clipboard. Paste it into the session.' });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  await page.click('.row.k-you .add-note');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "a note"; })()');
+  await page.click('.notebox .row2 button.primary');
+  const s = await page.until((x) => x.noticeText === 'On the clipboard. Paste it into the session.', 'the copy-only line to show');
+  assert.equal(s.savedNoteSentText, null, 'not recorded as sent on a copy-only reply');
+  await page.close();
+});
+
+test('page: "Send all notes" sends every kept note in one call and shows the reply line', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('u2:0', 'you')],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'first message', 'u1:0', []),
+      section('you', 'second message', 'u2:0', []),
+    ],
+  });
+  fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'first paint');
+  for (const sid of ['u1:0', 'u2:0']) {
+    await page.eval('(function () { document.getElementById("step-' + sid + '").querySelector(".add-note").click(); })()');
+    await page.until((x) => x.noteBoxOpen, 'a note box to open for ' + sid);
+    await page.eval('(function () { document.querySelector(".notebox textarea").value = "note on ' + sid + '"; })()');
+    await page.click('.notebox .row2 button:first-child'); // Keep note
+    await page.until((x) => !x.noteBoxOpen, 'the box to close after keeping');
+  }
+  await page.until((x) => x.notesJumpLabel === 'Notes 2', 'both notes counted');
+  await page.click('#sendAllNotes');
+  const s = await page.until((x) => x.noticeText === 'In the chat box and on the clipboard.', 'the reply line after sending all');
+  assert.equal(fake.calls.filter((c) => c.type === 'notesSendAll').length, 1, 'one message for all notes');
+  void s;
   await page.close();
 });
 
