@@ -540,6 +540,24 @@ test('an update (the short text shown between tool calls) is a row of its own in
   assert.equal(sec.body[2].items.length, 2, 'the empty reasoning stays folded with the tool call after it');
 });
 
+test('a block of an unknown kind stays in the story as part of a Work line', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'look it up'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'server_tool_use', id: 's1', name: 'web_search', input: {} }]),
+    assistantLine(uuid(3), uuid(2), 'm2', [{ type: 'text', text: 'found it' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const other = idx.steps().find((x) => x.kind === 'other');
+  assert.equal(other.blockType, 'server_tool_use');
+  const { sections } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  const sec = sections.find((x) => x.heading.indexOf('look it up') !== -1);
+  assert.deepEqual(sec.body.map((r) => r.kind), ['work', 'text']);
+  assert.deepEqual(sec.body[0].items, [other.id]);
+  assert.equal(sec.toolCalls, 0, 'an unknown block is not counted as a tool call');
+});
+
 test('each section carries its tool call count and its changed files, for the facts line', async () => {
   const file = newFile();
   writeLines(file, [

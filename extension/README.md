@@ -3,7 +3,8 @@
 Your Claude Code sessions at a glance, across every VS Code window: who is waiting for you,
 who is working, how much context each has used, and how much of your usage limits is left.
 Click a row to jump to that session, ✕ to end it, and search every session on disk by title
-or content.
+or content. ≡ opens a session's steps: what it printed, asked and did, to read, search and
+comment on.
 
 ![Session Board in the sidebar, with example sessions](https://github.com/nghorbani/session-board/raw/HEAD/extension/media/board.png)
 
@@ -137,6 +138,55 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   **Session Board: Refresh Usage Limits**, **Session Board: Refresh**. Output panel channel
   **Session Board** logs each decision.
 
+## Steps
+
+The chat shows a session's latest text and replaces the lines it printed between tool calls.
+≡ on a row opens that session's story in an editor tab of its own, beside the chat, read from
+the session's transcript on disk. A running session is followed live; untick **Follow** to
+stay where you are while it grows.
+
+- **Sections in your words**: the story is cut where you said something (a message, an answer
+  to a question, a plan approval), and each section is headed by what you said. Under it come
+  Claude's texts, the short updates it showed between tool calls, questions, plans, and one
+  **Work** line per run of tool calls that says what was done ("Edited core.cjs, ran 2
+  commands"). **Details** opens the calls with their commands and results; the **Tool calls**
+  switch opens all of them. A section that did work ends in a line such as
+  `4m · 16 tool calls · 2 files changed`. The outline on the left lists the sections and
+  follows the scroll; in a narrow tab it folds into a drawer.
+- **A question shows as it was asked**: header, full text, every option with its description,
+  your choice marked, and your own words when you typed the answer.
+- **Formatted text, working links**: texts, updates, plans and subagent reports are rendered
+  as Markdown. A web link opens in the browser, a folder in Explorer, a file in the editor, a
+  Markdown file in the preview. Network and device paths are not opened (the path goes onto
+  the clipboard instead), and a path outside the session's folder, the workspace folders and
+  your home folder asks first. Nothing is ever run.
+- **The strip** on top: active time (the pauses between steps, each counted up to 10 minutes,
+  so a session left open overnight does not read as hours of work), sections, decisions, files
+  changed and notes. Three tiles are switches: **Decisions** reduces the story to what you
+  said and decided (your messages, the questions with your answers, the plans) and leaves out
+  the texts and Work lines between, **Files changed** lists the edited and created files per
+  section with clickable names, **Notes** keeps the sections that carry a note.
+- **Search** takes words (literal, case-insensitive) and looks in everything the story can
+  show: texts, commands and their results, questions with their options, subagent reports and
+  your notes. ↑ and ↓ move between the hits and open a folded Work line when the hit is
+  inside. Beyond 500 hits the count ends in a plus sign (`1 of 500+`).
+- **New since you last looked**: the board remembers, per session, the last step you had in
+  view and draws a line there the next time you open the tab.
+- **Notes**: **+ Note** on any step opens a box, with three quick starts ("Why this?", "This
+  is wrong:", "Go back to this"). **Keep note** stores the note on the step; it survives
+  restarts and is found by the search. **Send to session** keeps it and puts it into that
+  session's chat box, worded as `About your step at 14:02 ("<its first words>"): <your note>`,
+  for you to send with Enter; the text is on the clipboard too. **Send all notes** hands over
+  every kept note as one message, in the order of their steps. Notes live in
+  `%LOCALAPPDATA%\SessionBoard\notes`, one file per note, and go when the session's transcript
+  is gone.
+- **Subagents** show the task they were given and the report they sent back, as formatted
+  text. Their inner steps are not shown.
+
+What the story cannot show: Claude Code stores most reasoning as an empty block, so the Work
+line says "Thought for 18 s" and no more. The short updates between tool calls are stored in
+a reworded form, not word for word as the chat showed them.
+
 ## Context marks
 
 The bar appears when `autoCompactWindow` is set in `~/.claude/settings.json`; it turns amber
@@ -174,3 +224,13 @@ logged in", and a Claude Code release without that command shows no account.
 - A cold content search over a multi-GB transcript corpus is disk-bound and can take seconds.
 - The usage numbers come from a CLI reply that Claude Code marks as experimental; if a
   release changes its shape, the strip says so instead of showing wrong numbers.
+- Steps reads the transcript's current line of history: a branch you abandoned by editing an
+  earlier message or retrying is not shown. A transcript line the board cannot read is
+  skipped and counted in the tab's header; a block of a kind it does not know is named in
+  its Work line.
+- **Send to session** fills the chat box from Claude Code 2.1.322 on. With an older Claude
+  Code, a session that runs outside VS Code, or a session owned by a window whose board is
+  older than 0.12.0, the text is on the clipboard and the session opens. In the browser page
+  it is always the clipboard.
+- A search in Steps finds words inside one stored piece of text. A phrase the page puts
+  together from two pieces (a tool's name and its path) is not found across the join.

@@ -727,7 +727,9 @@ function createStepIndex(file, deps) {
    opening step (never duplicated as a body row).
 ======================================================================= */
 
-const QUIET_KINDS = new Set(['tool', 'reasoning', 'subagent']);
+// 'other' is a block or line of a kind this reader does not know: it stays in the story,
+// inside a Work line that names the kind, so a changed transcript format shows up on the page
+const QUIET_KINDS = new Set(['tool', 'reasoning', 'subagent', 'other']);
 
 function headingForYou(step, bodyFn) {
   // the preview is the start of the same text and longer than any heading, so it serves

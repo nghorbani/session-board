@@ -517,6 +517,43 @@ test('page: the Decisions switch narrows the outline to you/question/plan sectio
   await page.close();
 });
 
+test('page: under Decisions a section shows what you said and decided (the message, questions, plans), not the texts and Work lines between', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('x1:0', 'text'), step('t1:0', 'tool', { title: 'Bash' }), step('p1:0', 'plan'), step('x2:0', 'text')],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'make a plan', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }, { kind: 'work', items: ['t1:0'] }, { kind: 'plan', stepId: 'p1:0' }, { kind: 'text', stepId: 'x2:0' }],
+        { activeTimeMs: 120000, toolCalls: 1, filesChanged: 0 }),
+    ],
+    strip: { activeTimeMs: 120000, sections: 2, decisions: 1, filesChanged: 0 },
+  });
+  const page = await openPage(A);
+  const all = await page.until((x) => x.workSums.length === 1 && x.facts.length === 1, 'the whole story first');
+  assert.deepEqual(all.rowKinds.map((k) => k.replace(/^row /, '').split(' ')[0]), ['k-you', 'k-claude', 'k-plan', 'k-claude'], 'message, text, plan, text (the Work line is counted by workSums)');
+  await page.click('#decisions');
+  const s = await page.until((x) => x.decisionsOn === true && x.workSums.length === 0, 'the decisions view');
+  assert.deepEqual(s.rowKinds.map((k) => k.replace(/^row /, '').split(' ')[0]), ['k-you', 'k-plan'], 'the message and the plan stay');
+  assert.equal(s.facts.length, 0, 'no facts line in the reduced view');
+  await page.click('#decisions');
+  await page.until((x) => x.decisionsOn === false && x.workSums.length === 1, 'the whole story again');
+  await page.close();
+});
+
+test('page: a block of a kind the reader does not know is named in its Work line, never dropped', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('o1:0', 'other', { blockType: 'server_tool_use' }), step('o1:1', 'other', { blockType: 'server_tool_use' }), step('t1:0', 'tool', { title: 'Read' })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'look it up', 'u1:0', [{ kind: 'work', items: ['o1:0', 'o1:1', 't1:0'] }]),
+    ],
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.workSums.length === 1, 'the Work line');
+  assert.ok(/read 1 file/i.test(s.workSums[0]), s.workSums[0]);
+  assert.ok(s.workSums[0].indexOf('2 blocks of a kind this board does not know (server_tool_use)') !== -1, s.workSums[0]);
+  await page.close();
+});
+
 test('page: the Files changed tile shows clickable names that send openLink', opts, async () => {
   fake.open = () => openReply({
     steps: [step('u1:0', 'you'), step('t1:0', 'tool', { title: 'Edit' })],

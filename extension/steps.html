@@ -1053,8 +1053,14 @@ function buildSectionNode(sec, i, secs) {
     leadHead.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
     wrap.appendChild(leadHead);
   }
-  (sec.body || []).forEach(function (row) { wrap.appendChild(buildBodyRow(row, sec)); });
-  var facts = sectionFacts(sec);
+  // Decisions reduces a section to what you said and decided: its opening message or answer,
+  // the questions and the plans. Texts, Work lines and the facts line are left out.
+  var reduced = state.lens === 'decisions';
+  (sec.body || []).forEach(function (row) {
+    if (reduced && row.kind !== 'question' && row.kind !== 'plan') return;
+    wrap.appendChild(buildBodyRow(row, sec));
+  });
+  var facts = reduced ? '' : sectionFacts(sec);
   if (facts) { var fl = document.createElement('div'); fl.className = 'facts'; fl.textContent = facts; wrap.appendChild(fl); }
   return wrap;
 }
@@ -1487,8 +1493,8 @@ function fillQuestionBody(el, stepId) {
 function fileBaseName(p) { return String(p || '').split(/[\\/]/).pop(); }
 
 /* A Work line says in words what happened: "Edited 1 file, ran 2 commands", not a bare tool-call
-   tally. A single command (Bash/PowerShell) is named by its own description rather than counted,
-   since "ran a command" says nothing a reader can act on. An unnamed tool kind is named by its
+   tally. A single command (Bash/PowerShell) carries its own description, since a bare
+   "ran a command" says nothing a reader can act on. An unnamed tool kind is named by its
    own tool name rather than folded into a silent "N other steps" count, so "Used ToolSearch"
    says what happened even for a tool this summary has no dedicated phrasing for. Bodies not yet
    loaded fall back to the compact preview, so the line is never empty while a batch is still in
@@ -1496,11 +1502,13 @@ function fileBaseName(p) { return String(p || '').split(/[\\/]/).pop(); }
    "Thought for 12 s", or "Thought" when no duration was stored, rather than a bare step count. */
 function summarizeWork(items) {
   var edited = [], created = [], searches = 0, reads = 0, bash = [], subs = [], skills = [], namedOther = [], reasoningMs = 0, reasoningCount = 0;
+  var unknown = 0, unknownKinds = [];
   items.forEach(function (id) {
     var c = state.compactById && state.compactById[id];
     if (!c) return;
     if (c.kind === 'subagent') { subs.push((state.bodies[id] && state.bodies[id].description) || c.preview || ''); return; }
     if (c.kind === 'reasoning') { reasoningCount++; reasoningMs += Number(c.durationMs) || 0; return; }
+    if (c.kind === 'other') { unknown++; if (c.blockType && unknownKinds.indexOf(c.blockType) === -1) unknownKinds.push(c.blockType); return; }
     if (c.kind !== 'tool') return;
     var title = c.title || 'tool';
     var b = state.bodies[id];
@@ -1524,6 +1532,7 @@ function summarizeWork(items) {
   if (skills.length) parts.push('used ' + skills.slice(0, 2).join(', '));
   if (subs.length) parts.push('sent out ' + subs.length + (subs.length === 1 ? ' subagent' : ' subagents') + (subs[0] ? ' (' + subs.slice(0, 2).join('; ') + ')' : ''));
   if (namedOther.length) parts.push('used ' + namedOther.join(', '));
+  if (unknown) parts.push(unknown + (unknown === 1 ? ' block' : ' blocks') + ' of a kind this board does not know' + (unknownKinds.length ? ' (' + unknownKinds.join(', ') + ')' : ''));
   if (!parts.length && reasoningCount) {
     return reasoningMs > 0 ? 'Thought for ' + fmtShortDuration(reasoningMs) : 'Thought';
   }
