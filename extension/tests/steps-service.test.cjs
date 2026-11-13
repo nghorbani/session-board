@@ -101,23 +101,108 @@ test('open on a small file replies with title, sections, strip, steps, generatio
   assert.equal(reply.seenStepId, null);
 });
 
-test('open on a multi-chunk file pushes stepsProgress while indexing, then stops', async () => {
+test('open on a file bigger than the tail replies early with indexing: true, then finishes in the background', async () => {
   const file = newFile();
   const objs = [];
   for (let i = 1; i <= 40; i++) {
     objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
   }
   writeLines(file, objs);
+  // a tail far smaller than the file: open() must reply once the tail's own share of the file
+  // is covered, long before the whole backward pass (which keeps running after the reply).
   const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096 });
   deps.__files.set(A, file);
   const svc = svcMod.createStepsService(deps);
   const pushes = [];
-  svc.subscribe(A, (msg) => pushes.push(msg));
+  let doneSeen;
+  const donePromise = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => {
+    pushes.push(msg);
+    if (msg.type === 'stepsProgress' && msg.done) doneSeen();
+  });
   const reply = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
   assert.equal(reply.ok, true);
+  assert.equal(reply.indexing, true, 'the backward pass has not covered the whole file yet');
+  assert.ok(reply.steps.length < 40, 'only the tail is in at first paint');
+  await donePromise;   // the background pass keeps running after the reply and eventually finishes
   assert.ok(pushes.some((m) => m.type === 'stepsProgress' && m.sessionId === A));
   const last = pushes.filter((m) => m.type === 'stepsProgress').pop();
   assert.equal(last.done, true);
+  assert.equal(last.sections.length > 0, true, 'the completion push carries the full section list');
+});
+
+test('provisional pushes while indexing carry the growing section list under a stable key per section', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 40; i++) {
+    objs.push(i % 4 === 1 ? userLine(uuid(i), i === 1 ? null : uuid(i - 1), 'turn ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
+  }
+  writeLines(file, objs);
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096 });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  let doneSeen;
+  const donePromise = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => {
+    pushes.push(msg);
+    if (msg.type === 'stepsProgress' && msg.done) doneSeen();
+  });
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  await donePromise;
+  const progress = pushes.filter((m) => m.type === 'stepsProgress');
+  assert.ok(progress.length > 2, 'more than the first paint and the completion push');
+  // every section the earliest provisional push already named keeps answering to the same
+  // section-opening step id (its stable key) in every later push, right up to completion: the
+  // page can merge pushes onto what it already drew without losing track of a section it has
+  // already rendered, however many more sections arrive behind it as indexing continues.
+  const firstKeys = progress[0].sections.map((s) => s.openerId).filter(Boolean);
+  const lastKeys = progress[progress.length - 1].sections.map((s) => s.openerId).filter(Boolean);
+  for (const k of firstKeys) assert.ok(lastKeys.includes(k), 'a section seen early is still present, under the same key, once indexing finishes');
+  assert.ok(progress[progress.length - 1].sections.length >= progress[0].sections.length, 'sections only grow as indexing proceeds backward');
+});
+
+test('bodies: one round trip loads the texts of several steps at once', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'first message'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'first reply' }]),
+    userLine(uuid(3), uuid(2), 'second message'),
+  ]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const ids = opened.steps.map((s) => s.id);
+  const res = await svc.handle({ type: 'bodies', sessionId: A, stepIds: ids, generation: opened.generation });
+  assert.equal(res.type, 'bodiesResult');
+  assert.equal(res.items.length, 3);
+  assert.deepEqual(res.items.map((it) => it.stepId), ids);
+  assert.equal(res.items[0].text, 'first message');
+  assert.equal(res.items[1].text, 'first reply');
+  assert.equal(res.items[2].text, 'second message');
+});
+
+test('bodies: a step from a generation that no longer exists answers stale, not a throw, and does not drop the rest of the batch', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const ids = opened.steps.map((s) => s.id);
+  const res = await svc.handle({ type: 'bodies', sessionId: A, stepIds: ids, generation: opened.generation + 1 });
+  assert.equal(res.items.length, 2);
+  assert.ok(res.items.every((it) => it.stale === true));
+});
+
+test('bodies on a session with no open index answers stale for every requested step', async () => {
+  const deps = makeDeps();
+  const svc = svcMod.createStepsService(deps);
+  const res = await svc.handle({ type: 'bodies', sessionId: B, stepIds: ['x:0', 'y:0'], generation: 0 });
+  assert.equal(res.type, 'bodiesResult');
+  assert.equal(res.items.length, 2);
+  assert.ok(res.items.every((it) => it.stale === true));
 });
 
 test('body returns the index body for a step, stale when generation has moved on', async () => {

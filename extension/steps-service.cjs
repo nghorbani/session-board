@@ -69,34 +69,80 @@ function createStepsService(deps) {
 
   function errorMessage(e) { return String((e && e.message) || e || 'unknown error'); }
 
-  /* Create or reuse the session's state. A subscriber may register before "open" runs (the
-     transport wires up its push listener first); that leaves a slot with no index yet, which
-     this fills in rather than replacing, so the earlier subscriber is never dropped. Starting
-     the index is async; callers await ensureSession before reading state.index.steps() so
-     "open" never races the first paint. */
-  async function ensureSession(sessionId) {
+  /* Create or reuse the session's state and return as soon as the index's first pass over the
+     file's tail (its newest steps, `tailBytes` from the end, steps.cjs's own default 2 MB) is
+     in, never waiting for the whole backward pass over a huge transcript. A subscriber may
+     register before "open" runs (the transport wires up its push listener first); that leaves
+     a slot with no index yet, which this fills in rather than replacing, so the earlier
+     subscriber is never dropped.
+     idx.open() walks backward one tree line at a time and calls its progress callback after
+     each one, so on a file at or under `tailBytes` (the ordinary case until a session gets
+     large) the "tail" is the whole file and every line fires that callback; resolving on the
+     first one would mean indexing almost nothing before replying. Instead this tracks the
+     fraction of the file covered so far and takes first paint once it reaches the tail's own
+     share of the file (1.0 for a file no bigger than the tail, which then finishes indexing in
+     full before this resolves) or once indexing completes outright, whichever comes first.
+     idx.open()'s own promise keeps running after first paint: further backward progress lands
+     in the background, each step pushed to subscribers as a provisional update with the
+     sections and strip built so far, and the index is marked "still indexing" for this session
+     until that promise settles, which startFollow checks so a poll never races the backward
+     pass for the same bytes. */
+  function ensureSession(sessionId) {
     let s = sessions.get(sessionId);
-    if (s && s.index) return s;
+    if (s && s.index) return Promise.resolve(s);
     const file = resolveTranscript(sessionId);
-    if (!file) return null;
+    if (!file) return Promise.resolve(null);
     const idx = createStepIndex(file, { fs, chunkBytes, tailBytes });
     if (s) { s.index = idx; s.file = file; } else {
       s = { index: idx, file, subscribers: new Set(), timer: null, searchRun: null };
       sessions.set(sessionId, s);
     }
-    let sawProgress = false;
-    await idx.open((frac) => {
-      sawProgress = true;
-      push(sessionId, { type: 'stepsProgress', sessionId, fraction: frac, done: false });
+    s.indexing = true;
+    const sameSlot = () => sessions.get(sessionId) === s;
+    let totalSize = 0;
+    try { totalSize = fs.statSync(file).size; } catch (_) { /* open() will find the same miss */ }
+    const tailFraction = totalSize > 0 ? Math.min(1, (tailBytes || 2 * 1024 * 1024) / totalSize) : 1;
+    return new Promise((resolveFirstPaint) => {
+      let firstPaintSeen = false;
+      const takeFirstPaint = () => { if (!firstPaintSeen) { firstPaintSeen = true; resolveFirstPaint(s); } };
+      // indexingDone only turns false, and startFollow only starts polling, once this settles:
+      // idx.poll() reads forward from the index's own sizeSeen, which open() does not set until
+      // its whole backward pass is through, so a poll that ran while it was still in flight
+      // would re-read bytes the backward pass had not accounted for yet and could ingest lines
+      // twice or miss the point where the two passes should meet.
+      s.indexingDone = idx.open((frac) => {
+        // frac reaching 1 here means the backward pass is about to settle on its own very next
+        // microtask; that settling (below) is what flips s.indexing to false, so first paint is
+        // never taken on this exact tick, only strictly before it, or indexing has not
+        // finished and a caller reading s.indexing right after first paint would see stale
+        // (true) state for a file that is in fact already fully indexed.
+        if (frac >= tailFraction && frac < 1) takeFirstPaint();
+        if (sameSlot()) {
+          const { sections, strip } = buildSections(idx.steps(), idx.body);
+          push(sessionId, { type: 'stepsProgress', sessionId, fraction: frac, done: false, sections, strip });
+        }
+      }).then(() => {
+        takeFirstPaint();   // settling is always a cue too, however small the file or short the pass
+        if (sameSlot()) {
+          s.indexing = false;
+          const { sections, strip } = buildSections(idx.steps(), idx.body);
+          push(sessionId, { type: 'stepsProgress', sessionId, fraction: 1, done: true, sections, strip });
+        }
+      }, (e) => {
+        takeFirstPaint();
+        if (sameSlot()) {
+          s.indexing = false;
+          push(sessionId, { type: 'stepsProgress', sessionId, fraction: 1, done: true, error: errorMessage(e) });
+        }
+      });
     });
-    if (sawProgress) push(sessionId, { type: 'stepsProgress', sessionId, fraction: 1, done: true });
-    return s;
   }
 
   function startFollow(sessionId, s) {
     if (s.timer != null) return;
     s.timer = setIntervalFn(async () => {
       try {
+        if (s.indexing) return;   // the backward pass still owns sizeSeen; wait for it to finish once
         const res = await s.index.poll();
         if (!fs.existsSync(s.file)) {
           push(sessionId, { type: 'stepsChanged', sessionId, error: 'transcript moved or removed' });
@@ -159,7 +205,10 @@ function createStepsService(deps) {
       steps: compactSteps(stepsArr),
       counts: s.index.counts(),
       generation: s.index.generation(),
-      indexing: false, // open() always finishes the backward pass before replying; progress already arrived as pushes
+      // true while the backward pass over the rest of the file still runs in the background;
+      // the tail alone (this reply's sections) is already in. Earlier sections and the strip
+      // are provisional until a stepsProgress push with done:true lands.
+      indexing: Boolean(s.indexing),
       seenStepId: readSeen(sessionId),
     });
   }
@@ -174,6 +223,24 @@ function createStepsService(deps) {
     const held = msg.generation !== undefined ? { id: msg.stepId, generation: msg.generation } : msg.stepId;
     const b = s.index.body(held);
     return Object.assign({ type: 'bodyResult', sessionId, stepId: msg.stepId }, b);
+  }
+
+  /* bodies: one round trip for every step the page wants to show text for right now (the
+     sections near the viewport), instead of one body message per step. Each entry carries its
+     own stepId/generation pair the same way a single body request does, and a step this
+     session's index no longer holds (closed, re-indexed) answers { stale: true } like body()
+     does, never a thrown error that would drop the rest of the batch. */
+  async function handleBodies(msg) {
+    const sessionId = String(msg.sessionId || '');
+    const s = sessions.get(sessionId);
+    const stepIds = Array.isArray(msg.stepIds) ? msg.stepIds : [];
+    const generation = msg.generation;
+    const items = stepIds.map((stepId) => {
+      if (!s || !s.index) return Object.assign({ stepId, stale: true });
+      const held = generation !== undefined ? { id: stepId, generation } : stepId;
+      return Object.assign({ stepId }, s.index.body(held));
+    });
+    return { type: 'bodiesResult', sessionId, generation, items };
   }
 
   async function handleSeen(msg) {
@@ -343,6 +410,7 @@ function createStepsService(deps) {
     switch (msg.type) {
       case 'open': return handleOpen(msg);
       case 'body': return handleBody(msg);
+      case 'bodies': return handleBodies(msg);
       case 'search': return handleSearch(msg);
       case 'cancelSearch': return handleCancelSearch(msg);
       case 'seen': return handleSeen(msg);

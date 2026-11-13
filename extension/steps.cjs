@@ -361,10 +361,14 @@ function createStepIndex(file, deps) {
 
     // First paint: the last `tailBytes` read as one step, no yield before it, so the caller has
     // the newest steps right away. The tail read's own partial leading line is simply deferred
-    // to the first backward chunk below, the same way every later chunk defers its own.
+    // to the first backward chunk below, the same way every later chunk defers its own. The
+    // path is rebuilt right after this first step too (not only once the whole file is in),
+    // so a caller that stops awaiting at the first onProgress call already has a usable,
+    // if incomplete, path to show.
     let rightBoundary = totalSize;
     if (totalSize > tailBytes) {
       rightBoundary = readBackwardStep(totalSize);
+      recomputePath();
       if (onProgress) onProgress((totalSize - rightBoundary) / totalSize);
     }
 
@@ -372,6 +376,7 @@ function createStepIndex(file, deps) {
     // until the start of the file.
     while (rightBoundary > 0) {
       rightBoundary = readBackwardStep(rightBoundary);
+      recomputePath();
       if (onProgress) onProgress((totalSize - rightBoundary) / totalSize);
       if (rightBoundary > 0) await yieldTurn();
     }
