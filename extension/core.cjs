@@ -423,9 +423,9 @@ const HEARTBEAT_KEEP_MS = 24 * 60 * 60 * 1000;   // an older record belongs to a
 /**
  * One record per host and extension id; `name` is the window's workspace name, so other boards
  * can label its section; `focused` says whether that VS Code window has the OS focus, so the
- * other boards leave a notification to it.
+ * other boards leave a notification to it; `root` is its first workspace folder (endedSessions).
  */
-function writeHeartbeat(exthostPid, extensionId, name, focused, version) {
+function writeHeartbeat(exthostPid, extensionId, name, focused, version, root) {
   const id = EXTENSION_ID_RE.test(String(extensionId || '')) ? extensionId : EXTENSION_ID;
   try {
     fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });
@@ -435,6 +435,7 @@ function writeHeartbeat(exthostPid, extensionId, name, focused, version) {
     if (typeof name === 'string' && name.trim()) rec.name = name.trim().slice(0, 200);
     if (typeof focused === 'boolean') rec.focused = focused;
     if (typeof version === 'string' && /^\d+\.\d+\.\d+/.test(version)) rec.version = version;
+    if (typeof root === 'string' && root.trim()) rec.root = root.trim().slice(0, 1000);   // the window's first workspace folder: its ended sessions
     fs.writeFileSync(tmp, JSON.stringify(rec));
     fs.renameSync(tmp, target);
   } catch (_) { /* best effort */ }
@@ -506,6 +507,153 @@ function heartbeatNames() {
     seenAt.set(pid, Number(rec.at));
     out.set(pid, rec.name);
   }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------
+// Ended sessions per window: the list Claude Code's sidebar shows
+// ---------------------------------------------------------------------------------------
+
+/*
+ * Claude Code lists, per window, the sessions of its project root (the first workspace folder)
+ * and of that repository's git worktrees: every top-level <id>.jsonl in their folders under
+ * ~/.claude/projects that is not in its archive, running or not. Each board writes its root into
+ * its heartbeat; endedSessions() turns every fresh heartbeat into that folder set and returns the
+ * transcripts there that are not running and not archived (in Claude Code or on the board), each
+ * with the window it belongs to:
+ *
+ *   heartbeat { root } ──▶ worktreesOf(root) (git, background, 60 s) ──▶ folder names
+ *   transcriptsByFolder() (one directory walk per 60 s) ──▶ candidates per folder
+ *   drop: running, Claude-archived, board-archived, no user message ──▶ rows, newest first
+ *
+ * A session two windows would list (a worktree open in a window of its own) goes to the window
+ * whose root is its folder, else the window of the repository's main folder, else the lower
+ * window id. Until git has answered for a root, its window lists the root folder alone.
+ */
+const WORKTREE_TTL_MS = 60000;
+const worktreeCache = new Map();   // root -> { at, roots: [paths] | null, running }
+
+/** The folder name Claude Code uses under ~/.claude/projects: every character outside [A-Za-z0-9] becomes "-". */
+function projectFolderName(p) { return String(p || '').replace(/[^A-Za-z0-9]/g, '-'); }
+function folderKey(name) { return IS_WINDOWS ? String(name).toLowerCase() : String(name); }
+
+/** The worktree paths of the repository at `root` (main first), or null until git has answered; refreshed in the background. */
+function worktreesOf(root) {
+  if (process.env.SB_WORKTREES) {   // tests: { root: [paths] }
+    try { const m = JSON.parse(process.env.SB_WORKTREES); return Array.isArray(m[root]) ? m[root] : null; } catch (_) { return null; }
+  }
+  let c = worktreeCache.get(root);
+  if (!c) { c = { at: 0, roots: null, running: false }; worktreeCache.set(root, c); }
+  if (!c.running && Date.now() - c.at > WORKTREE_TTL_MS) {
+    c.running = true;
+    execFile('git', ['-C', root, 'worktree', 'list', '--porcelain', '-z'], {
+      timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024, env: strippedEnv(),
+    }, (err, stdout) => {
+      c.running = false;
+      c.at = Date.now();
+      if (err) { if (!c.roots) c.roots = []; return; }   // not a repository, or git missing: the root alone
+      const NUL = String.fromCharCode(0);
+      c.roots = String(stdout || '').split(NUL).filter((l) => l.startsWith('worktree ')).map((l) => l.slice('worktree '.length));
+    });
+  }
+  return c.roots;
+}
+
+let folderCache = { at: 0, map: new Map() };
+
+/** The live root's transcripts grouped by folder key, rebuilt at most once per INDEX_TTL_MS. */
+function transcriptsByFolder() {
+  if (Date.now() - folderCache.at < INDEX_TTL_MS) return folderCache.map;
+  const liveRoot = transcriptRoots()[0];
+  const map = new Map();
+  for (const f of listTranscripts()) {
+    if (liveRoot && !isInside(f.path, liveRoot)) continue;   // stowed transcripts are board-archived
+    const key = folderKey(path.basename(path.dirname(f.path)));
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(f);
+  }
+  folderCache = { at: Date.now(), map };
+  return map;
+}
+
+const headCache = new Map();   // file -> { key, cwd, hasUser }
+
+/** The session's cwd and whether it has a user message, from the first 64 KB; cached until the file changes. */
+function headFacts(file, size, mtime) {
+  const key = size + ':' + mtime;
+  const hit = headCache.get(file);
+  if (hit && hit.key === key) return hit;
+  let text = '';
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(Number(size) || 0, 64 * 1024));
+      const n = buf.length ? fs.readSync(fd, buf, 0, buf.length, 0) : 0;
+      text = buf.toString('utf8', 0, n);
+    } finally { fs.closeSync(fd); }
+  } catch (_) { /* unreadable: no prompt, no cwd */ }
+  let cwd = null;
+  const at = text.indexOf('"cwd":"');
+  if (at !== -1) {
+    const end = text.indexOf('"', at + 7);
+    if (end !== -1) { try { cwd = JSON.parse(text.slice(at + 6, end + 1)); } catch (_) { cwd = null; } }
+  }
+  const rec = { key, cwd, hasUser: text.indexOf('"type":"user"') !== -1 };
+  headCache.set(file, rec);
+  return rec;
+}
+
+/** The ended, unarchived sessions of every window with a fresh board heartbeat that names its root. */
+function endedSessions(liveIds, claudeIds, archivedIds) {
+  const windows = [];
+  const seen = new Set();
+  for (const { rec } of readHeartbeats()) {
+    if (!rec || typeof rec.root !== 'string' || !rec.root) continue;
+    if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;
+    const windowId = windowIdForExthost(Number(rec.pid));
+    if (!windowId || seen.has(windowId)) continue;
+    seen.add(windowId);
+    const roots = worktreesOf(rec.root) || [];
+    const rootKey = folderKey(projectFolderName(rec.root));
+    const mainKey = roots.length ? folderKey(projectFolderName(roots[0])) : rootKey;
+    const keys = new Set([rootKey].concat(roots.map((r) => folderKey(projectFolderName(r)))));
+    const name = typeof rec.name === 'string' && rec.name && !/^Untitled\b/.test(rec.name) ? rec.name : path.basename(rec.root);
+    windows.push({ windowId, exthostPid: Number(rec.pid), label: name, rootKey, mainKey, keys });
+  }
+  if (!windows.length) return [];
+  windows.sort((a, b) => a.windowId - b.windowId);
+  const owner = (key) => windows.find((w) => w.rootKey === key)
+    || windows.find((w) => w.keys.has(key) && w.rootKey === w.mainKey)
+    || windows.find((w) => w.keys.has(key));
+  const folders = transcriptsByFolder();
+  const keys = new Set();
+  for (const w of windows) for (const k of w.keys) keys.add(k);
+  const best = new Map();   // sessionId -> { f, w }; one id in two folders: the newest file
+  for (const key of keys) {
+    const w = owner(key);
+    for (const f of folders.get(key) || []) {
+      const id = path.basename(f.path, '.jsonl');
+      if (!UUID_RE.test(id) || liveIds.has(id) || claudeIds.has(id) || archivedIds.has(id)) continue;
+      const prev = best.get(id);
+      if (!prev || f.mtime > prev.f.mtime) best.set(id, { f, w });
+    }
+  }
+  const now = Date.now();
+  const out = [];
+  for (const [id, { f, w }] of best) {
+    const head = headFacts(f.path, f.size, f.mtime);
+    const facts = transcriptFacts(id, f.path);
+    if (!head.hasUser && !facts.title && !facts.customTitle && !facts.lastPrompt) continue;
+    out.push({
+      sessionId: id, status: 'ended', live: false,
+      window: { id: w.windowId, exthostPid: w.exthostPid, label: w.label },
+      title: facts.customTitle || facts.title || null, renamedTitle: facts.customTitle || null, generatedTitle: facts.title || null,
+      lastPrompt: facts.lastPrompt, cwd: head.cwd || '', transcriptPath: f.path, path: f.path,
+      folder: path.basename(path.dirname(f.path)), ageMinutes: Math.max(0, Math.round((now - f.mtime) / 60000)),
+      hasTranscript: true, archived: false,
+    });
+  }
+  out.sort((a, b) => a.ageMinutes - b.ageMinutes);
   return out;
 }
 
@@ -798,6 +946,22 @@ async function copyMove(from, to) {
  * session whose file is not being written moves: { moved: true, from, to } or
  * { moved: false[, moveError] } (no transcript at all is not an error). Never throws.
  */
+/**
+ * ⤓ on an ended row: the board's archive marker (it is what takes the row off the board), then
+ * the transcript move ⤓ does after ending a running session. A session running again is refused.
+ * { ok: true, moved, moveError? } or { ok: false, code, message }; a second archive is a no-op.
+ */
+async function archivePast(sessionId) {
+  sessionId = String(sessionId || '');
+  if (!UUID_RE.test(sessionId)) return { ok: false, code: 'invalid', message: 'not a session id' };
+  if (registryRecords().some((r) => r.sessionId === sessionId && pidAlive(r.pid))) {
+    return { ok: false, code: 'running', message: 'the session is running; end it first' };
+  }
+  try { archiveSession(sessionId); } catch (e) { return { ok: false, code: 'failed', message: String((e && e.message) || e) }; }
+  const stow = await stowTranscript(sessionId);
+  return Object.assign({ ok: true, moved: Boolean(stow && stow.moved) }, stow && stow.moveError ? { moveError: stow.moveError } : {});
+}
+
 async function stowTranscript(sessionId, fsx) {
   try {
     const found = liveTranscripts(sessionId);
@@ -1105,6 +1269,30 @@ function setSortMode(mode) {
   fs.writeFileSync(tmp, JSON.stringify({ mode, at: Date.now() }));
   fs.renameSync(tmp, SORT_FILE);   // another window never reads a half file
   return mode;
+}
+
+/*
+ * The header's "all | running" switch: all shows the ended, unarchived sessions of each window
+ * under its running ones (Claude Code's list); running hides them. Board-wide like the order,
+ * in DATA_DIR/show.json (tmp then rename); a missing or unreadable file means all.
+ */
+const SHOW_FILE = path.join(DATA_DIR, 'show.json');
+const SHOW_MODES = ['all', 'running'];
+
+function readShowMode() {
+  try {
+    const rec = JSON.parse(fs.readFileSync(SHOW_FILE, 'utf8'));
+    return rec && rec.show === 'running' ? 'running' : 'all';
+  } catch (_) { return 'all'; }
+}
+
+function setShowMode(show) {
+  if (!SHOW_MODES.includes(show)) throw new Error('unknown show mode: ' + String(show));
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = SHOW_FILE + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify({ show, at: Date.now() }));
+  fs.renameSync(tmp, SHOW_FILE);
+  return show;
 }
 
 /** The rank of an order record as the page reads it: a finite number, else null (unranked). */
@@ -1815,6 +2003,7 @@ async function snapshot() {
   const muted = readMuted();
   const order = readOrder();
   const sortMode = readSortMode();
+  const showMode = readShowMode();
   const now = Date.now();
   const liveIds = new Set(rows.map((r) => r.sessionId));
   forgetStatuses(liveIds);
@@ -1889,7 +2078,8 @@ async function snapshot() {
   });
 
   if (!stale) lastGood = { rows, at: now };
-  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, order: { mode: sortMode }, usage: safeUsage(), claudeArchiveError: claude.error };
+  const ended = endedSessions(liveIds, claude.ids, archived);
+  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, ended, order: { mode: sortMode, show: showMode }, usage: safeUsage(), claudeArchiveError: claude.error };
   return lastSnapshot;
 }
 
@@ -2359,6 +2549,12 @@ module.exports = {
   setOrder,
   readSortMode,
   setSortMode,
+  SHOW_FILE,
+  readShowMode,
+  setShowMode,
+  endedSessions,
+  projectFolderName,
+  archivePast,
   CODE_USER_DIR,
   CLAUDE_CODE_STATE_DB,
   ARCHIVE_TRANSCRIPTS_DIR,

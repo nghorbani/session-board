@@ -235,6 +235,10 @@
       <button type="button" data-act="mode" data-mode="activity" aria-pressed="true">by activity</button>
       <button type="button" data-act="mode" data-mode="manual" aria-pressed="false">manual</button>
     </div>
+    <div class="order" id="showMode" role="group" aria-label="Which sessions" style="display:none" title="all: the running sessions and the ended ones Claude Code still lists (not archived); running: only the running ones">
+      <button type="button" data-act="show" data-show="all" aria-pressed="true">all</button>
+      <button type="button" data-act="show" data-show="running" aria-pressed="false">running</button>
+    </div>
   </header>
 
   <div class="usage" id="usage"></div>
@@ -273,6 +277,7 @@ var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
 var POLL_MS = 4000;
 var CONFIRM_MS = 3000;
 var MUTE_PENDING_MS = 10000;    // the bell keeps the flag it was clicked to until a snapshot agrees, at most this long
+var SEARCH_PAUSE_MS = 400;     // typing searches every session by title after this much quiet
 var ORDER_PENDING_MS = 10000;   // a move or a mode switch holds its result until a snapshot agrees, at most this long
 var ORDER_QUERY_MAX = 8000;     // the browser route's cap on the comma-joined id list (server.cjs says the same)
 
@@ -284,6 +289,9 @@ var state = {
   details: Object.create(null),             // sessionId -> true while its details line is folded out (memory only)
   pendingOrder: Object.create(null),        // group key -> { ids, until } from a move until a snapshot agrees
   pendingMode: null,                        // { mode, until } from the header switch until a snapshot agrees
+  pendingShow: null,                        // { show, until } from the all | running switch until a snapshot agrees
+  pendingArchive: Object.create(null),      // sessionId -> until: an ended row archived with ⤓ leaves at once
+  searchTimer: null,                        // the pause before typing runs the title search over every session
   drag: null,                               // { sid, key, over } while a handle is dragged; renders wait for dragend
   renderDue: false,
   filter: '',                               // typed text, re-applied on every render
@@ -504,6 +512,7 @@ function actionsHtml(s, opts) {
       ? '<button class="iconbtn unmute" data-act="unmute"' + dis + ' title="Unmute: notify and count this session again"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.6 11h10.8L12 8.5V5.8a4 4 0 0 0-4-4zM6.4 12.6a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.2 2.2l11.6 11.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>'
       : '<button class="iconbtn mute" data-act="mute"' + dis + ' title="Mute: no notifications and no count for this session"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.6 11h10.8L12 8.5V5.8a4 4 0 0 0-4-4zM6.4 12.6a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>';
   }
+  if (opts.ended) html += '<button class="iconbtn archive" data-act="archivepast" title="Archive: off the board, and the transcript moves to the board\'s archive, so Claude Code\'s list drops it too (⤒ in the search brings it back)">⤓</button>';
   if (boardArchived(s)) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: bring the transcript back and show this session on the board again">⤒</button>';
   if (opts.endable) {
     if (pe && pe.kind === 'pending') html += '<button class="iconbtn end" disabled title="' + (pe.archive ? 'archiving' : 'ending') + '">…</button>';
@@ -573,7 +582,7 @@ function rowHtml(s, limits, opts) {
   var flash = state.flashes[s.sessionId];
   if (flash && flash.until > Date.now()) cls += ' ' + flash.cls;
 
-  var statusText = !isLive ? '<span>past</span>'
+  var statusText = !isLive ? '<span>' + (opts.ended ? 'ended' : 'past') + '</span>'
     : s.status === 'waiting' ? '<span class="waitfor">' + esc(s.waitingFor || 'waiting') + '</span>'
     : s.unseen ? '<span title="the last answer ended and you have not opened the session since">unseen</span>'
     : '<span>' + esc(s.status) + '</span>';
@@ -589,19 +598,19 @@ function rowHtml(s, limits, opts) {
         + '<div class="bar"><i class="' + lvl + '" style="width:' + (s.pct || 0) + '%"></i></div>';
     } else ctx += '</div>';
   } else {
-    ctx = '<div class="ctx">' + (s.folder ? esc(s.folder) : '') + '</div>';
+    ctx = '<div class="ctx">' + (s.folder && !opts.ended ? esc(s.folder) : '') + '</div>';   // an ended row's folder is on its sub line already
   }
 
   var h = heading(s);
   var chips = '';
-  if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : 'past') + '</span>';
+  if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : opts.ended ? 'ended' : 'past') + '</span>';
   var by = archivedBy(s);
   if (by === 'claude-code') chips += '<span class="chip archived" title="archived in Claude Code\'s sidebar; unarchive it there">archived in Claude Code</span>';
   else if (by === 'both') chips += '<span class="chip archived" title="archived on the board and in Claude Code\'s sidebar; ⤒ clears the board\'s flag">archived here and in Claude Code</span>';
   else if (by === 'board') chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
-  if (opts.past && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
+  if (opts.past && !opts.ended && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
   if (!opts.past && isMuted(s)) chips += '<span class="chip muted" title="muted: no notifications, not counted">muted</span>';
-  var agent = s.name && s.name !== s.title && s.name !== String(s.sessionId).slice(0, 8) ? '<span class="agent" title="the agent name other Claude sessions use for this one">' + esc(s.name) + '</span>' : '';
+  var agent = s.name && s.title && s.name !== s.title && s.name !== String(s.sessionId).slice(0, 8) ? '<span class="agent" title="the agent name other Claude sessions use for this one">' + esc(s.name) + '</span>' : '';
   var sub = chips + agent + '<button class="sid" data-act="details" title="' + esc(s.sessionId) + ' (click for details)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
@@ -622,7 +631,7 @@ function rowHtml(s, limits, opts) {
     + '<div class="main"><div class="' + h.cls + '">' + (opts.past ? markQuery(h.text, opts.query) : esc(h.text)) + '</div><div class="sub">' + sub + '</div>' + detailsHtml(s, opts) + '</div>'
     + '<div class="status"><span class="dot"></span>' + statusText + '</div>'
     + '<div>' + ctx + '</div>'
-    + '<div class="actions">' + actionsHtml(s, { endable: isLive && !opts.past, past: Boolean(opts.past) }) + '</div>'
+    + '<div class="actions">' + actionsHtml(s, { endable: isLive && !opts.past, past: Boolean(opts.past), ended: Boolean(opts.ended) }) + '</div>'
     + snips
     + '</div>';
 }
@@ -877,6 +886,64 @@ function applyMode(mode) {
   }).catch(function () { onSortModeResult({ ok: false, mode: mode, message: 'server not reachable' }); });
 }
 
+/*
+ * The all | running switch: click ──▶ state.pendingShow = { show, until: now + 10 s } ──▶ render at once
+ *    ──▶ host or POST /api/order/show?show= ──▶ the next snapshot carries it; a failure drops it with a notice.
+ */
+function currentShow() {
+  var p = state.pendingShow;
+  if (p && p.until > Date.now()) return p.show;
+  return state.data && state.data.order && state.data.order.show === 'running' ? 'running' : 'all';
+}
+
+function applyShow(show) {
+  if ((show !== 'all' && show !== 'running') || show === currentShow()) return;
+  state.pendingShow = { show: show, until: Date.now() + ORDER_PENDING_MS };
+  render();
+  setTimeout(render, ORDER_PENDING_MS + 50);
+  if (vsapi) { send({ type: 'showMode', show: show }); return; }
+  api('POST', '/api/order/show?show=' + encodeURIComponent(show)).then(function (res) {
+    var b = res.body || {};
+    onShowModeResult({ ok: Boolean(res.ok && b.ok), show: show, message: b.error || b.message || ('http ' + res.status) });
+  }).catch(function () { onShowModeResult({ ok: false, show: show, message: 'server not reachable' }); });
+}
+
+function onShowModeResult(r) {
+  if (r.ok) return;
+  state.pendingShow = null;
+  notice('switch failed: ' + (r.message || 'unknown'));
+  render();
+}
+
+/** The ended rows the sections show: none with "running", none while ⤓ on them is pending. */
+function endedRows() {
+  if (currentShow() !== 'all') return [];
+  return ((state.data && state.data.ended) || []).filter(function (s) { var p = state.pendingArchive[s.sessionId]; return !(p && p > Date.now()); });
+}
+
+/*
+ * ⤓ on an ended row: click ──▶ state.pendingArchive[sid] = now + 10 s (the row leaves at once) ──▶ host or
+ *    POST /api/archive/<id> ──▶ failure: the row returns, the notice says why; success: the next snapshot no longer lists it.
+ */
+function requestArchivePast(sid) {
+  if (state.pendingArchive[sid] && state.pendingArchive[sid] > Date.now()) return;
+  state.pendingArchive[sid] = Date.now() + ORDER_PENDING_MS;
+  render();
+  setTimeout(render, ORDER_PENDING_MS + 50);
+  if (vsapi) { send({ type: 'archivePast', sessionId: sid }); return; }
+  api('POST', '/api/archive/' + encodeURIComponent(sid)).then(function (res) {
+    var b = res.body || {};
+    onArchivePastResult({ sessionId: sid, ok: Boolean(res.ok && b.ok), message: b.message || b.error || ('http ' + res.status) });
+  }).catch(function () { onArchivePastResult({ sessionId: sid, ok: false, message: 'server not reachable' }); });
+}
+
+function onArchivePastResult(r) {
+  if (r.ok) return;
+  delete state.pendingArchive[r.sessionId];
+  notice('archive failed: ' + (r.message || 'unknown'));
+  render();
+}
+
 function onSortModeResult(r) {
   if (r.ok) return;                                        // the next snapshot carries the mode and drops the pending entry
   state.pendingMode = null;
@@ -892,6 +959,15 @@ function renderSwitch(data) {
   var mode = has ? currentMode() : 'activity';
   Array.prototype.forEach.call(el.querySelectorAll('button[data-mode]'), function (b) {
     var on = b.getAttribute('data-mode') === mode;
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.classList.toggle('on', on);
+  });
+  var sh = document.getElementById('showMode');
+  var hasShow = Boolean(data && data.order && data.order.show);   // an older server has no ended rows
+  sh.style.display = hasShow ? '' : 'none';
+  var show = hasShow ? currentShow() : 'all';
+  Array.prototype.forEach.call(sh.querySelectorAll('button[data-show]'), function (b) {
+    var on = b.getAttribute('data-show') === show;
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
     b.classList.toggle('on', on);
   });
@@ -987,13 +1063,14 @@ function rowById(sid) {
 }
 
 function onRowClick(ev) {
-  var ctl = ev.target.closest ? ev.target.closest('button[data-act="fold"], button[data-act="archived"], button[data-act="mode"], button[data-act="clearfilter"]') : null;
+  var ctl = ev.target.closest ? ev.target.closest('button[data-act="fold"], button[data-act="archived"], button[data-act="mode"], button[data-act="show"], button[data-act="clearfilter"]') : null;
   if (ctl) {                                               // section controls live outside the rows
     ev.stopPropagation();
     var key = ctl.getAttribute('data-section');
     var ctlAct = ctl.getAttribute('data-act');
     if (ctlAct === 'mode') { applyMode(ctl.getAttribute('data-mode')); return; }
     if (ctlAct === 'clearfilter') { clearSearch(); return; }
+    if (ctlAct === 'show') { applyShow(ctl.getAttribute('data-show')); return; }
     if (ctlAct === 'fold') state.folded[key] = !isFolded(key);
     else state.showArchived = !state.showArchived;
     render();
@@ -1007,6 +1084,7 @@ function onRowClick(ev) {
     ev.stopPropagation();
     var act = btn.getAttribute('data-act');
     if (act === 'copy') { copyBack(el, sid); return; }
+    if (act === 'archivepast') { requestArchivePast(sid); return; }
     if (act === 'details') { state.details[sid] = !state.details[sid]; render(); return; }
     if (act === 'copyval') { copyText(sid, btn.getAttribute('data-copy') || ''); return; }
     if (act === 'unarchive') { requestUnarchive(sid); return; }
@@ -1023,9 +1101,10 @@ function onRowClick(ev) {
 
 // -- search -------------------------------------------------------------------------------
 
-function startSearch() {
+function startSearch(withContent) {
+  if (state.searchTimer) { clearTimeout(state.searchTimer); state.searchTimer = null; }
   var q = document.getElementById('q').value.trim();
-  var content = true;                       // Enter always searches transcript text as well
+  var content = withContent !== false;      // Enter searches transcript text as well; the pause after typing searches titles
   if (!q) { clearSearch(); return; }
   var requestId = newRequestId();
   state.search = { requestId: requestId, query: q, content: content, pending: true, result: null };
@@ -1042,6 +1121,7 @@ function onSearchResult(r) {
   render();
 }
 function clearSearch() {
+  if (state.searchTimer) { clearTimeout(state.searchTimer); state.searchTimer = null; }
   if (state.search && state.search.pending) send({ type: 'cancelSearch', requestId: state.search.requestId });
   state.search = null;
   state.filter = '';
@@ -1095,14 +1175,16 @@ function rowOrder(a, b) {
   return (ra === null ? 0 : ra - rb) || byAge(a, b);
 }
 
-function groupSessions(rows, thisWindowId) {
+function groupSessions(rows, thisWindowId, ended) {
   var filter = Boolean(state.filter);
   var byKey = Object.create(null), archived = [];
-  var add = function (s) {
+  var section = function (s) {
     var key = sectionKey(s);
-    if (!byKey[key]) byKey[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [] };
-    byKey[key].rows.push(s);
+    if (!byKey[key]) byKey[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [], ended: [] };
+    return byKey[key];
   };
+  var add = function (s) { section(s).rows.push(s); };
+  (ended || []).forEach(function (s) { if (matchesFilter(s)) section(s).ended.push(s); });
   rows.forEach(function (s) {
     if (!matchesFilter(s)) return;
     var pe = state.pendingEnd[s.sessionId];
@@ -1118,6 +1200,7 @@ function groupSessions(rows, thisWindowId) {
   };
   var finish = function (sec) {
     sec.rows.sort(rowOrder);
+    sec.ended.sort(byAge);                                 // newest first, after the running rows
     Object.assign(sec, counts(sec.rows));
     return sec;
   };
@@ -1152,8 +1235,10 @@ function sectionHead(sec, label, count, thisWindow) {
 function sectionHtml(sec, limits) {
   var folded = isFolded(sec.key) && !state.filter;
   var cls = 'group section' + (folded ? ' folded' : '') + (sec.waiting ? ' waiting' : sec.unseen ? ' unseen' : '') + (sec.thisWindow ? ' here' : '');
-  var body = sec.rows.map(function (s) { return rowHtml(s, limits); }).join('');   // every running row that is not archived, idle or not
-  return '<div class="' + cls + '" data-section="' + esc(sec.key) + '">' + sectionHead(sec, sec.label, sec.rows.length, sec.thisWindow) + '<div class="section-body">' + body + '</div></div>';
+  var body = sec.rows.map(function (s) { return rowHtml(s, limits); }).join('')   // every running row that is not archived, idle or not
+    + sec.ended.map(function (s) { return rowHtml(s, limits, { past: true, ended: true }); }).join('');   // then the ended ones Claude Code still lists
+  var count = sec.rows.length + (sec.ended.length ? ' + ' + sec.ended.length + ' ended' : '');
+  return '<div class="' + cls + '" data-section="' + esc(sec.key) + '">' + sectionHead(sec, sec.label, count, sec.thisWindow) + '<div class="section-body">' + body + '</div></div>';
 }
 
 function render() {
@@ -1164,12 +1249,19 @@ function render() {
 
   // a typed filter hides rows; say so, with the count and a way out
   var fl = document.getElementById('filterline');
+  var ended = endedRows();
   if (state.filter) {
-    var matched = all.filter(function (s) { var pe = state.pendingEnd[s.sessionId]; return matchesFilter(s) && !(pe && pe.kind === 'ended'); }).length;
-    fl.innerHTML = 'Filter “' + esc(state.filter) + '”: ' + matched + ' of ' + all.length + ' running session' + (all.length === 1 ? '' : 's')
+    var matched = all.filter(function (s) { var pe = state.pendingEnd[s.sessionId]; return matchesFilter(s) && !(pe && pe.kind === 'ended'); }).length
+      + ended.filter(matchesFilter).length;
+    var total = all.length + ended.length;
+    fl.innerHTML = 'Filter “' + esc(state.filter) + '”: ' + matched + ' of ' + total + ' session' + (total === 1 ? '' : 's')
       + '<button data-act="clearfilter" title="clear the filter (Esc)">clear</button>';
     fl.style.display = '';
   } else { fl.style.display = 'none'; fl.innerHTML = ''; }
+
+  var g = groupSessions(all, data ? data.thisWindowId : null, ended);
+  var onBoard = Object.create(null);                       // the search results skip what the sections already show
+  g.sections.forEach(function (sec) { sec.rows.concat(sec.ended).forEach(function (s) { onBoard[s.sessionId] = true; }); });
 
   // search results block
   var gr = document.getElementById('g-results');
@@ -1178,19 +1270,21 @@ function render() {
     var r = state.search.result;
     var head = 'Search results';
     if (state.search.pending) head += ' · searching…';
-    else if (r) head += ' (' + r.shown + (r.total !== r.shown ? ' of ' + r.total : '') + ')';
+    var extra = r ? r.rows.filter(function (x) { return !onBoard[x.sessionId]; }) : [];
+    var above = r ? r.rows.length - extra.length : 0;
+    if (!state.search.pending && r) head += ' (' + extra.length + (above ? ', ' + above + ' more on the board above' : '') + (r.total !== r.shown ? '; ' + r.shown + ' of ' + r.total + ' searched' : '') + ')';
     document.getElementById('h-results').textContent = head;
     var html = '';
     if (r) {
       if (r.partial) html += '<div class="empty" style="color:var(--warn)">Partial results: ' + esc(r.partialReason || 'some transcripts could not be searched') + (r.skipped ? ' · ' + r.skipped + ' unmatched files skipped' : '') + '</div>';
       if (r.content && r.rgAvailable === false) html += '<div class="empty" style="color:var(--warn)">ripgrep (rg) not found; title search only.</div>';
-      html += r.rows.length ? r.rows.map(function (s) { return rowHtml(s, limits, { past: true, query: r.query }); }).join('') : '<div class="empty">No session matches “' + esc(r.query) + '”.</div>';
+      html += extra.length ? extra.map(function (s) { return rowHtml(s, limits, { past: true, query: r.query }); }).join('')
+        : '<div class="empty">' + (above ? 'Every match is on the board above.' : 'No session matches “' + esc(r.query) + '”.') + '</div>';
     }
     document.getElementById('l-results').innerHTML = html;
   } else gr.style.display = 'none';
 
   // Muted sessions count nowhere.
-  var g = groupSessions(all, data ? data.thisWindowId : null);
   var counted = all.filter(function (s) { return !isMuted(s); });
   var allWaiting = counted.filter(function (s) { return s.status === 'waiting'; });
   var visible = counted.filter(function (s) { return !putAway(s); });
@@ -1237,6 +1331,12 @@ function onSnapshot(data) {
     if (agrees || po.until <= Date.now()) delete state.pendingOrder[key];
   });
   // the switch holds its mode until a snapshot agrees, or the guard expires
+  var ps = state.pendingShow;
+  if (ps && ((data.order && data.order.show === ps.show) || ps.until <= Date.now())) state.pendingShow = null;
+  Object.keys(state.pendingArchive).forEach(function (sid) {
+    var still = (data.ended || []).some(function (s) { return s.sessionId === sid; });
+    if (!still || state.pendingArchive[sid] <= Date.now()) delete state.pendingArchive[sid];
+  });
   var pm = state.pendingMode;
   if (pm && ((data.order && data.order.mode === pm.mode) || pm.until <= Date.now())) state.pendingMode = null;
   // a click on the bell holds its flag until a snapshot agrees with it, or the guard expires
@@ -1287,6 +1387,8 @@ var qEl = document.getElementById('q');
 qEl.addEventListener('input', function () {
   state.filter = qEl.value.trim();
   if (!state.filter && state.search) { clearSearch(); return; }   // an emptied box drops the results too
+  if (state.searchTimer) clearTimeout(state.searchTimer);
+  state.searchTimer = state.filter.length >= 2 ? setTimeout(function () { state.searchTimer = null; startSearch(false); }, SEARCH_PAUSE_MS) : null;
   render();
 });
 qEl.addEventListener('keydown', function (ev) {
@@ -1360,6 +1462,8 @@ if (vsapi) {
     else if (m.type === 'retitleResult') onRetitleResult(m);
     else if (m.type === 'muteResult') onMuteResult(m);
     else if (m.type === 'sortModeResult') onSortModeResult(m);
+    else if (m.type === 'showModeResult') onShowModeResult(m);
+    else if (m.type === 'archivePastResult') onArchivePastResult(m);
     else if (m.type === 'orderResult') onOrderResult(m);
     else if (m.type === 'searchResult') onSearchResult(m.data);
     else if (m.type === 'openResult') {

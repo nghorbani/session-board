@@ -134,6 +134,23 @@ async function handle(req, res) {
     catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
   }
 
+  if (route === '/api/order/show' && req.method === 'POST') {
+    // The header's "all | running" switch: the board-wide file every window reads.
+    const show = parsed.searchParams.get('show') || '';
+    if (show !== 'all' && show !== 'running') return sendJson(res, 400, { ok: false, error: 'show must be all or running' });
+    try { core.setShowMode(show); return sendJson(res, 200, { ok: true, show }); }
+    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  }
+
+  if (route.startsWith('/api/archive/') && req.method === 'POST') {
+    // ⤓ on an ended row: the archive marker, then the transcript move; a running session is refused (409).
+    const sessionId = safeDecode(route.slice('/api/archive/'.length));
+    if (!sessionId || !core.UUID_RE.test(sessionId)) return sendJson(res, 400, { ok: false, code: 'invalid', message: 'not a session id' });
+    const result = await core.archivePast(sessionId);
+    const codes = { invalid: 400, running: 409, failed: 500 };
+    return sendJson(res, result.ok ? 200 : (codes[result.code] || 500), result);
+  }
+
   if (route.startsWith('/api/title/suggest/') && req.method === 'POST') {
     // One short model call over the transcript; nothing is stored.
     const sessionId = safeDecode(route.slice('/api/title/suggest/'.length));

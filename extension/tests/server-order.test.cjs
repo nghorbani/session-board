@@ -94,3 +94,28 @@ test('POST /api/order/mode?mode= writes sort.json; an unknown or missing mode is
   r = await call('GET', '/api/order?ids=' + A);
   assert.equal(r.status, 404);
 });
+
+test('POST /api/order/show?show= writes show.json; an unknown show is 400', async () => {
+  let r = await call('POST', '/api/order/show?show=running');
+  assert.deepEqual([r.status, r.body], [200, { ok: true, show: 'running' }]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'show.json'), 'utf8')).show, 'running');
+  r = await call('POST', '/api/order/show?show=all');
+  assert.deepEqual([r.status, r.body], [200, { ok: true, show: 'all' }]);
+  r = await call('POST', '/api/order/show?show=some');
+  assert.equal(r.status, 400);
+  r = await call('POST', '/api/order/show?show=all', false);
+  assert.equal(r.status, 403);
+});
+
+test('POST /api/archive/<id> archives an ended session (marker and transcript move); a bad id is 400', async () => {
+  const sid = 'eeeeeeee-1111-4111-8111-111111111111';
+  const dir = path.join(tmp, 'projects', 'd--code-repo');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, sid + '.jsonl'), JSON.stringify({ type: 'user', sessionId: sid, message: { role: 'user', content: 'x' } }) + String.fromCharCode(10));
+  let r = await call('POST', '/api/archive/' + sid);
+  assert.deepEqual([r.status, r.body.ok, r.body.moved], [200, true, true], JSON.stringify(r.body));
+  assert.ok(fs.existsSync(path.join(dataDir, 'archived', sid + '.json')), 'the marker');
+  assert.equal(fs.existsSync(path.join(dir, sid + '.jsonl')), false, 'moved');
+  r = await call('POST', '/api/archive/nope');
+  assert.equal(r.status, 400);
+});

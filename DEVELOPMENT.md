@@ -57,7 +57,8 @@ per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
 `POST /api/title/suggest/<id>`, `POST /api/title/<id>?title=`, `POST /api/mute/<id>`, `POST /api/unmute/<id>`,
-`POST /api/order?ids=<comma-joined ids>`, `POST /api/order/mode?mode=activity|manual`.
+`POST /api/order?ids=<comma-joined ids>`, `POST /api/order/mode?mode=activity|manual`,
+`POST /api/order/show?show=all|running`, `POST /api/archive/<id>` (an ended session).
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
 it (`-NoInstall` stops after packaging). What to expect from VS Code (seen on 1.138): a first
@@ -137,8 +138,10 @@ installed.
 - `order.test.cjs`: the order store (`setOrder()` checks the whole list before the first
   write, `readOrder()`), the sort-mode file, pruning shared with the muted store, and
   `rank` and `order.mode` on the snapshot.
-- `order-host.test.cjs`: the `order` and `sortMode` messages and their replies.
-- `server-order.test.cjs`: `server.cjs` as a child process answering the order routes.
+- `order-host.test.cjs`: the `order`, `sortMode`, `showMode` and `archivePast` messages and their replies.
+- `ended.test.cjs`: `endedSessions()` (folders from the heartbeat root and its worktrees, what is
+  left out, which window owns a session, a root without git), the show store, `archivePast()`.
+- `server-order.test.cjs`: `server.cjs` as a child process answering the order, show and archive routes.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -264,6 +267,19 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   Markers older than two weeks are dropped on read. The page shows those rows with the
   unseen status inside their window's section, counts them on its badge, and flips the flag
   at once on a click.
+- **Ended sessions**: each board writes its window's first workspace folder into its heartbeat
+  (`root`). `endedSessions()` (core.cjs) turns every fresh heartbeat into the folder set Claude
+  Code's own list uses: the root plus the repository's worktrees (`git worktree list --porcelain
+  -z`, refreshed in the background every 60 s; a poll never waits for git), each mapped to its
+  folder under `~/.claude/projects` (`projectFolderName()`: every character outside
+  `[A-Za-z0-9]` becomes `-`; compared case-insensitively on Windows). It returns the transcripts
+  there that are not running, not in Claude Code's `hiddenSessionIds`, not board-archived and
+  have a user message, newest first, as `snapshot().ended`; badges, counts and notifications read
+  `sessions` only. A session two windows would list goes to the window whose root is its folder,
+  else the window of the repository's main folder, else the lower window id. The header switch
+  "all | running" lives in `show.json` (`setShowMode()`); ⤓ on an ended row is `archivePast()`:
+  the archive marker, then `stowTranscript()`. Typing in the search box filters the sections and,
+  after 400 ms without a key, runs the title search (`startSearch(false)`); Enter adds content.
 - **Sections and Muted**: the page groups live rows with `groupSessions()` (index.html):
   one section per `window.id` (`Elsewhere` for rows without one), this window first
   (`thisWindowId`, set by the host from `windowIdForExthost(process.pid)`), then by waiting

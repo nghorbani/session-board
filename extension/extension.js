@@ -94,6 +94,8 @@ class BoardProvider {
         case 'unmute': if (core.UUID_RE.test(sid)) return this.setMuted(sid, false); return;
         case 'order': return this.setOrder(m.ids);
         case 'sortMode': return this.setSortMode(m.mode);
+        case 'showMode': return this.setShowMode(m.show);
+        case 'archivePast': if (core.UUID_RE.test(sid)) return await this.archivePast(sid); return;
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
         case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
         default: return;
@@ -231,7 +233,8 @@ class BoardProvider {
   beat() {
     const ext = this.context.extension;
     core.writeHeartbeat(process.pid, (ext && ext.id) || core.EXTENSION_ID, vscode.workspace.name || null, Boolean(vscode.window.state.focused),
-      (ext && ext.packageJSON && ext.packageJSON.version) || null);
+      (ext && ext.packageJSON && ext.packageJSON.version) || null,
+      (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0] && vscode.workspace.workspaceFolders[0].uri.fsPath) || null);
   }
 
   /**
@@ -481,6 +484,32 @@ class BoardProvider {
       this.log.error('sort mode failed: ' + message);
     }
     this.post({ type: 'sortModeResult', ok, mode: ok ? String(mode) : null, message });
+    this.schedule(0);
+  }
+
+  /** The header's "all | running" switch: the board-wide file; every window follows with its next snapshot. */
+  setShowMode(show) {
+    let ok = true;
+    let message = '';
+    try {
+      core.setShowMode(String(show || ''));
+      this.log.info('show ' + show);
+    } catch (e) {
+      ok = false;
+      message = String((e && e.message) || e);
+      this.log.error('show mode failed: ' + message);
+    }
+    this.post({ type: 'showModeResult', ok, show: ok ? String(show) : null, message });
+    this.schedule(0);
+  }
+
+  /** ⤓ on an ended row: the archive marker, then the transcript move; the page hears the outcome. */
+  async archivePast(sessionId) {
+    const r = await core.archivePast(sessionId);
+    if (!r.ok) this.log.warn('archive ' + sessionId + ' failed: ' + r.message);
+    else this.log.info('archive ' + sessionId + ' (ended)' + (r.moveError ? ': transcript not moved: ' + r.moveError : ''));
+    if (r.ok && r.moveError) vscode.window.showWarningMessage('Archived on the board; transcript not moved: ' + r.moveError);
+    this.post({ type: 'archivePastResult', sessionId, ok: Boolean(r.ok), message: r.ok ? '' : r.message });
     this.schedule(0);
   }
 

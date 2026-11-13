@@ -34,8 +34,17 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   opening it or sending a new prompt clears it), then idle. Every running session that is not
   archived stays in its section, however long it has been idle; a click on the heading folds
   the whole section.
+- **Ended sessions stay until you archive them**, like Claude Code's own session list: under
+  the running ones, each window section lists the ended sessions of its folder and of that
+  repository's git worktrees that are not archived (in Claude Code or here), newest first,
+  marked "ended", "Untitled" when they have no title. The heading reads `1 + 18 ended`. A click
+  resumes one in its window; ⤓ archives it (the transcript moves to the board's archive, so
+  Claude Code's list drops it too, and search still finds it). A worktree open in a window of
+  its own shows its sessions there, once.
+- **all | running**: the switch in the header hides the ended sessions (board-wide, like the
+  order switch).
 - **A typed filter says so**: while the search box holds text, a line above the sections reads
-  `Filter "cuvis-ai-6c": 1 of 17 running sessions`, with a clear button (Esc does the same).
+  `Filter "cuvis-ai-6c": 1 of 17 sessions`, with a clear button (Esc does the same).
 - **The number on a heading** counts the sessions in that section that wait for you (amber)
   or are unseen (green). It goes down as you answer or open them.
 - Each row: the session's title (Claude Code's: a rename wins over the generated title; a
@@ -111,8 +120,9 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   sidebar is put away here too, with the chip "archived in Claude Code"; unarchive it there.
   That flag is read from VS Code's default profile; other profiles, portable installs and
   custom user-data folders are not seen.
-- **Search**: typing narrows the live list. Enter searches every session on disk by title,
-  folder, id and transcript text (literal, case-insensitive, raw transcript text including
+- **Search**: typing narrows the sections (running and ended rows) and, after a short pause,
+  searches every session on disk by title, folder and id; the results list what the sections
+  do not already show. Enter adds the transcript text (literal, case-insensitive, raw transcript text including
   tool output); Esc or an emptied box clears. Results show live or past, the folder, up to
   two snippets, and whether the pass was partial. Click a past session to resume it in this
   window when its folder is open here; otherwise the resume command is copied and you can

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.2
+
+- Ended sessions stay on the board until you archive them, like Claude Code's own session list: each window section lists, under its running sessions, the ended ones of its folder and of that repository's worktrees that are not archived (in Claude Code or on the board), newest first, marked "ended". A click resumes one; ⤓ archives it
+- A switch "all | running" in the header hides the ended sessions
+- Typing in the search box also searches every session on disk by title after a short pause; the results skip what the board already shows. Enter adds the transcript text as before
+- A session without a title no longer shows its agent name twice
+
 ## 0.11.1
 
 - Every running session that is not archived stays on the board: the "Show N idle over 2h" fold is gone, so sessions idle for hours or days sit in their window section like the rest. Archived sessions (in Claude Code or with ⤓) are still put away

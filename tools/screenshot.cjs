@@ -59,7 +59,11 @@ const sessions = [
 ];
 
 const snapshot = {
-  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1, order: { mode: 'activity' },
+  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1, order: { mode: 'activity', show: 'all' },
+  ended: [
+    { sessionId: '3f1c9a20-7b44-4c1e-9d2a-5e8f0b6a1c33', status: 'ended', live: false, title: 'Upload retry policy review', lastPrompt: null, cwd: 'C:/code/acme/webapp', transcriptPath: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/3f1c9a20.jsonl', path: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/3f1c9a20.jsonl', folder: 'C--code-acme-webapp', ageMinutes: 190, hasTranscript: true, archived: false, window: { id: 1, label: 'webapp' } },
+    { sessionId: '8b7e2d41-1a90-4f3b-8c6d-2e4a9f0c7b15', status: 'ended', live: false, title: 'Login page copy changes', lastPrompt: null, cwd: 'C:/code/acme/webapp', transcriptPath: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/8b7e2d41.jsonl', path: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/8b7e2d41.jsonl', folder: 'C--code-acme-webapp', ageMinutes: 1500, hasTranscript: true, archived: false, window: { id: 1, label: 'webapp' } },
+  ],
   usage: {
     state: 'ok', at: now - 2 * 60000, ageSeconds: 120, subscriptionType: 'max', available: true,
     windows: {

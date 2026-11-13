@@ -22,8 +22,9 @@ shows background agents only, not the sessions you talk to.
 - **One section per window.** Sessions are grouped by the VS Code window they run in, the
   window you are in first, and each heading carries the number of sessions in it that need
   you. Inside a section the ones waiting on a permission prompt, a question or a dialog come
-  first, highlighted, with what they are waiting for; working and idle sessions follow. The
-  activity-bar badge counts the waiting ones.
+  first, highlighted, with what they are waiting for; working and idle sessions follow, then
+  the ended sessions Claude Code still lists for that folder, until you archive them. A switch
+  shows the running ones only. The activity-bar badge counts the waiting ones.
 - **Told when it matters.** A toast says when a session starts waiting and when one finishes
   its answer. When no VS Code window has focus, one Windows notification says it instead, and
   a click on it opens the session.
@@ -49,8 +50,8 @@ shows background agents only, not the sessions you talk to.
   it too. It comes back on its own only when it needs you; "Show N archived" lists the rest,
   and ⤒ or a click brings one back, transcript first. Sessions you archive in Claude Code's
   sidebar are put away on the board as well (read from VS Code's default profile).
-- **Find any session, ever.** Type to narrow the list. Press Enter to search every session on
-  this machine, current or past, by title or by what was said, and resume a past one in
+- **Find any session, ever.** Type to narrow the list and search every session on this
+  machine by title; press Enter to search by what was said too, and resume a past one in
   place.
 
 ![Searching every session by title and content](extension/media/search.png)

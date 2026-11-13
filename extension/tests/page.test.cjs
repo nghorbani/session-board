@@ -42,6 +42,8 @@ function snapshotOf(sessions, extra) {
 const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), suggest: () => ({ status: 200, body: { ok: true, title: 'Suggested by model' } }), title: (id, t) => ({ status: 200, body: { ok: true, title: t } }), mute: () => ({ status: 200, body: { ok: true, muted: true } }), unmute: () => ({ status: 200, body: { ok: true, muted: false } }), search: { rows: [] }, calls: [] };
 fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
 fake.mode = (m) => ({ status: 200, body: { ok: true, mode: m } });
+fake.show = (v) => ({ status: 200, body: { ok: true, show: v } });
+fake.archive = () => ({ status: 200, body: { ok: true, moved: true } });
 let PORT = 0;
 function json(res, code, body) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 function serve(req, res) {
@@ -64,6 +66,8 @@ function serve(req, res) {
   if (u.pathname.startsWith('/api/mute/')) { const r = fake.mute(u.pathname.slice('/api/mute/'.length)); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unmute/')) { const r = fake.unmute(u.pathname.slice('/api/unmute/'.length)); return json(res, r.status, r.body); }
   if (u.pathname === '/api/order') { const r = fake.order(u.searchParams.get('ids') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
+  if (u.pathname === '/api/order/show') { const r = fake.show(u.searchParams.get('show') || ''); return json(res, r.status, r.body); }
+  if (u.pathname.startsWith('/api/archive/')) { const r = fake.archive(u.pathname.slice('/api/archive/'.length)); return json(res, r.status, r.body); }
   if (u.pathname === '/api/order/mode') { const r = fake.mode(u.searchParams.get('mode') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
@@ -151,6 +155,9 @@ const SAMPLE = `(function () {
     filterline: (function () { var e = document.getElementById('filterline'); return e && e.style.display !== 'none' ? e.textContent : null; })(),
     agents: q('.row[data-session] .agent').map(function (a) { return a.closest('.row').getAttribute('data-session') + '=' + a.textContent; }),
     prompts: window.__prompts || [],
+    showSwitch: (function () { var b = document.querySelector('#showMode button[aria-pressed="true"]'); return b && document.getElementById('showMode').style.display !== 'none' ? b.getAttribute('data-show') : null; })(),
+    endedRows: q('#sections .row.past[data-session]').map(function (r) { return r.getAttribute('data-session'); }),
+    heads: q('#sections > .section > .section-head .n').map(function (n) { return n.textContent; }),
     sids: q('.row[data-session] .sid').map(function (b) { return b.closest('.row').getAttribute('data-session') + '=' + b.textContent; }),
     details: q('.row[data-session] .details').map(function (d) { return d.closest('.row').getAttribute('data-session') + '=' + d.textContent; }),
     acct: text('.u-acct'),
@@ -555,6 +562,89 @@ test('page: the filter takes an id as Claude Code shows it ("Session f8005c0d") 
   await page.close();
 });
 
+// -- ended sessions (Claude Code's list per window) -----------------------------------------
+
+const ended = (sessionId, title, extra) => Object.assign({ sessionId, status: 'ended', live: false, title, lastPrompt: null, cwd: 'C:\\code\\x', transcriptPath: 'C:\\p\\x\\' + sessionId + '.jsonl', path: 'C:\\p\\x\\' + sessionId + '.jsonl', folder: 'C--code-x', ageMinutes: 60, hasTranscript: true, archived: false, window: { id: 1, label: 'x' } }, extra);
+const searchCalls = () => fake.calls.filter((c) => c.path === '/api/search').map((c) => new URLSearchParams(c.query).get('q') + ':' + new URLSearchParams(c.query).get('content'));
+
+test('page: a window section shows its ended, unarchived sessions after the running ones, newest first, with "+ N ended" on the head; ⤓ archives one and it leaves', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(C, 'Older ended', { ageMinutes: 3000 }), ended(B, 'Recent ended', { ageMinutes: 25 }), ended(D, null, { ageMinutes: 90, lastPrompt: 'no title yet', window: { id: 2, label: 'other' } })], order: { mode: 'activity', show: 'all' }, thisWindowId: 1 });
+  const page = await openPage();
+  let s = await page.until((x) => x.sections.length === 2 && x.endedRows.length === 3, 'both sections');
+  assert.deepEqual(s.sections[0].rows, [A, B, C], 'running first, then ended newest first');
+  assert.deepEqual(s.heads, ['1 + 2 ended', '0 + 1 ended'], 'a window with only ended sessions gets its section');
+  assert.equal(s.statusWords.find((w) => w.startsWith(B)), B + '=ended');
+  assert.equal(s.showSwitch, 'all');
+  assert.equal(s.counts, '0 need you · 0 working · 1 idle', 'the counts strip counts running sessions only');
+  await page.click(rowSel(B) + ' .iconbtn[data-act="archivepast"]');
+  s = await page.until((x) => !x.endedRows.includes(B), 'gone at once');
+  await page.until(() => fake.calls.some((c) => c.method === 'POST' && c.path === '/api/archive/' + B), 'the POST');
+  fake.snapshot = snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(C, 'Older ended', { ageMinutes: 3000 }), ended(D, null, { ageMinutes: 90, window: { id: 2, label: 'other' } })], order: { mode: 'activity', show: 'all' }, thisWindowId: 1 });
+  await sleep(600);
+  s = await page.sample();
+  assert.equal(s.endedRows.includes(B), false, 'and stays gone');
+  fake.archive = () => ({ status: 409, body: { ok: false, code: 'running', message: 'the session is running; end it first' } });
+  await page.click(rowSel(C) + ' .iconbtn[data-act="archivepast"]');
+  s = await page.until((x) => x.notice !== null && x.endedRows.includes(C), 'back with the notice');
+  assert.equal(s.notice, 'archive failed: the session is running; end it first');
+  fake.archive = () => ({ status: 200, body: { ok: true, moved: true } });
+  await page.close();
+});
+
+test('page: the switch "running" hides the ended rows and a section that only had ended rows; "all" brings them back', opts, async () => {
+  fake.calls.length = 0;
+  const snap = (show) => snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(B, 'Recent ended'), ended(D, 'Other window', { window: { id: 2, label: 'other' } })], order: { mode: 'activity', show } });
+  fake.snapshot = snap('all');
+  const page = await openPage();
+  let s = await page.until((x) => x.endedRows.length === 2, 'ended rows');
+  await page.click('#showMode button[data-show="running"]');
+  s = await page.until((x) => x.endedRows.length === 0, 'hidden at once');
+  assert.deepEqual([s.sections.length, s.showSwitch, s.heads], [1, 'running', ['1']]);
+  await page.until(() => fake.calls.some((c) => c.path === '/api/order/show' && c.query === '?show=running'), 'the POST');
+  fake.snapshot = snap('running');
+  await sleep(600);
+  s = await page.sample();
+  assert.deepEqual([s.endedRows.length, s.showSwitch], [0, 'running'], 'the snapshot agrees');
+  await page.click('#showMode button[data-show="all"]');
+  s = await page.until((x) => x.endedRows.length === 2, 'back');
+  fake.snapshot = snap('all');
+  await page.close();
+});
+
+test('page: typing filters running and ended rows and, after a pause, searches every session by title once; the results skip what the board shows; Enter adds the text', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, 'Parser running', 'idle')], { ended: [ended(B, 'Parser ended'), ended(C, 'Unrelated')], order: { mode: 'activity', show: 'all' } });
+  fake.search = { rows: [
+    { sessionId: B, title: 'Parser ended', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\b.jsonl', ageMinutes: 60, snippets: [] },
+    { sessionId: P, title: 'Parser from another repo', live: false, status: 'past', folder: 'y', cwd: 'C:\\y', path: 'C:\\t\\p.jsonl', ageMinutes: 5000, snippets: [] },
+  ] };
+  const page = await openPage();
+  await page.until((x) => x.rows.length === 3, 'the rows');
+  await page.type('P');
+  await page.type('Pa');
+  await page.type('Parser');
+  let s = await page.until((x) => x.results.length === 1, 'the search results');
+  assert.deepEqual(s.rows, [A, B], 'the filter keeps the running and the ended match');
+  assert.deepEqual(s.results, [P], 'only what the board does not show');
+  assert.deepEqual(searchCalls(), ['Parser:0'], 'one title search after the pause, none per keystroke, none for one letter');
+  assert.match(s.filterline, /^Filter “Parser”: 2 of 3 sessions/);
+  await page.eval('document.getElementById("q").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); true');
+  await page.until(() => searchCalls().length === 2, 'Enter');
+  assert.deepEqual(searchCalls(), ['Parser:0', 'Parser:1'], 'Enter searches the text too');
+  fake.search = { rows: [] };
+  await page.close();
+});
+
+test('page: a row without a title shows its agent name once', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf([row(A, null, 'idle', { name: 'cuvis-ai-37' })]);
+  const page = await openPage();
+  const s = await page.until((x) => x.rows.length === 1, 'the row');
+  assert.deepEqual([s.agents, s.titles], [[], [A + '=cuvis-ai-37']]);
+  await page.close();
+});
+
 // -- sections, badges and muting ------------------------------------------------------------
 
 const C = 'dddddddd-4444-4444-8444-444444444444';
@@ -709,13 +799,13 @@ test('page: a typed filter says so above the sections with "n of N" and a clear 
   assert.equal(s.filterline, null, 'no line without a query');
   await page.type('cuvis-ai-6c');
   s = await page.until((x) => x.rows.length === 1, 'filtered');
-  assert.deepEqual([s.rows, s.filterline], [[A], 'Filter “cuvis-ai-6c”: 1 of 3 running sessionsclear']);
+  assert.deepEqual([s.rows, s.filterline], [[A], 'Filter “cuvis-ai-6c”: 1 of 3 sessionsclear']);
   await page.click('#filterline button[data-act="clearfilter"]');
   s = await page.until((x) => x.rows.length === 2 && x.filterline === null, 'cleared by the button');
   assert.equal(await page.eval('document.getElementById("q").value'), '');
   await page.type('nothing <b>"here"</b>');
   s = await page.until((x) => x.filterline !== null && x.rows.length === 0, 'no match');
-  assert.equal(s.filterline, 'Filter “nothing <b>"here"</b>”: 0 of 3 running sessionsclear', 'the query shows as text');
+  assert.equal(s.filterline, 'Filter “nothing <b>"here"</b>”: 0 of 3 sessionsclear', 'the query shows as text');
   assert.equal(await page.eval('document.querySelectorAll("#filterline b").length'), 0);
   await page.eval('document.getElementById("q").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true');
   s = await page.until((x) => x.rows.length === 2 && x.filterline === null, 'cleared by Esc');
