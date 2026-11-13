@@ -737,6 +737,23 @@ function durMs(a, b) {
   if (isNaN(d1) || isNaN(d2)) return 0;
   return Math.max(0, d2 - d1);
 }
+const ACTIVE_GAP_CAP_MS = 10 * 60 * 1000;
+/* Active time: the sum of the gaps between consecutive steps, each gap counted up to the cap, so
+   an idle stretch (inside a section or between them) never inflates it -- a session left open
+   for a day with one hour of real work still reads about one hour. Applied once over the whole
+   step sequence rather than per section, so a long pause that happens to fall at a section
+   boundary is capped the same as one inside a section (A6: one rule everywhere a timing fact is
+   shown, not a looser one for cross-section gaps). */
+function activeTimeOf(idsInOrder, byId) {
+  let ms = 0;
+  for (let i = 1; i < idsInOrder.length; i++) {
+    const prev = byId.get(idsInOrder[i - 1]);
+    const cur = byId.get(idsInOrder[i]);
+    if (!prev || !cur) continue;
+    ms += Math.min(durMs(prev.at, cur.at), ACTIVE_GAP_CAP_MS);
+  }
+  return ms;
+}
 
 function buildSections(stepsArr, bodyFn) {
   const sections = [];
@@ -803,11 +820,6 @@ function buildSections(stepsArr, bodyFn) {
       }
     }
   }
-  // Working time: the sum over sections of the span from the owner's input (the section's
-  // opening step) to the last step inside that section, never the wall-clock gap between
-  // sections -- a session left open overnight must not read as hours of work. A section with
-  // no body steps of its own (its opener was the last thing that happened so far) contributes
-  // nothing.
   function sectionStepIds(sec) {
     const ids = sec.openerId ? [sec.openerId] : [];
     for (const row of sec.body || []) {
@@ -816,17 +828,16 @@ function buildSections(stepsArr, bodyFn) {
     }
     return ids;
   }
-  let totalTimeMs = 0;
-  for (const sec of filtered) {
-    const ids = sectionStepIds(sec);
-    if (ids.length < 2) continue;
-    const first = byId.get(ids[0]);
-    const last = byId.get(ids[ids.length - 1]);
-    if (first && last) totalTimeMs += durMs(first.at, last.at);
-  }
+  // Active time (A6): the sum of the gaps between consecutive steps of the whole session, each
+  // gap counted up to activeTimeOf's cap, so an idle stretch does not inflate it even when it
+  // falls inside one section. Each section gets the same figure over its own steps, so a facts
+  // line built from a section object reads by the identical rule as the header tile.
+  const allIds = stepsArr.map((s) => s.id);
+  const activeTimeMs = activeTimeOf(allIds, byId);
+  for (const sec of filtered) sec.activeTimeMs = activeTimeOf(sectionStepIds(sec), byId);
   const wallClockMs = stepsArr.length ? durMs(stepsArr[0].at, stepsArr[stepsArr.length - 1].at) : 0;
   const strip = {
-    totalTimeMs,
+    activeTimeMs,
     wallClockMs,
     sections: filtered.length,
     decisions,

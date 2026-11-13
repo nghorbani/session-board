@@ -39,7 +39,7 @@ function openReply(overrides) {
     type: 'openResult', ok: true, title: 'Fixture session', generation: 1, indexing: false,
     seenStepId: null, counts: { byKind: {}, unreadable: 0 },
     steps: [], sections: [section('lead', 'Session start', null, [])],
-    strip: { totalTimeMs: 60000, sections: 1, decisions: 0, filesChanged: 0 },
+    strip: { activeTimeMs: 60000, sections: 1, decisions: 0, filesChanged: 0 },
     notes: [],
   }, overrides || {});
 }
@@ -188,6 +188,7 @@ const SAMPLE = `(function () {
     sub: text('#sub'),
     error: text('.error-state'),
     stripNums: q('.strip .item').map(function (i) { return (i.querySelector('.lbl') || {}).textContent + '=' + (i.querySelector('.num') || {}).textContent; }),
+    timeTileTitle: (function () { var t = q('.strip .item')[0]; return t ? t.getAttribute('title') : null; })(),
     sectionHeadings: q('.sec-entry .txt').map(function (e) { return e.textContent; }),
     rowKinds: q('.row[data-step]').map(function (r) { return r.className; }),
     youText: text('.row.k-you .you-msg'),
@@ -276,7 +277,7 @@ test('page: first paint from an open reply shows the title and the strip', opts,
       section('lead', 'Session start', null, []),
       section('you', 'please build the thing', 'u1:0', []),
     ],
-    strip: { totalTimeMs: 125000, sections: 2, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 125000, sections: 2, decisions: 1, filesChanged: 0 },
   });
   const page = await openPage(A);
   const s = await page.until((x) => x.title === 'My plan session', 'the title to render');
@@ -284,6 +285,21 @@ test('page: first paint from an open reply shows the title and the strip', opts,
   assert.ok(s.sectionHeadings.some((h) => h.indexOf('please build the thing') !== -1));
   assert.equal(s.jumpToStartButtons, 1, 'one "Jump to the start" control, no floating pill over the search box');
   assert.equal(s.jumpToStartInRail, 1, 'it lives in the outline');
+  await page.close();
+});
+
+test('page: the first tile is labelled Active time, with a tooltip explaining the 10-minute cap', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [])],
+    strip: { activeTimeMs: 3600000, wallClockMs: 7200000, sections: 1, decisions: 0, filesChanged: 0 },
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.stripNums.length > 0, 'the strip to render');
+  assert.ok(s.stripNums.some((n) => n.indexOf('Active time=') !== -1), 'the tile reads "Active time": ' + JSON.stringify(s.stripNums));
+  assert.equal(s.stripNums.some((n) => n.indexOf('Total time=') !== -1), false, 'the old "Total time" label is gone');
+  assert.ok(s.timeTileTitle && s.timeTileTitle.indexOf('each pause counted up to 10 minutes') !== -1, 'the tooltip states the cap: ' + s.timeTileTitle);
+  assert.ok(s.timeTileTitle && s.timeTileTitle.indexOf('From first to last step') !== -1, 'the tooltip still gives the wall-clock span: ' + s.timeTileTitle);
   await page.close();
 });
 
@@ -348,7 +364,7 @@ test('page: the Decisions switch narrows the outline to you/question/plan sectio
       section('you', 'first message', 'u1:0', []),
       section('approve', 'Plan approved', 'p1:0', []),
     ],
-    strip: { totalTimeMs: 1000, sections: 3, decisions: 2, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 3, decisions: 2, filesChanged: 0 },
   });
   const page = await openPage(A);
   await page.until((x) => x.sectionHeadings.length >= 2, 'the outline to render');
@@ -365,7 +381,7 @@ test('page: the Files changed tile shows clickable names that send openLink', op
       section('lead', 'Session start', null, []),
       section('you', 'edit the file', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
     ],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 1 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 1 },
   });
   fake.body = (stepId) => {
     if (stepId === 't1:0') return { title: 'Edit', input: 'C:\\\\proj\\\\foo.py', result: 'ok', path: 'C:\\\\proj\\\\foo.py' };
@@ -394,7 +410,7 @@ test('page: a Work line says in words what was done, never "N tool calls: Bash, 
       section('lead', 'Session start', null, []),
       section('you', 'fix the bug', 'u1:0', [{ kind: 'work', items: ['t1:0', 't2:0', 't3:0'] }]),
     ],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 1 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 1 },
   });
   fake.body = (stepId) => {
     if (stepId === 't1:0') return { title: 'Edit', input: 'C:\\proj\\foo.py', result: 'ok', path: 'C:\\proj\\foo.py' };
@@ -416,7 +432,7 @@ test('page: a single command Work line names it by its own description', opts, a
       section('lead', 'Session start', null, []),
       section('you', 'run the tests', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
     ],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
   });
   fake.body = (stepId) => {
     if (stepId === 't1:0') return { title: 'Bash', input: 'run the test suite\n$ npm test', result: 'ok' };
@@ -435,7 +451,7 @@ test('page: a Work line holding only empty reasoning reads "Thought for Ns", nev
       section('lead', 'Session start', null, []),
       section('you', 'think about it', 'u1:0', [{ kind: 'work', items: ['r1:0'] }]),
     ],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
   });
   const page = await openPage(A);
   const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0] !== '1 step', 'the Work line to settle');
@@ -450,7 +466,7 @@ test('page: a Work line holding reasoning with no stored duration reads "Thought
       section('lead', 'Session start', null, []),
       section('you', 'think about it', 'u1:0', [{ kind: 'work', items: ['r1:0'] }]),
     ],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
   });
   const page = await openPage(A);
   const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0] !== '1 step', 'the Work line to settle');
@@ -465,7 +481,7 @@ test('page: a Work line holding one tool the summary has no dedicated phrasing f
       section('lead', 'Session start', null, []),
       section('you', 'find the right tool', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
     ],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
   });
   fake.body = (stepId) => {
     if (stepId === 't1:0') return { title: 'ToolSearch', input: 'select:Read', result: 'ok' };
@@ -507,7 +523,7 @@ test('page: the "still indexing" line shows while indexing and disappears once i
   fake.pushes.push({
     type: 'stepsProgress', sessionId: A, fraction: 1, done: true,
     sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [])],
-    strip: { totalTimeMs: 1000, sections: 1, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 1, decisions: 1, filesChanged: 0 },
   });
   const s2 = await page.until((x) => x.indexNoteShown === false, 'the note to clear once indexing finishes');
   assert.equal(s2.indexNoteShown, false);
@@ -552,7 +568,7 @@ test('page: a follow push appends steps without jumping when scrolled up', opts,
   fake.pushes.push({
     type: 'stepsChanged', sessionId: A, appended: ['u2:0'],
     sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', []), section('you', 'second', 'u2:0', [])],
-    strip: { totalTimeMs: 2000, sections: 3, decisions: 2, filesChanged: 0 },
+    strip: { activeTimeMs: 2000, sections: 3, decisions: 2, filesChanged: 0 },
   });
   const s = await page.until((x) => x.sectionHeadings.length === 3, 'the appended section to arrive');
   assert.equal(s.scrollTop, before.scrollTop, 'the scroll position does not jump while scrolled away from the bottom');
@@ -569,7 +585,7 @@ test('page: with Follow on and the reader at the end, a push keeps it at the end
   fake.pushes.push({
     type: 'stepsChanged', sessionId: A, appended: ['u2:0'],
     sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', []), section('you', 'second', 'u2:0', [])],
-    strip: { totalTimeMs: 2000, sections: 3, decisions: 2, filesChanged: 0 },
+    strip: { activeTimeMs: 2000, sections: 3, decisions: 2, filesChanged: 0 },
   });
   const s = await page.until((x) => x.sectionHeadings.length === 3, 'the appended section to arrive');
   assert.equal(s.atBottom, true, 'follow keeps the reader pinned to the end');
@@ -633,7 +649,7 @@ test('page: a 3,000-step fake session stays responsive with a bounded DOM node c
     steps.push(step(id, 'you'));
     sections.push(section('you', 'turn ' + i, id, []));
   }
-  fake.open = () => openReply({ steps, sections, strip: { totalTimeMs: 600000, sections: sections.length, decisions: sections.length - 1, filesChanged: 0 } });
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 600000, sections: sections.length, decisions: sections.length - 1, filesChanged: 0 } });
   const page = await openPage(A);
   const s = await page.until((x) => x.sectionHeadings.length > 0, 'the rail to render');
   assert.ok(s.domRowCount < 500, 'only sections near the anchor hold full row DOM, got ' + s.domRowCount);
@@ -844,7 +860,7 @@ test('page: a note on a step off the current path stays listed, marked according
   fake.pushes.push({
     type: 'stepsChanged', sessionId: A, reset: 'u1:0',
     sections: [section('lead', 'Session start', null, []), section('you', 'retried message', 'u3:0', [])],
-    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
   });
   await page.until((x) => x.sectionHeadings.indexOf('retried message') !== -1, 'the reset to land');
   const s = await page.sample();

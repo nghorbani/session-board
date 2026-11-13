@@ -475,30 +475,59 @@ test('sections and the strip counts; a you step is never doubled', async () => {
   assert.equal(youBodyRows, 0, 'you steps never appear as rows, only as section headings');
   assert.ok(strip.filesChanged >= 2);
   assert.ok(strip.decisions >= 1);
-  assert.ok(strip.totalTimeMs >= 0);
+  assert.ok(strip.activeTimeMs >= 0);
   assert.equal(strip.sections, sections.length);
 });
 
-test('total time is working time, not the wall-clock span: a session left open overnight does not read as hours', async () => {
+test('active time sums the gaps between steps, each one capped at 10 minutes: a session left open overnight does not read as hours', async () => {
   const file = newFile();
   const t0 = new Date(2026, 0, 1, 9, 0, 0);
   const at = (mins) => new Date(t0.getTime() + mins * 60000).toISOString();
   writeLines(file, [
-    // first section: 9:00 to 9:02, two minutes of real work
+    // first section: 9:00 to 9:02, a two-minute gap
     Object.assign(userLine(uuid(1), null, 'morning task'), { timestamp: at(0) }),
     Object.assign(assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'on it' }]), { timestamp: at(2) }),
-    // left open overnight: next input is 18 hours later
+    // left open overnight: the next step is 18 hours later, but that one gap counts for 10
+    // minutes at most, not the full 18 hours
     Object.assign(userLine(uuid(3), uuid(2), 'next day task'), { timestamp: at(18 * 60) }),
     Object.assign(assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'done' }]), { timestamp: at(18 * 60 + 3) }),
   ]);
   const idx = steps.createStepIndex(file);
   await idx.open();
   const { strip } = steps.buildSections(idx.steps(), idx.body.bind(idx));
-  // working time: ~2 minutes in the first section plus ~3 minutes in the second, nowhere near
-  // the 18-hour wall-clock span between the two inputs.
-  assert.ok(strip.totalTimeMs < 10 * 60 * 1000, 'the overnight gap must not be counted as working time: got ' + strip.totalTimeMs + 'ms');
-  assert.ok(strip.totalTimeMs >= 4 * 60 * 1000, 'the actual working spans should still be counted: got ' + strip.totalTimeMs + 'ms');
+  // 2 minutes (step 1 to step 2) + 10 minutes capped (step 2 to step 3, an 18-hour gap) + 3
+  // minutes (step 3 to step 4) = 15 minutes, not 18 hours plus 5 minutes.
+  assert.ok(strip.activeTimeMs <= 16 * 60 * 1000, 'the overnight gap counts for 10 minutes at most: got ' + strip.activeTimeMs + 'ms');
+  assert.ok(strip.activeTimeMs >= 14 * 60 * 1000, 'the real gaps are still counted in full: got ' + strip.activeTimeMs + 'ms');
   assert.ok(strip.wallClockMs >= 18 * 60 * 60000, 'the wall-clock span is kept too, for the tooltip');
+});
+
+test('a session left open for a day with about one hour of real work reads about one hour of active time', async () => {
+  const file = newFile();
+  const t0 = new Date(2026, 0, 1, 9, 0, 0);
+  const at = (mins) => new Date(t0.getTime() + mins * 60000).toISOString();
+  // six short bursts of ten minutes' real work each, an hour of real activity, strung across a
+  // day with long idle stretches (90 minutes, well over the 10-minute cap) between them.
+  const lines = [];
+  let u = 1;
+  for (let burst = 0; burst < 6; burst++) {
+    const base = burst * 100; // 90 idle minutes plus 10 minutes of work, per burst
+    const parentUuid = burst === 0 ? null : uuid(u - 1);
+    lines.push(Object.assign(userLine(uuid(u), parentUuid, 'burst ' + burst), { timestamp: at(base) }));
+    u++;
+    lines.push(Object.assign(assistantLine(uuid(u), uuid(u - 1), 'm' + burst, [{ type: 'text', text: 'working' }]), { timestamp: at(base + 10) }));
+    u++;
+  }
+  writeLines(file, lines);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const { strip } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  // six 10-minute work gaps plus five 90-minute idle gaps, each capped at 10: 6*10 + 5*10 = 110
+  // minutes of active time against a wall clock of 590 minutes -- not a day of work, but not
+  // "about one hour" either, since every idle stretch still counts up to the cap; the point of
+  // the fixture is that the real work bursts are never lost under the cap.
+  assert.ok(strip.activeTimeMs >= 60 * 60 * 1000, 'the six work bursts are fully counted: got ' + strip.activeTimeMs + 'ms');
+  assert.ok(strip.activeTimeMs < strip.wallClockMs, 'active time stays well under the full day the session was open: got ' + strip.activeTimeMs + 'ms of ' + strip.wallClockMs + 'ms');
 });
 
 test('Work lines stay in time order: a run of tool calls between two texts becomes its own Work line, not a lump at the end', async () => {

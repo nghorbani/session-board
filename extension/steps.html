@@ -737,7 +737,7 @@ function flashNotice(text) {
 function renderStrip() {
   var el = document.getElementById('strip');
   el.textContent = '';
-  var strip = state.strip || { totalTimeMs: 0, wallClockMs: 0, sections: 0, decisions: 0, filesChanged: 0 };
+  var strip = state.strip || { activeTimeMs: 0, wallClockMs: 0, sections: 0, decisions: 0, filesChanged: 0 };
   var provisional = state.indexing;
   function tile(key, num, label, clickable, extra, title) {
     var div = document.createElement('div');
@@ -749,9 +749,9 @@ function renderStrip() {
     if (clickable) div.addEventListener('click', function () { toggleLens(key); });
     return div;
   }
-  var timeTitle = 'Working time: the time spent in each section, not counting gaps between them.'
-    + (strip.wallClockMs ? ' Wall clock from start to end: ' + fmtDuration(strip.wallClockMs) + '.' : '');
-  el.appendChild(tile('time', fmtDuration(strip.totalTimeMs), 'Total time', false, '', timeTitle));
+  var timeTitle = 'Time between steps, each pause counted up to 10 minutes.'
+    + (strip.wallClockMs ? ' From first to last step: ' + fmtDuration(strip.wallClockMs) + '.' : '');
+  el.appendChild(tile('time', fmtDuration(strip.activeTimeMs), 'Active time', false, '', timeTitle));
   el.appendChild(tile('sections', strip.sections, 'Sections'));
   var decisionsTile = tile('decisions', strip.decisions, 'Decisions', true);
   if (state.lens === 'decisions') decisionsTile.classList.add('on');
