@@ -79,10 +79,7 @@ class BoardProvider {
     this.stepsService = createStepsService({
       resolveTranscript: (sessionId) => core.transcriptIndex().get(sessionId)
         || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0] || null,
-      sessionTitle: (sessionId) => {
-        const row = this.sessionRow(sessionId);
-        return (row && (row.title || row.name)) || null;
-      },
+      sessionTitle: (sessionId) => this.stepsSessionTitle(sessionId),
       dataDir: core.DATA_DIR,
       rg: { probe: (appRoot) => core.rgProbe(appRoot), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
     });
@@ -320,7 +317,22 @@ class BoardProvider {
   }
 
   sessionRow(sessionId) {
-    return ((this.last && this.last.sessions) || []).find((s) => s.sessionId === sessionId) || null;
+    const live = ((this.last && this.last.sessions) || []).find((s) => s.sessionId === sessionId);
+    if (live) return live;
+    return ((this.last && this.last.ended) || []).find((s) => s.sessionId === sessionId) || null;
+  }
+
+  /** A session's title for the Steps panel and tab: the row's title when the session is live or
+      ended (both carry Claude Code's own name), else read straight from its transcript (a
+      session the board has not snapshotted yet, right after a reload). Never the 8-hex-id
+      fallback here; that is the page's own last resort when this returns null too. */
+  stepsSessionTitle(sessionId) {
+    const row = this.sessionRow(sessionId);
+    if (row && (row.title || row.name)) return row.title || row.name;
+    const file = core.transcriptIndex().get(sessionId) || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0];
+    if (!file) return null;
+    const facts = core.transcriptFacts(sessionId, file);
+    return facts.customTitle || facts.title || null;
   }
 
   // -- opening ---------------------------------------------------------------------------
@@ -457,8 +469,7 @@ class BoardProvider {
   async openSteps(sessionId) {
     const existing = this.stepsPanels.get(sessionId);
     if (existing) { existing.reveal(); return; }
-    const row = this.sessionRow(sessionId);
-    const title = (row && (row.title || row.name)) || sessionId.slice(0, 8);
+    const title = this.stepsSessionTitle(sessionId) || sessionId.slice(0, 8);
     const panel = vscode.window.createWebviewPanel(
       'sessionBoard.steps', 'Steps: ' + title, vscode.ViewColumn.Beside,
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },

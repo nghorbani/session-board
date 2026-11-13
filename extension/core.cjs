@@ -2629,6 +2629,7 @@ module.exports = {
   ARCHIVE_TRANSCRIPTS_DIR,
   transcriptRoots,
   transcriptIndex,
+  transcriptFacts,
   liveTranscripts,
   stowedTranscripts,
   registryRecords,

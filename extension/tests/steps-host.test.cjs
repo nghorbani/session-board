@@ -50,6 +50,26 @@ test('asking again for the same session reveals the existing panel instead of cr
   assert.equal(vscode.__panels[0].__revealed, 1);
 });
 
+test('an ended session\'s panel and the session title use its row from last.ended, not the id', async () => {
+  const service = fakeService();
+  const endedLast = { sessions: [], ended: [{ sessionId: A, title: 'Plan the migration', status: 'ended' }], limits: {}, usage: null };
+  const { provider } = boot({}, { last: endedLast });
+  provider.stepsService = service;
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  assert.equal(vscode.__panels[0].title, 'Steps: Plan the migration');
+});
+
+test('a session the board has not snapshotted at all gets its title read straight from the transcript', async () => {
+  const service = fakeService();
+  const { provider } = boot({
+    transcriptIndex: () => new Map([[A, 'C:\\fake\\' + A + '.jsonl']]),
+    transcriptFacts: () => ({ tokens: null, title: 'Generated title', customTitle: 'Renamed by hand', lastPrompt: null }),
+  }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
+  provider.stepsService = service;
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  assert.equal(vscode.__panels[0].title, 'Steps: Renamed by hand', 'the custom title wins over the generated one');
+});
+
 test('a different session opens its own panel', async () => {
   const l = last();
   l.sessions.push({ sessionId: B, pid: 101, title: 'Other session', name: 'other', status: 'idle', unseen: false, cwd: 'C:\\y', window: null, archived: false });

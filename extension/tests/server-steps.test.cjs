@@ -79,6 +79,18 @@ test('POST /api/steps open forwards to the service and answers an openResult', a
   assert.ok(Array.isArray(r.body.steps));
 });
 
+test('open answers the real session title read from the transcript when no live row names it', async () => {
+  const other = uuid(9);
+  const otherFile = path.join(slugDir, other + '.jsonl');
+  fs.writeFileSync(otherFile, [
+    { type: 'user', uuid: uuid(10), parentUuid: null, timestamp: new Date().toISOString(), message: { role: 'user', content: 'plan the migration' } },
+    { type: 'custom-title', sessionId: other, customTitle: 'Plan the migration' },
+  ].map(line).join(''));
+  const r = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: other }) });
+  assert.equal(r.body.ok, true);
+  assert.equal(r.body.title, 'Plan the migration', 'the title comes from the transcript, not the session\'s id');
+});
+
 test('invalid JSON is a 400, a missing token is 403', async () => {
   let r = await call('POST', '/api/steps', { body: '{not json' });
   assert.equal(r.status, 400);

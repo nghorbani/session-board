@@ -43,7 +43,11 @@ const stepsService = createStepsService({
     || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0] || null,
   sessionTitle: (sessionId) => {
     const row = core.lastGoodRows().find((r) => r.sessionId === sessionId);
-    return (row && (row.title || row.name)) || null;
+    if (row && (row.title || row.name)) return row.title || row.name;
+    const file = core.transcriptIndex().get(sessionId) || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0];
+    if (!file) return null;
+    const facts = core.transcriptFacts(sessionId, file);
+    return facts.customTitle || facts.title || null;
   },
   dataDir: core.DATA_DIR,
   rg: { probe: () => core.rgProbe(), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
