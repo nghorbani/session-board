@@ -137,6 +137,9 @@ async function serve(req, res) {
     const msg = await readBody(req);
     fake.calls.push(msg);
     if (!msg) return json(res, 400, { error: 'bad json' });
+    // a connection that dies under a request: what a browser sees when it reuses an idle
+    // socket the server is closing at that moment
+    if (fake.dropOnce && fake.dropOnce === msg.type) { fake.dropOnce = null; req.socket.destroy(); return; }
     if (msg.type === 'open') {
       const base = fake.open();
       const notes = base.notes && base.notes.length ? base.notes : noteList();
@@ -290,6 +293,21 @@ test.beforeEach(() => {
   fake.search = () => ({ stepIds: [], capped: false });
   fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
   fake.notes.clear();
+  fake.dropOnce = null;
+});
+
+// -- transport ------------------------------------------------------------------------------
+
+test('page: a read request whose connection dies is sent once more, so the first paint still arrives', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  fake.dropOnce = 'open';
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'first paint after one dropped request');
+  assert.equal(fake.calls.filter((m) => m && m.type === 'open').length, 2, 'open went out twice: the dropped one and the retry');
+  await page.close();
 });
 
 // -- first paint ----------------------------------------------------------------------------

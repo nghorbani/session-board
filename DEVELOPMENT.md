@@ -80,7 +80,7 @@ the flag back as visible.
 ## Tests
 
 ```powershell
-cd extension; npm test          # node --test "tests/*.test.cjs"; build.ps1 runs this too
+cd extension; npm test          # node tests/run.cjs: the suites in parallel, then the two page suites alone; build.ps1 runs this too
 node tools/screenshot.cjs       # refresh extension/media/board.png and search.png
 ```
 

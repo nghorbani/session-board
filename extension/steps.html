@@ -346,13 +346,25 @@ var pending = Object.create(null); // requestId -> resolve fn, for the request/r
 var pollAfter = 0;
 var pollTimer = null;
 
-function send(msg) {
-  if (vsapi) { vsapi.postMessage(msg); return Promise.resolve(null); }
+// Reads are sent once more when the connection fails: a lost first request would otherwise leave
+// the tab empty. Writes (notes, sending) are never repeated, since a second copy could apply twice.
+var RETRY_ONCE = { open: 1, body: 1, bodies: 1, search: 1, seen: 1 };
+var RETRY_AFTER_MS = 200;
+
+function post(msg) {
   return fetch('/api/steps', {
     method: 'POST', cache: 'no-store',
     headers: { 'X-Board-Token': TOKEN, 'Content-Type': 'application/json' },
     body: JSON.stringify(msg),
-  }).then(function (r) { return r.json(); }).catch(function (e) {
+  }).then(function (r) { return r.json(); });
+}
+
+function send(msg) {
+  if (vsapi) { vsapi.postMessage(msg); return Promise.resolve(null); }
+  return post(msg).catch(function (e) {
+    if (!RETRY_ONCE[msg.type]) throw e;
+    return new Promise(function (res) { setTimeout(res, RETRY_AFTER_MS); }).then(function () { return post(msg); });
+  }).catch(function (e) {
     return { type: (msg.type || 'unknown') + 'Result', ok: false, message: 'server not reachable: ' + e.message };
   });
 }

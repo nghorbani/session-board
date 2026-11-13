@@ -48,7 +48,7 @@
   ],
   "main": "./extension.js",
   "scripts": {
-    "test": "node --test \"tests/*.test.cjs\""
+    "test": "node tests/run.cjs"
   },
   "contributes": {
     "viewsContainers": {
