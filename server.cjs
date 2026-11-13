@@ -116,6 +116,12 @@ async function handle(req, res) {
       html = '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
         + '<body style="font-family: sans-serif; padding: 2em;">Steps viewer coming soon.</body></html>';
     }
+    // the session id comes from ?session=, the same way the board page carries its token: a
+    // meta tag the page reads once at load, not a query string it would have to keep parsing.
+    const sessionId = String(parsed.searchParams.get('session') || '').replace(/"/g, '&quot;');
+    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">'
+      + '<meta name="board-token" content="' + TOKEN + '">'
+      + '<meta name="steps-session" content="' + sessionId + '">');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
     res.end(html);
     return;

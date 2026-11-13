@@ -423,7 +423,7 @@ class BoardProvider {
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
     );
     this.stepsPanels.set(sessionId, panel);
-    panel.webview.html = this.stepsHtml(panel.webview);
+    panel.webview.html = this.stepsHtml(panel.webview, sessionId);
     const unsubscribe = this.stepsService.subscribe(sessionId, (msg) => {
       try { panel.webview.postMessage(msg); } catch (_) { /* panel gone */ }
     });
@@ -439,9 +439,11 @@ class BoardProvider {
     });
   }
 
-  /** The Steps page itself is a later part; until extension/steps.html exists, a one-line
-   *  placeholder loads in its place, through the same CSP and nonce approach as the board page. */
-  stepsHtml(webview) {
+  /** Until extension/steps.html exists, a one-line placeholder loads in its place, through the
+   *  same CSP and nonce approach as the board page; the session id rides in its own meta tag,
+   *  the way index.html's board-token does, since the panel's postMessage channel carries only
+   *  the host's own replies, never an initial value the page can read before its first send. */
+  stepsHtml(webview, sessionId) {
     const stepsHtmlPath = path.join(this.context.extensionPath, 'steps.html');
     let html;
     try {
@@ -456,7 +458,8 @@ class BoardProvider {
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
       + 'style-src ' + webview.cspSource + ' \'unsafe-inline\'; '
       + 'script-src \'nonce-' + nonce + '\';">';
-    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp);
+    const sessionMeta = '<meta name="steps-session" content="' + String(sessionId).replace(/"/g, '&quot;') + '">';
+    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp + sessionMeta);
     html = html.replace('<script>', '<script nonce="' + nonce + '">');
     return html;
   }

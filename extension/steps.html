@@ -1,0 +1,1605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steps</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --dim: #6b7280; --faint: #9aa1ab; --line: #e2e5ea;
+    --panel: #f5f6f8; --rail: #fafafb; --accent: #0b62c4; --mark: #ffe58a;
+    --you: #0b62c4; --plan: #7a3fc4; --err: #c0392b; --note: #b7791f; --hit: #b45309; --new: #1f8a52;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e1e; --fg: #d4d4d4; --dim: #8b8f98; --faint: #6a6e77; --line: #33363c;
+      --panel: #252629; --rail: #202124; --accent: #4da3ff; --mark: #6b5a12;
+      --you: #4da3ff; --plan: #b48cf2; --err: #f08a7c; --note: #e0b252; --hit: #e8b24d; --new: #5fcf96;
+    }
+  }
+  body.vscode {
+    --bg: var(--vscode-editor-background, #1e1e1e);
+    --fg: var(--vscode-foreground, #d4d4d4);
+    --dim: var(--vscode-descriptionForeground, #8b8f98);
+    --faint: var(--vscode-disabledForeground, #6a6e77);
+    --line: var(--vscode-widget-border, #33363c);
+    --panel: var(--vscode-editorWidget-background, #252629);
+    --rail: var(--vscode-sideBar-background, #202124);
+    --accent: var(--vscode-focusBorder, #4da3ff);
+    --you: var(--vscode-textLink-foreground, #4da3ff);
+    --plan: #b48cf2;
+    --err: var(--vscode-errorForeground, #f08a7c);
+    --note: #e0b252; --hit: #e8b24d; --new: #5fcf96;
+    --mark: var(--vscode-editor-findMatchHighlightBackground, #6b5a12);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  button { font: inherit; color: var(--fg); cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary, button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  input[type=search] { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; }
+  input[type=search]:focus, button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+  header { flex: 0 0 auto; padding: 8px 14px 10px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 14px; font-weight: 600; margin: 0; }
+  .sub { color: var(--dim); font-size: 11px; margin-top: 1px; }
+  .indexnote { color: var(--dim); font-size: 11px; margin-top: 3px; display: none; }
+  .indexnote.show { display: block; }
+  .bar { display: flex; gap: 6px; align-items: center; margin-top: 7px; flex-wrap: wrap; }
+  .bar input[type=search] { flex: 1 1 180px; min-width: 120px; }
+  .bar .count { color: var(--dim); font-size: 11px; min-width: 50px; }
+  .sw { color: var(--dim); font-size: 11px; display: flex; gap: 4px; align-items: center; cursor: pointer; user-select: none; }
+
+  .strip { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel); margin-top: 8px; }
+  .strip .item { flex: 1 1 0; padding: 6px 10px; border-right: 1px solid var(--line); cursor: pointer; text-align: center; background: none; border-radius: 0; border-top: none; border-bottom: none; border-left: none; }
+  .strip .item:last-child { border-right: none; }
+  .strip .item.on { background: var(--accent); color: #fff; }
+  .strip .item.static { cursor: default; }
+  .strip .item.inactive { opacity: .5; cursor: default; }
+  .strip .num { display: block; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .strip .lbl { display: block; font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .03em; }
+  .strip .item.on .lbl { color: #fff; opacity: .85; }
+  .strip .item.provisional .num::after { content: "…"; font-weight: 400; opacity: .6; }
+
+  .app { flex: 1 1 auto; min-height: 0; display: flex; position: relative; }
+  .rail-toggle { display: none; align-items: center; gap: 7px; padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--rail); cursor: pointer; font-size: 12px; }
+  .rail-toggle .car { color: var(--dim); }
+  .rail-toggle .cur-turn { color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail { flex: 0 0 272px; border-right: 1px solid var(--line); background: var(--rail); overflow-y: auto; padding: 6px 0 40px; }
+  .rail-top { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .rail-top button { width: 100%; }
+  .sec-entry { display: flex; align-items: baseline; gap: 7px; padding: 6px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .sec-entry:hover { background: var(--panel); }
+  .sec-entry.cur { background: var(--panel); box-shadow: inset 2px 0 0 var(--accent); }
+  .sec-entry .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--you); flex: 0 0 auto; }
+  .sec-entry.k-qa .dot, .sec-entry.k-approve .dot { background: var(--plan); }
+  .sec-entry .body-col { min-width: 0; flex: 1 1 auto; }
+  .sec-entry .txt { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sec-entry.has-hit .txt { color: var(--hit); }
+  .sec-entry .t { color: var(--dim); font-size: 10.5px; }
+  .sec-entry .note-mark { color: var(--note); font-size: 11px; }
+
+  .reader { flex: 1 1 auto; overflow-y: auto; padding: 4px 22px 90px; position: relative; }
+  .reader-inner { max-width: 760px; margin: 0 auto; }
+  .empty-state { color: var(--dim); padding: 40px 10px; text-align: center; }
+
+  .sec-head { display: flex; gap: 8px; margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 2px solid var(--you); scroll-margin-top: 10px; }
+  .sec-head .lbl { color: var(--you); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .sec-head.k-qa .lbl, .sec-head.k-approve .lbl { color: var(--plan); }
+  .restate { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+
+  .row { padding: 9px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 10px; }
+  .row .meta { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+  .row .time { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .row .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--line); color: var(--dim); }
+  .row.k-you .chip { color: var(--you); border-color: var(--you); }
+  .row.k-claude .chip { color: var(--accent); border-color: var(--accent); }
+  .row.k-qa .chip, .row.k-plan .chip { color: var(--plan); border-color: var(--plan); }
+  .row.k-plan .body { border-left: 3px solid var(--plan); padding-left: 10px; }
+  .row.cur-hit { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  .you-msg { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; }
+  .approved-line { color: var(--plan); font-size: 12px; margin-top: 6px; font-weight: 600; }
+
+  .qcard .qhead { color: var(--plan); text-transform: uppercase; font-weight: 600; font-size: 11px; margin-bottom: 4px; }
+  .qcard .qtext { font-weight: 600; margin-bottom: 8px; }
+  .qcard .qpick { color: var(--dim); font-size: 11px; margin-bottom: 7px; }
+  .qoptions { display: flex; flex-direction: column; gap: 7px; }
+  .qopt { display: flex; gap: 8px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; }
+  .qopt.chosen { border-color: var(--you); background: var(--panel); }
+  .qmark { color: var(--faint); flex: 0 0 auto; }
+  .qopt.chosen .qmark { color: var(--you); }
+  .qopt-col { min-width: 0; flex: 1 1 auto; }
+  .qopt-lrow { display: flex; align-items: center; gap: 7px; }
+  .qopt-label { font-weight: 600; color: var(--dim); }
+  .qopt.chosen .qopt-label { color: var(--fg); }
+  .qopt-tag { font-size: 10px; text-transform: uppercase; color: var(--you); border: 1px solid var(--you); border-radius: 9px; padding: 0 6px; }
+  .qopt-desc { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .qopt.chosen .qopt-desc { color: var(--fg); }
+  .answerline { border-left: 3px solid var(--you); padding-left: 10px; margin-top: 8px; }
+  .answerline .lbl { color: var(--dim); font-size: 11px; text-transform: uppercase; }
+  .answerline .av { font-weight: 600; color: var(--you); }
+  .qnotyet { color: var(--err); font-size: 12px; }
+
+  .worksum { color: var(--fg); }
+  .facts { color: var(--faint); font-size: 11px; margin-top: 6px; }
+  .files { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .flbl { color: var(--dim); font-size: 10px; text-transform: uppercase; }
+  .filerow { display: flex; gap: 5px; font-size: 12px; }
+  .fkind { color: var(--dim); font-size: 10.5px; min-width: 28px; }
+  a.lnk { color: var(--accent); text-decoration: underline; cursor: pointer; overflow-wrap: anywhere; background: none; border: none; padding: 0; font: inherit; }
+  .detailbtn { font-size: 11px; color: var(--dim); padding: 2px 7px; margin-top: 6px; }
+  .worklist { margin: 7px 0 0; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; }
+  .worklist.open { display: block; }
+  .wl-item { display: flex; gap: 8px; padding: 3px 0; font-size: 12px; border-bottom: 1px solid var(--line); }
+  .wl-item:last-child { border-bottom: none; }
+  .wn { font-family: Consolas, "Cascadia Mono", monospace; color: var(--dim); min-width: 80px; flex: 0 0 auto; }
+  .wb { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11.5px; overflow-wrap: anywhere; }
+  pre.fold { margin: 6px 0 0; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; max-height: 260px; overflow: auto; font-size: 11.5px; white-space: pre-wrap; }
+
+  .report-box { margin-top: 7px; }
+  .report-body { max-height: 220px; overflow: hidden; position: relative; }
+  .report-body:not(.open)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(to bottom, transparent, var(--bg)); }
+  .report-body.open { max-height: none; }
+  .showall { font-size: 11px; color: var(--dim); margin-top: 4px; }
+
+  .md p { margin: 0 0 9px; white-space: pre-line; }
+  .md .h { font-weight: 600; margin: 13px 0 5px; }
+  .md .h1, .md .h2 { font-size: 15px; }
+  .md code, a.code { font-family: Consolas, "Cascadia Mono", monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+  .md .li { display: grid; grid-template-columns: 20px 1fr; margin: 2px 0; }
+  .md .bullet { color: var(--dim); }
+  .md table { border-collapse: collapse; margin: 7px 0 9px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 3px 8px; }
+  .md th { background: var(--panel); }
+  pre.mdcode { margin: 7px 0; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: auto; font-size: 11.5px; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+
+  .new-marker { display: flex; align-items: center; gap: 8px; margin: 20px 0; color: var(--new); font-size: 11px; font-weight: 600; }
+  .new-marker::before, .new-marker::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--new); opacity: .5; }
+
+  .edgebar { position: fixed; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; pointer-events: none; }
+  .edgebar.top { top: 50px; }
+  .edgebar.bottom { bottom: 0; padding-bottom: 10px; }
+  .pill { pointer-events: auto; background: var(--accent); color: #fff; border-radius: 999px; padding: 7px 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(0,0,0,.25); border: none; }
+  .edgebar.top .pill { background: var(--panel); color: var(--fg); border: 1px solid var(--line); box-shadow: 0 4px 14px rgba(0,0,0,.18); }
+
+  .files-view { padding: 4px 0; }
+  .fsec { margin-bottom: 16px; }
+  .fsec-h { color: var(--you); font-weight: 600; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+  .fp { display: block; width: 100%; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; padding: 3px 0; color: var(--accent); cursor: pointer; background: none; border: none; text-align: left; }
+
+  .error-state, .status-line { color: var(--dim); padding: 30px 10px; text-align: center; }
+  .error-state { color: var(--err); }
+
+  @media (max-width: 760px) {
+    header { padding: 8px 10px; }
+    .bar input[type=search] { flex-basis: 100px; min-width: 70px; }
+    .bar button, .sw { font-size: 11px; }
+    .strip .num { font-size: 13px; }
+    .app { flex-direction: column; }
+    .rail-toggle { display: flex; }
+    .rail {
+      position: absolute; left: 0; right: 0; top: 34px; z-index: 4;
+      max-height: min(68vh, 520px); border-right: 0; border-bottom: 1px solid var(--line);
+      box-shadow: 0 10px 24px rgba(0,0,0,.28); display: none;
+    }
+    .rail.open { display: block; }
+    .reader { padding: 4px 12px 90px; }
+    .edgebar.top { top: 112px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Steps</h1>
+  <div class="sub" id="sub"></div>
+  <div class="indexnote" id="indexnote">still indexing the rest of this transcript; what you see below may grow</div>
+  <div class="bar">
+    <input type="search" id="q" placeholder="Search words in the story" autocomplete="off" spellcheck="false">
+    <span class="count" id="count"></span>
+    <button id="prev" title="Previous hit">&#8593;</button>
+    <button id="next" title="Next hit">&#8595;</button>
+    <button id="decisions" title="Show only your messages, answered questions and approved plans">Decisions</button>
+    <label class="sw" title="Show the tool calls under every Work line"><input type="checkbox" id="allTools"> Tool calls</label>
+    <label class="sw" title="Stay at the end as new steps arrive"><input type="checkbox" id="follow" checked> Follow</label>
+  </div>
+  <div class="strip" id="strip"></div>
+</header>
+<div class="app">
+  <div class="rail-toggle" id="railToggle"><span class="car" id="railCar">&#9656;</span><span class="cur-turn" id="railCurTurn">Story</span></div>
+  <nav class="rail" id="rail"></nav>
+  <main class="reader" id="reader"><div class="reader-inner" id="readerInner"></div></main>
+</div>
+<div class="edgebar top" id="topBar" style="display:none"><button class="pill" id="toStart">Jump to the start</button></div>
+<div class="edgebar bottom" id="endBar" style="display:none"><button class="pill" id="endPill"></button></div>
+
+<script>
+'use strict';
+/*
+ * Session Board Steps viewer: a story of one session's steps, built from the message-based
+ * service (steps-service.cjs). Two transports, like index.html: acquireVsCodeApi() postMessage
+ * in the webview, fetch POST /api/steps plus polling GET /api/steps/poll in a browser.
+ *
+ * The page keeps a compact step index (what "open" and "stepsProgress"/"stepsChanged" pushes
+ * carry) and renders sections lazily: only sections near the viewport hold their full row DOM,
+ * so a session with thousands of steps stays responsive. Step texts load on demand in small
+ * batches (the "bodies" message) for the sections currently in view; a step shows its preview
+ * until its body arrives.
+ */
+
+var vsapi = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
+if (vsapi) document.body.classList.add('vscode');
+var sessionMeta = document.querySelector('meta[name="steps-session"]');
+var SESSION_ID = sessionMeta ? sessionMeta.getAttribute('content') : '';
+if (!SESSION_ID && !vsapi) {
+  var qp = new URLSearchParams(window.location.search);
+  SESSION_ID = qp.get('session') || '';
+}
+var tokenMeta = document.querySelector('meta[name="board-token"]');
+var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
+
+var POLL_MS = 1200;
+var SEEN_DEBOUNCE_MS = 1500;
+var SEARCH_DEBOUNCE_MS = 150;
+var RENDER_WINDOW = 60;     // sections kept fully rendered around the anchor; the rest are stubs
+var BODY_BATCH_DELAY_MS = 60;
+
+var state = {
+  loaded: false,
+  error: null,                 // a plain-words failure the page shows instead of the story
+  title: '',
+  sections: [],                // full section list the page currently knows (from open/pushes)
+  strip: null,
+  generation: 0,
+  indexing: false,
+  seenStepId: null,
+  bodies: Object.create(null), // stepId -> body record (text/truncated/size/... or the typed shapes)
+  bodiesPending: Object.create(null),
+  lens: 'all',                 // 'all' | 'decisions' | 'files'
+  showAllTools: false,
+  follow: true,
+  query: '',
+  hits: [],                    // ids of steps/sections carrying a hit, in document order
+  curHit: -1,
+  openWork: Object.create(null),   // stepId or work-group key -> true while its detail list is open
+  openReports: Object.create(null),
+  drawerOpen: false,
+  atBottom: true,
+  atTop: true,
+  lastSeenSent: null,
+  seenTimer: null,
+  bodyBatchTimer: null,
+  bodyBatchWanted: null,       // Set of stepIds queued for the next bodies request
+  searchTimer: null,
+  searchRequestId: 0,
+};
+
+function esc(s) { return String(s == null ? '' : s); }
+
+function fmtClock(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function fmtClockSec(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+function fmtDuration(ms) {
+  ms = Number(ms) || 0;
+  var m = Math.round(ms / 60000);
+  if (m < 1) return 'under a minute';
+  if (m < 60) return m + 'm';
+  var h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
+// -- transport ----------------------------------------------------------------------------
+
+var nextRequestId = 1;
+function newRequestId() { return 'r' + (nextRequestId++) + '-' + Date.now(); }
+
+var pending = Object.create(null); // requestId -> resolve fn, for the request/reply pattern over postMessage
+var pollAfter = 0;
+var pollTimer = null;
+
+function send(msg) {
+  if (vsapi) { vsapi.postMessage(msg); return Promise.resolve(null); }
+  return fetch('/api/steps', {
+    method: 'POST', cache: 'no-store',
+    headers: { 'X-Board-Token': TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(msg),
+  }).then(function (r) { return r.json(); }).catch(function (e) {
+    return { type: (msg.type || 'unknown') + 'Result', ok: false, message: 'server not reachable: ' + e.message };
+  });
+}
+
+/* A request/reply call: sends msg with a fresh requestId and resolves when the matching reply
+   arrives, over either transport. The webview path listens on window message events (wired
+   once, below); the browser path is a plain fetch whose JSON body is the reply itself. */
+function call(msg) {
+  var requestId = newRequestId();
+  msg = Object.assign({ requestId: requestId, sessionId: SESSION_ID }, msg);
+  if (vsapi) {
+    return new Promise(function (resolve) {
+      pending[requestId] = resolve;
+      vsapi.postMessage(msg);
+    });
+  }
+  return send(msg);
+}
+
+function startPolling() {
+  if (vsapi || pollTimer) return;
+  pollTimer = setInterval(function () {
+    fetch('/api/steps/poll?session=' + encodeURIComponent(SESSION_ID) + '&after=' + pollAfter, {
+      headers: { 'X-Board-Token': TOKEN }, cache: 'no-store',
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      if (!res || typeof res.seq !== 'number') return;
+      pollAfter = res.seq;
+      (res.pushes || []).forEach(onPush);
+    }).catch(function () { /* the next tick tries again */ });
+  }, POLL_MS);
+}
+
+if (vsapi) {
+  window.addEventListener('message', function (ev) {
+    var msg = ev.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.requestId && pending[msg.requestId]) {
+      var resolve = pending[msg.requestId];
+      delete pending[msg.requestId];
+      resolve(msg);
+      return;
+    }
+    onPush(msg);
+  });
+}
+
+// -- push handling (follow, indexing progress) ---------------------------------------------
+
+function onPush(msg) {
+  if (!msg || msg.sessionId !== SESSION_ID) return;
+  if (msg.type === 'stepsProgress') {
+    state.indexing = !msg.done;
+    if (msg.error) { showStatus('indexing stopped: ' + msg.error); return; }
+    if (msg.sections) mergeSections(msg.sections, msg.strip);
+    renderIndexNote();
+    renderStrip();
+    return;
+  }
+  if (msg.type === 'stepsChanged') {
+    if (msg.error) { showStatus(msg.error); return; }
+    if (msg.reset !== undefined && msg.reset !== null) {
+      // the active path changed further back than the tail (a retry, an edited message): the
+      // simplest correct answer is to redraw from the service's own current section list,
+      // which msg.sections already carries, rather than try to patch a divergent tree in place.
+      mergeSections(msg.sections, msg.strip, true);
+    } else if (msg.sections) {
+      mergeSections(msg.sections, msg.strip);
+    }
+    renderAll();
+    maybeStickToBottom();
+    return;
+  }
+}
+
+/* Merge an incoming section list onto what the page already has. Every section carries a
+   stable key (its opener step's id, or null for the lead section, which is always sections[0]):
+   a push can safely replace the whole array, because the keys of sections already rendered are
+   unchanged across a push, only new ones are appended (or, on a reset, the array is shorter
+   than before and some keys drop away) -- the per-section DOM nodes below are rebuilt from
+   this array by key, not diffed field by field, so a replace here is enough. */
+function mergeSections(sections, strip, isReset) {
+  state.sections = sections || [];
+  if (strip) state.strip = strip;
+  if (isReset) state.bodies = Object.create(null); // a reset may reuse ids under a new generation
+}
+
+function showStatus(text) {
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var div = document.createElement('div');
+  div.className = 'status-line';
+  div.textContent = text;
+  reader.appendChild(div);
+}
+
+// -- open ------------------------------------------------------------------------------------
+
+function openSession() {
+  if (!SESSION_ID) { showError('no session to show'); return; }
+  startPolling();
+  call({ type: 'open' }).then(function (reply) {
+    if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
+    state.loaded = true;
+    state.title = reply.title || 'Session ' + SESSION_ID.slice(0, 8);
+    state.sections = reply.sections || [];
+    state.strip = reply.strip || null;
+    state.generation = reply.generation || 0;
+    state.indexing = Boolean(reply.indexing);
+    state.seenStepId = reply.seenStepId || null;
+    document.getElementById('title').textContent = state.title;
+    document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
+    renderIndexNote();
+    renderAll();
+    scrollToEndOnLoad();
+  });
+}
+
+function showError(message) {
+  document.getElementById('title').textContent = 'Steps';
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var div = document.createElement('div');
+  div.className = 'error-state';
+  div.textContent = message;
+  reader.appendChild(div);
+  document.getElementById('rail').textContent = '';
+  document.getElementById('strip').textContent = '';
+}
+
+function renderIndexNote() {
+  var el = document.getElementById('indexnote');
+  el.classList.toggle('show', Boolean(state.indexing));
+}
+
+// -- markdown / highlighting (ported from the wireframe's own small renderer) ----------------
+
+var URL_RE = /^https?:\/\/[^\s<>"')\]]+/i;
+var ABS_RE = /^(?:[A-Za-z]:[\\/]|~[\\/])[^\s<>"']*/;
+var RELFILE_RE = /^[\w.\-\\/]+\.[A-Za-z0-9]{1,8}(?::\d+|#L\d+)?$/;
+var RELDIR_RE = /^[\w.\-]+[\\/][\w.\-\\/]*[\\/]$/;
+
+function kindOfToken(t) {
+  if (URL_RE.test(t)) return 'url';
+  if (ABS_RE.test(t)) return 'path';
+  if (RELDIR_RE.test(t)) return 'path';
+  if (RELFILE_RE.test(t) && /[\\/]/.test(t)) return 'path';
+  return null;
+}
+
+function linkNode(text, kind, target, code) {
+  var a = document.createElement('a');
+  a.className = 'lnk' + (code ? ' code' : '');
+  a.href = '#';
+  a.title = target;
+  a.textContent = text;
+  a.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    dispatchLink(kind, target);
+  });
+  return a;
+}
+
+/* Inline markdown within one line of text: `code`, **bold**, [label](url) links, bare URLs and
+   bare paths. Appends nodes directly to `parent`; never builds or assigns innerHTML. */
+function inlineMd(parent, text) {
+  var re = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>"')\]]+)|((?:[A-Za-z]:[\\/]|~[\\/])[^\s<>"']*)/g;
+  var last = 0;
+  var m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[1] !== undefined) {
+      var k = kindOfToken(m[1]);
+      if (k) parent.appendChild(linkNode(m[1], k, m[1], true));
+      else { var code = document.createElement('code'); code.textContent = m[1]; parent.appendChild(code); }
+    } else if (m[2] !== undefined) {
+      var b = document.createElement('b'); b.textContent = m[2]; parent.appendChild(b);
+    } else if (m[3] !== undefined) {
+      var linkKind = /^https?:\/\//i.test(m[4]) ? 'url' : 'path';
+      parent.appendChild(linkNode(m[3], linkKind, m[4], false));
+    } else if (m[5] !== undefined) {
+      parent.appendChild(linkNode(m[5], 'url', m[5], false));
+    } else if (m[6] !== undefined) {
+      parent.appendChild(linkNode(m[6], 'path', m[6], false));
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+}
+
+/* A small, safe Markdown renderer: headings, fenced code, tables, lists and paragraphs, built
+   as DOM nodes under `root` (which is cleared first). No innerHTML anywhere. */
+function md(root, text) {
+  root.textContent = '';
+  root.classList.add('md');
+  var lines = String(text == null ? '' : text).split('\n');
+  var i = 0;
+  function isTableSep(l) { return /^\s*\|?[\s:|-]+\|?\s*$/.test(l) && /-/.test(l); }
+  function isTableRow(l) { return /\|/.test(l); }
+  function splitRow(l) {
+    var t = l.trim();
+    if (t.charAt(0) === '|') t = t.slice(1);
+    if (t.charAt(t.length - 1) === '|') t = t.slice(0, -1);
+    return t.split('|').map(function (c) { return c.trim(); });
+  }
+  while (i < lines.length) {
+    var line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    var fence = /^```/.exec(line);
+    if (fence) {
+      var buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+      i++;
+      var pre = document.createElement('pre'); pre.className = 'mdcode';
+      pre.textContent = buf.join('\n');
+      root.appendChild(pre);
+      continue;
+    }
+    var heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      var level = heading[1].length;
+      var div = document.createElement('div');
+      div.className = 'h h' + Math.min(level, 2);
+      inlineMd(div, heading[2]);
+      root.appendChild(div);
+      i++;
+      continue;
+    }
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      var header = splitRow(line);
+      i += 2;
+      var rows = [];
+      while (i < lines.length && isTableRow(lines[i])) { rows.push(splitRow(lines[i])); i++; }
+      var table = document.createElement('table');
+      var thead = document.createElement('tr');
+      header.forEach(function (h) { var th = document.createElement('th'); inlineMd(th, h); thead.appendChild(th); });
+      table.appendChild(thead);
+      rows.forEach(function (r) {
+        var tr = document.createElement('tr');
+        r.forEach(function (c) { var td = document.createElement('td'); inlineMd(td, c); tr.appendChild(td); });
+        table.appendChild(tr);
+      });
+      root.appendChild(table);
+      continue;
+    }
+    var listItem = /^(\s*)([-*]|\d+[.)])\s+(.*)$/.exec(line);
+    if (listItem) {
+      var indent = listItem[1].length;
+      var bulletText = /\d/.test(listItem[2]) ? listItem[2] : '•';
+      var row = document.createElement('div');
+      row.className = 'li';
+      row.style.marginLeft = (indent * 10) + 'px';
+      var bullet = document.createElement('span'); bullet.className = 'bullet'; bullet.textContent = bulletText;
+      var body = document.createElement('div');
+      inlineMd(body, listItem[3]);
+      row.appendChild(bullet);
+      row.appendChild(body);
+      root.appendChild(row);
+      i++;
+      continue;
+    }
+    var para = [];
+    while (i < lines.length && lines[i].trim() && !/^```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) && !/^(\s*)([-*]|\d+[.)])\s+/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    var p = document.createElement('p');
+    inlineMd(p, para.join('\n'));
+    root.appendChild(p);
+  }
+}
+
+/* Plain-text insertion with a query highlighted via <mark>, used for fields that are not
+   rendered as markdown (your own messages, option labels, tool summaries). */
+function putText(el, text, q) {
+  el.textContent = '';
+  text = String(text == null ? '' : text);
+  if (!q) { el.appendChild(document.createTextNode(text)); return; }
+  var lower = text.toLowerCase();
+  var ql = q.toLowerCase();
+  var i = 0;
+  var at = lower.indexOf(ql, i);
+  if (at === -1) { el.appendChild(document.createTextNode(text)); return; }
+  while (at !== -1) {
+    if (at > i) el.appendChild(document.createTextNode(text.slice(i, at)));
+    var mark = document.createElement('mark');
+    mark.textContent = text.slice(at, at + q.length);
+    el.appendChild(mark);
+    i = at + q.length;
+    at = lower.indexOf(ql, i);
+  }
+  if (i < text.length) el.appendChild(document.createTextNode(text.slice(i)));
+}
+
+/* Highlight every occurrence of q inside an already-built subtree (used for markdown-rendered
+   content, where putText's single-pass text replace cannot run before inlineMd has already
+   split the text into nodes). Walks text nodes only, so it never touches an element's markup. */
+function hl(root, q) {
+  if (!q) return;
+  var ql = q.toLowerCase();
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  var targets = [];
+  var node;
+  while ((node = walker.nextNode())) {
+    if (node.parentNode && node.parentNode.tagName === 'MARK') continue;
+    if (node.nodeValue.toLowerCase().indexOf(ql) !== -1) targets.push(node);
+  }
+  targets.forEach(function (textNode) {
+    var text = textNode.nodeValue;
+    var lower = text.toLowerCase();
+    var frag = document.createDocumentFragment();
+    var i = 0;
+    var at = lower.indexOf(ql, i);
+    while (at !== -1) {
+      if (at > i) frag.appendChild(document.createTextNode(text.slice(i, at)));
+      var mark = document.createElement('mark');
+      mark.textContent = text.slice(at, at + q.length);
+      frag.appendChild(mark);
+      i = at + q.length;
+      at = lower.indexOf(ql, i);
+    }
+    if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+    textNode.parentNode.replaceChild(frag, textNode);
+  });
+}
+
+// -- links and long texts ---------------------------------------------------------------------
+
+function dispatchLink(kind, target) {
+  if (vsapi) { send({ type: 'openLink', sessionId: SESSION_ID, kind: kind, target: target }); return; }
+  if (kind === 'url') { window.open(target, '_blank', 'noopener'); return; }
+  call({ type: 'openLink', kind: kind, target: target }).then(function (reply) {
+    if (reply && reply.ok === false && reply.notAvailable) {
+      copyToClipboard(target);
+      flashNotice('not available in the browser — path copied: ' + target);
+    } else if (reply && reply.message) {
+      flashNotice(reply.message);
+    }
+  });
+}
+
+function openFullText(stepId, title) {
+  var b = state.bodies[stepId];
+  var text = (b && b.text) || '';
+  if (vsapi) { send({ type: 'openText', title: title || 'Step text', text: text }); return; }
+  call({ type: 'openText', title: title || 'Step text', text: text }).then(function (reply) {
+    if (reply && reply.notAvailable) { copyToClipboard(text); flashNotice('not available in the browser — text copied'); }
+  });
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function () {});
+}
+
+var noticeTimer = null;
+function flashNotice(text) {
+  var el = document.getElementById('indexnote');
+  var prev = el.textContent;
+  var wasShown = el.classList.contains('show');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(function () {
+    el.textContent = state.indexing ? 'still indexing the rest of this transcript; what you see below may grow' : prev;
+    el.classList.toggle('show', state.indexing || wasShown);
+  }, 4000);
+}
+
+// -- strip (5 tiles) --------------------------------------------------------------------------
+
+function renderStrip() {
+  var el = document.getElementById('strip');
+  el.textContent = '';
+  var strip = state.strip || { totalTimeMs: 0, sections: 0, decisions: 0, filesChanged: 0 };
+  var provisional = state.indexing;
+  function tile(key, num, label, clickable, extra) {
+    var div = document.createElement('div');
+    div.className = 'item' + (clickable ? '' : ' static') + (extra || '') + (provisional && clickable ? ' provisional' : '');
+    var n = document.createElement('span'); n.className = 'num'; n.textContent = String(num);
+    var l = document.createElement('span'); l.className = 'lbl'; l.textContent = label;
+    div.appendChild(n); div.appendChild(l);
+    if (clickable) div.addEventListener('click', function () { toggleLens(key); });
+    return div;
+  }
+  el.appendChild(tile('time', fmtDuration(strip.totalTimeMs), 'Total time'));
+  el.appendChild(tile('sections', strip.sections, 'Sections'));
+  var decisionsTile = tile('decisions', strip.decisions, 'Decisions', true);
+  if (state.lens === 'decisions') decisionsTile.classList.add('on');
+  el.appendChild(decisionsTile);
+  var filesTile = tile('files', strip.filesChanged, 'Files changed', true);
+  if (state.lens === 'files') filesTile.classList.add('on');
+  el.appendChild(filesTile);
+  // Notes arrive with the next part of this feature; the tile holds its place, inactive, at 0.
+  el.appendChild(tile('notes', 0, 'Notes', false, ' inactive'));
+  var decisionsBtn = document.getElementById('decisions');
+  decisionsBtn.classList.toggle('on', state.lens === 'decisions');
+}
+
+function toggleLens(key) {
+  state.lens = state.lens === key ? 'all' : key;
+  renderAll();
+  renderStrip();
+}
+
+// -- sections: rail + reader, rendered lazily ------------------------------------------------
+
+function isDecisionSection(sec) { return sec.kind === 'you' || sec.kind === 'qa' || sec.kind === 'approve'; }
+
+function visibleSections() {
+  if (state.lens === 'decisions') return state.sections.filter(isDecisionSection);
+  return state.sections;
+}
+
+function sectionLabel(sec) {
+  if (sec.kind === 'lead') return 'Session start';
+  if (sec.kind === 'you') return 'You';
+  if (sec.kind === 'qa') return 'Question and answer';
+  if (sec.kind === 'approve') return 'Plan';
+  return 'Claude';
+}
+
+function sectionKey(sec, i) { return sec.openerId != null ? sec.openerId : ('lead-' + i); }
+
+function renderAll() {
+  if (state.lens === 'files') { renderFilesView(); renderRailForFiles(); updateEdgeBars(); return; }
+  renderRail();
+  renderReader();
+  updateEdgeBars();
+  queueVisibleBodies();
+}
+
+function renderRail() {
+  var rail = document.getElementById('rail');
+  rail.textContent = '';
+  var top = document.createElement('div');
+  top.className = 'rail-top';
+  var btn = document.createElement('button');
+  btn.textContent = 'Jump to the start';
+  btn.addEventListener('click', function () { scrollToSectionIndex(0); });
+  top.appendChild(btn);
+  rail.appendChild(top);
+  var secs = visibleSections();
+  secs.forEach(function (sec, i) {
+    var entry = document.createElement('div');
+    entry.className = 'sec-entry k-' + sec.kind;
+    entry.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    if (sectionHasHit(sec)) entry.classList.add('has-hit');
+    var dot = document.createElement('span'); dot.className = 'dot';
+    var col = document.createElement('div'); col.className = 'body-col';
+    var txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = sec.heading || sectionLabel(sec);
+    var t = document.createElement('div'); t.className = 't'; t.textContent = fmtClock(sec.at);
+    col.appendChild(txt); col.appendChild(t);
+    entry.appendChild(dot); entry.appendChild(col);
+    entry.addEventListener('click', function () { scrollToSectionIndex(i); closeDrawer(); });
+    rail.appendChild(entry);
+  });
+}
+
+function sectionHasHit(sec) {
+  if (!state.hits.length) return false;
+  var ids = sectionStepIds(sec);
+  return state.hits.some(function (h) { return ids.indexOf(h) !== -1; });
+}
+
+function sectionStepIds(sec) {
+  var ids = [sec.openerId].filter(Boolean);
+  (sec.body || []).forEach(function (row) {
+    if (row.stepId) ids.push(row.stepId);
+    if (row.items) ids = ids.concat(row.items);
+  });
+  return ids;
+}
+
+/* The reader draws every visible section's heading always (cheap), but only builds a section's
+   row DOM when it is within RENDER_WINDOW sections of the current anchor; farther sections are
+   placeholders with a fixed estimated height, filled in once scrolling brings them close. This
+   keeps the DOM bounded on a large session while the scroll range (and thus the scrollbar and
+   jump targets) stays stable. */
+var anchorIndex = 0;
+
+function renderReader() {
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var secs = visibleSections();
+  if (!secs.length) {
+    var empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = state.indexing ? 'indexing still running…' : 'no steps yet';
+    reader.appendChild(empty);
+    return;
+  }
+  // Two spacers carry the weight of everything outside the render window (one estimated-height
+  // div each, never one per hidden section), so the DOM a 5,000-step session holds stays
+  // bounded by RENDER_WINDOW regardless of how many sections sit off screen; only the window
+  // itself, plus these two spacers, is ever in the tree at once.
+  var lo = Math.max(0, anchorIndex - RENDER_WINDOW);
+  var hi = Math.min(secs.length, anchorIndex + RENDER_WINDOW);
+  var SEC_HEIGHT_ESTIMATE = 70;
+  if (lo > 0) reader.appendChild(buildSpacer('before', lo * SEC_HEIGHT_ESTIMATE));
+  for (var i = lo; i < hi; i++) reader.appendChild(buildSectionNode(secs[i], i, secs));
+  if (hi < secs.length) reader.appendChild(buildSpacer('after', (secs.length - hi) * SEC_HEIGHT_ESTIMATE));
+  insertNewSinceMarker(reader, secs);
+}
+
+function buildSpacer(which, heightPx) {
+  var div = document.createElement('div');
+  div.className = 'sec-stub';
+  div.setAttribute('data-spacer', which);
+  div.style.height = Math.max(20, heightPx) + 'px';
+  return div;
+}
+
+/* Grows the render window toward the viewport as the reader scrolls near a spacer, shifting
+   anchorIndex and redrawing; cheap to call often since redraw only runs when the window
+   actually needs to move, not on every scroll tick. */
+function expandNearbyStubs() {
+  var reader = document.getElementById('reader');
+  var before = reader.querySelector('[data-spacer="before"]');
+  var after = reader.querySelector('[data-spacer="after"]');
+  var margin = reader.clientHeight;
+  var moved = false;
+  if (before && before.getBoundingClientRect().bottom > -margin) { anchorIndex = Math.max(0, anchorIndex - Math.floor(RENDER_WINDOW / 2)); moved = true; }
+  if (after && after.getBoundingClientRect().top < reader.clientHeight + margin) { anchorIndex = Math.min(visibleSections().length - 1, anchorIndex + Math.floor(RENDER_WINDOW / 2)); moved = true; }
+  if (moved) {
+    // redrawing the window replaces readerInner's children, which resets scrollTop to 0; the
+    // scroll distance from the old before-spacer's height to the new one is what the window
+    // shift actually changed, so restoring scrollTop by that same delta keeps the reader's
+    // viewport over the same content instead of jumping to the top.
+    var oldBefore = before ? before.offsetHeight : 0;
+    var prevScrollTop = reader.scrollTop;
+    renderReader();
+    var newBefore = reader.querySelector('[data-spacer="before"]');
+    var newBeforeHeight = newBefore ? newBefore.offsetHeight : 0;
+    reader.scrollTop = prevScrollTop + (newBeforeHeight - oldBefore);
+    queueVisibleBodies();
+  }
+}
+
+function buildSectionNode(sec, i, secs) {
+  var wrap = document.createElement('div');
+  wrap.className = 'section';
+  wrap.setAttribute('data-sec-index', String(i));
+  if (sec.kind !== 'lead') {
+    var head = document.createElement('div');
+    head.className = 'sec-head k-' + sec.kind;
+    head.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    head.id = 'sec-' + sectionKey(sec, i);
+    var lbl = document.createElement('span'); lbl.className = 'lbl';
+    lbl.textContent = sectionLabel(sec) + ' · ' + fmtClock(sec.at);
+    head.appendChild(lbl);
+    wrap.appendChild(head);
+    if (sec.openerId) wrap.appendChild(buildOpenerRow(sec, i));
+  } else {
+    var leadHead = document.createElement('div');
+    leadHead.id = 'sec-' + sectionKey(sec, i);
+    leadHead.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    wrap.appendChild(leadHead);
+  }
+  (sec.body || []).forEach(function (row) { wrap.appendChild(buildBodyRow(row, sec)); });
+  return wrap;
+}
+
+function stepKindClass(k) {
+  if (k === 'you') return 'k-you';
+  if (k === 'qa' || k === 'question') return 'k-qa';
+  if (k === 'plan' || k === 'approve') return 'k-plan';
+  return 'k-claude';
+}
+
+function chipTextFor(stepKind) {
+  if (stepKind === 'you') return 'You';
+  if (stepKind === 'question') return 'Question and answer';
+  if (stepKind === 'plan') return 'Plan';
+  if (stepKind === 'error') return 'Error';
+  return 'Claude';
+}
+
+/* The opener step's own row: the one that gives the section its heading (a you message or an
+   answered question or approved plan). It is not duplicated anywhere else in the section. */
+function buildOpenerRow(sec, i) {
+  var row = document.createElement('div');
+  row.className = 'row ' + (sec.kind === 'you' ? 'k-you' : 'k-qa');
+  row.setAttribute('data-step', sec.openerId);
+  row.id = 'step-' + sec.openerId;
+  var restate = document.createElement('div');
+  restate.className = 'restate';
+  restate.textContent = sec.heading || '';
+  row.appendChild(restate);
+  if (sec.kind === 'you') row.appendChild(buildYouBody(sec.openerId));
+  else if (sec.kind === 'qa') row.appendChild(buildQuestionBody(sec.openerId));
+  return row;
+}
+
+function buildYouBody(stepId) {
+  var div = document.createElement('div');
+  div.className = 'you-msg';
+  div.setAttribute('data-step-body', stepId);
+  fillTextBody(div, stepId, false);
+  return div;
+}
+
+function buildBodyRow(row, sec) {
+  if (row.kind === 'work') return buildWorkRow(row, sec);
+  if (row.kind === 'question') return buildQuestionRow(row);
+  if (row.kind === 'plan') return buildPlanRow(row);
+  return buildClaudeRow(row);
+}
+
+function buildClaudeRow(row) {
+  var div = document.createElement('div');
+  var stepId = row.stepId;
+  var compact = state.compactById ? state.compactById[stepId] : null;
+  var kind = compact ? compact.kind : row.kind;
+  div.className = 'row ' + stepKindClass(kind);
+  div.setAttribute('data-step', stepId);
+  div.id = 'step-' + stepId;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = compact ? fmtClockSec(compact.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = chipTextFor(kind);
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body md'; body.setAttribute('data-step-body', stepId);
+  fillMdBody(body, stepId);
+  div.appendChild(body);
+  return div;
+}
+
+function buildPlanRow(row) {
+  var div = document.createElement('div');
+  div.className = 'row k-plan';
+  div.setAttribute('data-step', row.stepId);
+  div.id = 'step-' + row.stepId;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var compact = state.compactById ? state.compactById[row.stepId] : null;
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = compact ? fmtClockSec(compact.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'Plan';
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body';
+  var mdDiv = document.createElement('div'); mdDiv.className = 'md'; mdDiv.setAttribute('data-step-body', row.stepId);
+  fillMdBody(mdDiv, row.stepId);
+  body.appendChild(mdDiv);
+  if (compact && compact.approved) {
+    var approved = document.createElement('div'); approved.className = 'approved-line'; approved.textContent = 'You approved this plan.';
+    body.appendChild(approved);
+  }
+  div.appendChild(body);
+  return div;
+}
+
+function buildQuestionRow(row) {
+  var div = document.createElement('div');
+  div.className = 'row k-qa';
+  div.setAttribute('data-step', row.stepId);
+  div.id = 'step-' + row.stepId;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var compact = state.compactById ? state.compactById[row.stepId] : null;
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = compact ? fmtClockSec(compact.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'Question and answer';
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body qcard'; body.setAttribute('data-step-body', row.stepId);
+  fillQuestionBody(body, row.stepId);
+  div.appendChild(body);
+  return div;
+}
+
+function buildQuestionBody(stepId) {
+  var div = document.createElement('div');
+  div.className = 'qcard';
+  div.setAttribute('data-step-body', stepId);
+  fillQuestionBody(div, stepId);
+  return div;
+}
+
+function buildWorkRow(row, sec) {
+  var div = document.createElement('div');
+  div.className = 'row k-work';
+  var key = 'g-' + row.items[0];
+  div.setAttribute('data-work-key', key);
+  div.id = key;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var first = state.compactById ? state.compactById[row.items[0]] : null;
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = first ? fmtClockSec(first.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'Work';
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body';
+  div.appendChild(body);
+  fillWorkBody(body, row.items, key);
+  return div;
+}
+
+// -- filling bodies: preview immediately, real text once it arrives -------------------------
+
+function fillTextBody(el, stepId, asMarkdown) {
+  var b = state.bodies[stepId];
+  if (b && typeof b.text === 'string') {
+    if (asMarkdown) { md(el, b.text); if (state.query) hl(el, state.query); }
+    else { putText(el, b.text, state.query); }
+    if (b.truncated) appendTruncatedNotice(el, stepId);
+  } else {
+    var compact = state.compactById ? state.compactById[stepId] : null;
+    putText(el, (compact && compact.preview) || '', state.query);
+  }
+}
+
+function fillMdBody(el, stepId) { fillTextBody(el, stepId, true); }
+
+function appendTruncatedNotice(el, stepId) {
+  var btn = document.createElement('button');
+  btn.className = 'showall';
+  btn.textContent = 'Open full text in an editor tab';
+  btn.addEventListener('click', function () { openFullText(stepId); });
+  el.appendChild(document.createElement('br'));
+  el.appendChild(btn);
+}
+
+function fillQuestionBody(el, stepId) {
+  var b = state.bodies[stepId];
+  if (!b || !b.questions) { return; }
+  el.textContent = '';
+  b.questions.forEach(function (q) {
+    if (q.header) { var head = document.createElement('div'); head.className = 'qhead'; head.textContent = q.header; el.appendChild(head); }
+    var qtext = document.createElement('div'); qtext.className = 'qtext';
+    var qmd = document.createElement('div');
+    md(qmd, q.question);
+    if (state.query) hl(qmd, state.query);
+    qtext.appendChild(qmd);
+    el.appendChild(qtext);
+    var pick = document.createElement('div'); pick.className = 'qpick'; pick.textContent = q.multiSelect ? 'Pick several' : 'Pick one';
+    el.appendChild(pick);
+    var opts = document.createElement('div'); opts.className = 'qoptions';
+    (q.options || []).forEach(function (o) {
+      var opt = document.createElement('div'); opt.className = 'qopt' + (o.chosen ? ' chosen' : '');
+      var mark = document.createElement('span'); mark.className = 'qmark'; mark.textContent = o.chosen ? '◉' : '○';
+      var col = document.createElement('div'); col.className = 'qopt-col';
+      var lrow = document.createElement('div'); lrow.className = 'qopt-lrow';
+      var label = document.createElement('span'); label.className = 'qopt-label';
+      putText(label, o.label, state.query);
+      lrow.appendChild(label);
+      if (o.chosen) { var tag = document.createElement('span'); tag.className = 'qopt-tag'; tag.textContent = 'your choice'; lrow.appendChild(tag); }
+      col.appendChild(lrow);
+      var desc = document.createElement('div'); desc.className = 'qopt-desc';
+      putText(desc, o.description, state.query);
+      col.appendChild(desc);
+      opt.appendChild(mark); opt.appendChild(col);
+      opts.appendChild(opt);
+    });
+    el.appendChild(opts);
+    if (q.other) {
+      var answerline = document.createElement('div'); answerline.className = 'answerline';
+      var lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = 'Your own answer';
+      var av = document.createElement('div'); av.className = 'av';
+      putText(av, q.other, state.query);
+      answerline.appendChild(lbl); answerline.appendChild(av);
+      el.appendChild(answerline);
+    }
+    if (!q.answered) { var notyet = document.createElement('div'); notyet.className = 'qnotyet'; notyet.textContent = 'Not answered yet.'; el.appendChild(notyet); }
+  });
+}
+
+function summarizeWork(items) {
+  var kinds = Object.create(null);
+  var toolCount = 0;
+  items.forEach(function (id) {
+    var c = state.compactById && state.compactById[id];
+    if (!c) return;
+    if (c.kind === 'tool') { toolCount++; kinds[c.title || 'tool'] = (kinds[c.title || 'tool'] || 0) + 1; }
+  });
+  var names = Object.keys(kinds);
+  if (!names.length) return items.length + (items.length === 1 ? ' step' : ' steps');
+  var parts = names.map(function (n) { return n + (kinds[n] > 1 ? ' x' + kinds[n] : ''); });
+  return (toolCount === 1 ? '1 tool call: ' : toolCount + ' tool calls: ') + parts.join(', ');
+}
+
+function filesTouchedIn(items) {
+  var out = [];
+  items.forEach(function (id) {
+    var c = state.compactById && state.compactById[id];
+    var b = state.bodies[id];
+    if (c && c.kind === 'tool' && (c.title === 'Edit' || c.title === 'Write') && b && b.path) {
+      out.push({ kind: c.title === 'Write' ? 'new' : 'edit', path: b.path });
+    }
+  });
+  return out;
+}
+
+function fillWorkBody(body, items, key) {
+  body.textContent = '';
+  var sum = document.createElement('div'); sum.className = 'worksum'; sum.textContent = summarizeWork(items);
+  body.appendChild(sum);
+  var files = filesTouchedIn(items);
+  if (files.length) {
+    var filesDiv = document.createElement('div'); filesDiv.className = 'files';
+    var flbl = document.createElement('div'); flbl.className = 'flbl'; flbl.textContent = 'Files touched';
+    filesDiv.appendChild(flbl);
+    files.forEach(function (f) {
+      var row = document.createElement('div'); row.className = 'filerow';
+      var fkind = document.createElement('span'); fkind.className = 'fkind'; fkind.textContent = f.kind;
+      var name = f.path.split(/[\\/]/).pop();
+      row.appendChild(fkind);
+      row.appendChild(linkNode(name, 'path', f.path, false));
+      filesDiv.appendChild(row);
+    });
+    body.appendChild(filesDiv);
+  }
+  var subagentIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'subagent'; });
+  subagentIds.forEach(function (id) { body.appendChild(buildSubagentBlock(id)); });
+
+  var toolIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'tool'; });
+  if (toolIds.length) {
+    var detailBtn = document.createElement('button'); detailBtn.className = 'detailbtn';
+    detailBtn.textContent = 'Details — ' + toolIds.length + (toolIds.length === 1 ? ' call' : ' calls');
+    var list = document.createElement('div'); list.className = 'worklist' + (state.openWork[key] || state.showAllTools ? ' open' : '');
+    toolIds.forEach(function (id) { list.appendChild(buildWorkListItem(id)); });
+    detailBtn.addEventListener('click', function () {
+      state.openWork[key] = !list.classList.contains('open');
+      list.classList.toggle('open');
+    });
+    body.appendChild(detailBtn);
+    body.appendChild(list);
+  }
+  if (state.query) hl(body, state.query);
+}
+
+function buildWorkListItem(stepId) {
+  var item = document.createElement('div'); item.className = 'wl-item';
+  var c = state.compactById && state.compactById[stepId];
+  var wn = document.createElement('span'); wn.className = 'wn'; wn.textContent = (c && c.title) || 'tool';
+  var b = state.bodies[stepId];
+  var wb = document.createElement('span'); wb.className = 'wb';
+  wb.textContent = (b && b.input) || (c && c.preview) || '';
+  item.appendChild(wn); item.appendChild(wb);
+  var wrap = document.createElement('div');
+  wrap.appendChild(item);
+  if (b && b.result) {
+    var btn = document.createElement('button'); btn.className = 'detailbtn'; btn.textContent = 'result';
+    var pre = document.createElement('pre'); pre.className = 'fold'; pre.textContent = b.result; pre.style.display = 'none';
+    btn.addEventListener('click', function () { pre.style.display = pre.style.display === 'none' ? '' : 'none'; });
+    wrap.appendChild(btn);
+    wrap.appendChild(pre);
+  }
+  return wrap;
+}
+
+function buildSubagentBlock(stepId) {
+  var box = document.createElement('div'); box.className = 'report-box';
+  var c = state.compactById && state.compactById[stepId];
+  var b = state.bodies[stepId];
+  var item = document.createElement('div'); item.className = 'wl-item';
+  var wn = document.createElement('span'); wn.className = 'wn'; wn.textContent = (c && c.title) || 'agent';
+  var wb = document.createElement('span'); wb.className = 'wb';
+  putText(wb, (b && b.description) || (c && c.preview) || '', state.query);
+  item.appendChild(wn); item.appendChild(wb);
+  box.appendChild(item);
+  if (b && b.report) {
+    var reportBody = document.createElement('div'); reportBody.className = 'report-body md' + (state.openReports[stepId] ? ' open' : '');
+    md(reportBody, b.report);
+    if (state.query) hl(reportBody, state.query);
+    box.appendChild(reportBody);
+    var btn = document.createElement('button'); btn.className = 'showall';
+    btn.textContent = reportBody.classList.contains('open') ? 'Show less' : 'Show all';
+    btn.addEventListener('click', function () {
+      var open = reportBody.classList.toggle('open');
+      state.openReports[stepId] = open;
+      btn.textContent = open ? 'Show less' : 'Show all';
+    });
+    box.appendChild(btn);
+  }
+  return box;
+}
+
+// -- "new since you last looked" -------------------------------------------------------------
+
+function insertNewSinceMarker(reader, secs) {
+  if (!state.seenStepId) return;
+  var seenIndex = -1;
+  secs.forEach(function (sec, i) {
+    if (sectionStepIds(sec).indexOf(state.seenStepId) !== -1) seenIndex = i;
+  });
+  if (seenIndex === -1 || seenIndex >= secs.length - 1) return;
+  var target = document.getElementById('sec-' + sectionKey(secs[seenIndex + 1], seenIndex + 1));
+  if (!target) return;
+  var marker = document.createElement('div');
+  marker.className = 'new-marker';
+  marker.textContent = 'New since you last looked';
+  target.parentNode.insertBefore(marker, target);
+}
+
+// -- files-changed lens -------------------------------------------------------------------
+
+function renderRailForFiles() {
+  var rail = document.getElementById('rail');
+  rail.textContent = '';
+  var top = document.createElement('div'); top.className = 'rail-top';
+  var btn = document.createElement('button'); btn.textContent = 'Back to the full story';
+  btn.addEventListener('click', function () { state.lens = 'all'; renderAll(); renderStrip(); });
+  top.appendChild(btn);
+  rail.appendChild(top);
+}
+
+function renderFilesView() {
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var view = document.createElement('div'); view.className = 'files-view';
+  state.sections.forEach(function (sec, i) {
+    var files = [];
+    (sec.body || []).forEach(function (row) {
+      if (row.kind !== 'work') return;
+      files = files.concat(filesTouchedIn(row.items));
+    });
+    if (!files.length) return;
+    var fsec = document.createElement('div'); fsec.className = 'fsec';
+    var h = document.createElement('div'); h.className = 'fsec-h';
+    h.textContent = (sec.heading || sectionLabel(sec)) + ' · ' + fmtClock(sec.at);
+    fsec.appendChild(h);
+    files.forEach(function (f) {
+      var fp = document.createElement('button'); fp.className = 'fp'; fp.textContent = f.path;
+      fp.addEventListener('click', function () { dispatchLink('path', f.path); });
+      fsec.appendChild(fp);
+    });
+    view.appendChild(fsec);
+  });
+  if (!view.children.length) {
+    var empty = document.createElement('div'); empty.className = 'empty-state'; empty.textContent = 'no files changed yet';
+    view.appendChild(empty);
+  }
+  reader.appendChild(view);
+}
+
+// -- body batching: load texts for sections near the viewport --------------------------------
+
+function queueVisibleBodies() {
+  if (state.lens === 'files') return;
+  var reader = document.getElementById('reader');
+  var nodes = reader.querySelectorAll('[data-step-body]');
+  var top = reader.scrollTop - reader.clientHeight;
+  var bottom = reader.scrollTop + reader.clientHeight * 2;
+  var wanted = state.bodyBatchWanted || (state.bodyBatchWanted = Object.create(null));
+  var worklistNodes = reader.querySelectorAll('.wl-item .wb, .fkind');
+  Array.prototype.forEach.call(nodes, function (node) {
+    var rectTop = node.offsetTop;
+    if (rectTop < bottom && rectTop + node.offsetHeight > top) {
+      var stepId = node.getAttribute('data-step-body');
+      if (stepId && !state.bodies[stepId] && !state.bodiesPending[stepId]) wanted[stepId] = true;
+    }
+  });
+  // work rows need bodies for every tool/subagent item they bundle, even though the wrapping
+  // row itself carries no single data-step-body (it summarizes several steps at once).
+  Array.prototype.forEach.call(reader.querySelectorAll('[data-work-key]'), function (node) {
+    var rectTop = node.offsetTop;
+    if (rectTop < bottom && rectTop + node.offsetHeight > top) {
+      var key = node.getAttribute('data-work-key');
+      var ids = state.workItemsByKey ? state.workItemsByKey[key] : null;
+      (ids || []).forEach(function (id) { if (!state.bodies[id] && !state.bodiesPending[id]) wanted[id] = true; });
+    }
+  });
+  if (Object.keys(wanted).length && !state.bodyBatchTimer) {
+    state.bodyBatchTimer = setTimeout(flushBodyBatch, BODY_BATCH_DELAY_MS);
+  }
+}
+
+function flushBodyBatch() {
+  state.bodyBatchTimer = null;
+  var ids = Object.keys(state.bodyBatchWanted || {});
+  state.bodyBatchWanted = Object.create(null);
+  if (!ids.length) return;
+  ids.forEach(function (id) { state.bodiesPending[id] = true; });
+  call({ type: 'bodies', stepIds: ids, generation: state.generation }).then(function (reply) {
+    if (!reply || !Array.isArray(reply.items)) return;
+    reply.items.forEach(function (item) {
+      delete state.bodiesPending[item.stepId];
+      if (!item.stale) state.bodies[item.stepId] = item;
+    });
+    renderVisibleBodiesOnly();
+  });
+}
+
+/* After a batch lands, refresh only the body/question/work nodes already in the DOM (not a full
+   re-render), so scroll position and open/closed toggles are left alone. */
+function renderVisibleBodiesOnly() {
+  var reader = document.getElementById('reader');
+  Array.prototype.forEach.call(reader.querySelectorAll('[data-step-body]'), function (node) {
+    var stepId = node.getAttribute('data-step-body');
+    var row = node.closest('.row');
+    if (!row) return;
+    if (row.classList.contains('k-qa') && node.className.indexOf('qcard') !== -1) fillQuestionBody(node, stepId);
+    else if (node.className.indexOf('you-msg') !== -1) fillTextBody(node, stepId, false);
+    else fillMdBody(node, stepId);
+  });
+  Array.prototype.forEach.call(reader.querySelectorAll('[data-work-key]'), function (node) {
+    var key = node.getAttribute('data-work-key');
+    var ids = state.workItemsByKey ? state.workItemsByKey[key] : null;
+    if (ids) fillWorkBody(node.querySelector('.body'), ids, key);
+  });
+}
+
+// -- indexing a compact step map from the sections (so rows can show kind/time/preview) ------
+
+function rebuildCompactIndex() {
+  var byId = Object.create(null);
+  var workItemsByKey = Object.create(null);
+  // the opener steps and in-body step rows do not carry the full compact record (only the
+  // service's "steps" array from open/pushes does); this page keeps the latest one it has
+  // seen per id across pushes, since a step's kind/time/preview never change once assigned.
+  byId = state.compactById || Object.create(null);
+  state.sections.forEach(function (sec) {
+    (sec.body || []).forEach(function (row) {
+      if (row.kind === 'work') workItemsByKey['g-' + row.items[0]] = row.items;
+    });
+  });
+  state.compactById = byId;
+  state.workItemsByKey = workItemsByKey;
+}
+
+// -- search -----------------------------------------------------------------------------------
+
+function runSearch(q) {
+  state.query = q;
+  if (!q) { state.hits = []; state.curHit = -1; renderAll(); updateSearchCount(); return; }
+  var requestId = ++state.searchRequestId;
+  call({ type: 'search', query: q }).then(function (reply) {
+    if (!reply || reply.requestId !== undefined && state.searchRequestId !== requestId) return;
+    state.hits = reply.stepIds || [];
+    state.curHit = state.hits.length ? 0 : -1;
+    state.hitsCapped = Boolean(reply.capped);
+    if (state.hits.length) state.showAllTools = true;
+    renderAll();
+    updateSearchCount();
+    if (state.curHit !== -1) jumpToHit();
+  });
+}
+
+function updateSearchCount() {
+  var el = document.getElementById('count');
+  if (!state.query) { el.textContent = ''; return; }
+  if (!state.hits.length) { el.textContent = 'no hits'; return; }
+  el.textContent = (state.curHit + 1) + ' of ' + state.hits.length + (state.hitsCapped ? '+' : '');
+}
+
+function moveHit(delta) {
+  if (!state.hits.length) return;
+  state.curHit = (state.curHit + delta + state.hits.length) % state.hits.length;
+  updateSearchCount();
+  jumpToHit();
+}
+
+function jumpToHit() {
+  var stepId = state.hits[state.curHit];
+  if (!stepId) return;
+  if (!state.bodies[stepId]) {
+    call({ type: 'bodies', stepIds: [stepId], generation: state.generation }).then(function (reply) {
+      ((reply && reply.items) || []).forEach(function (item) { if (!item.stale) state.bodies[item.stepId] = item; });
+      scrollToStepId(stepId);
+    });
+  } else {
+    scrollToStepId(stepId);
+  }
+}
+
+function scrollToStepId(stepId) {
+  // make sure the owning section is in the fully-rendered window, open any folded work list
+  // that holds it, then scroll; a step bundled into a Work line is reached by its group key.
+  var secs = visibleSections();
+  var idx = -1;
+  secs.forEach(function (sec, i) { if (sectionStepIds(sec).indexOf(stepId) !== -1) idx = i; });
+  if (idx !== -1) anchorIndex = idx;
+  renderReader();
+  var target = document.getElementById('step-' + stepId);
+  if (!target) {
+    // the id may be bundled inside a Work line's group; open that line's detail list.
+    Object.keys(state.workItemsByKey || {}).forEach(function (key) {
+      if (state.workItemsByKey[key].indexOf(stepId) !== -1) {
+        state.openWork[key] = true;
+        var node = document.querySelector('[data-work-key="' + key + '"] .worklist');
+        if (node) node.classList.add('open');
+        target = document.getElementById(key.replace(/^g-/, 'step-')) || document.querySelector('[data-work-key="' + key + '"]');
+      }
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.cur-hit'), function (n) { n.classList.remove('cur-hit'); });
+  if (target) { target.classList.add('cur-hit'); target.scrollIntoView({ block: 'center' }); }
+  renderRail();
+}
+
+var qInput = document.getElementById('q');
+qInput.addEventListener('input', function () {
+  clearTimeout(state.searchTimer);
+  var val = qInput.value;
+  state.searchTimer = setTimeout(function () { runSearch(val.trim()); }, SEARCH_DEBOUNCE_MS);
+});
+qInput.addEventListener('keydown', function (ev) {
+  if (ev.key === 'Enter') { clearTimeout(state.searchTimer); moveHit(ev.shiftKey ? -1 : 1); }
+});
+document.getElementById('next').addEventListener('click', function () { moveHit(1); });
+document.getElementById('prev').addEventListener('click', function () { moveHit(-1); });
+document.getElementById('decisions').addEventListener('click', function () { toggleLens('decisions'); });
+document.getElementById('allTools').addEventListener('change', function (ev) { state.showAllTools = ev.target.checked; renderReader(); queueVisibleBodies(); });
+document.getElementById('follow').addEventListener('change', function (ev) {
+  state.follow = ev.target.checked;
+  if (state.follow) scrollToEnd();
+});
+
+// -- scrolling, follow, edge bars, seen ------------------------------------------------------
+
+function scrollToSectionIndex(i) {
+  var secs = visibleSections();
+  if (i < 0 || i >= secs.length) return;
+  anchorIndex = i;
+  renderReader();
+  var el = document.getElementById('sec-' + sectionKey(secs[i], i));
+  if (el) el.scrollIntoView({ block: 'start' });
+}
+
+function scrollToEnd() {
+  var secs = visibleSections();
+  anchorIndex = secs.length - 1;
+  renderReader();
+  var reader = document.getElementById('reader');
+  reader.scrollTo(0, reader.scrollHeight);
+}
+
+function scrollToEndOnLoad() {
+  var qp = !vsapi ? new URLSearchParams(window.location.search) : null;
+  var top = qp && qp.get('top') === '1';
+  if (top) { anchorIndex = 0; renderReader(); return; }
+  anchorIndex = visibleSections().length - 1;
+  scrollToEnd();
+}
+
+function maybeStickToBottom() {
+  // Follow means "stay at the end", full stop: it only turns itself off on a manual scroll
+  // away from the bottom (the reader's own scroll handler), never because state.atBottom
+  // happened to read stale from before this push grew the content past the viewport.
+  if (state.follow) scrollToEnd();
+  else updateEdgeBars();
+}
+
+function updateEdgeBars() {
+  var reader = document.getElementById('reader');
+  var atTop = reader.scrollTop <= 20;
+  var atBottom = reader.scrollTop + reader.clientHeight >= reader.scrollHeight - 20;
+  state.atTop = atTop;
+  state.atBottom = atBottom;
+  document.getElementById('topBar').style.display = atTop || state.lens === 'files' ? 'none' : '';
+  var endBar = document.getElementById('endBar');
+  if (state.lens === 'files') { endBar.style.display = 'none'; return; }
+  endBar.style.display = '';
+  var secs = visibleSections();
+  var pill = document.getElementById('endPill');
+  if (atBottom) {
+    pill.textContent = secs.length > 1 ? 'You are at the end. ' + (secs.length - 1) + ' sections above.' : 'You are at the end.';
+  } else {
+    var below = Math.max(0, secs.length - 1 - anchorIndex);
+    pill.textContent = 'Jump to the end (' + below + ' section' + (below === 1 ? '' : 's') + ' below)';
+  }
+}
+
+document.getElementById('toStart').addEventListener('click', function () { document.getElementById('reader').scrollTo({ top: 0, behavior: 'smooth' }); });
+document.getElementById('endPill').addEventListener('click', function () {
+  var reader = document.getElementById('reader');
+  if (state.atBottom) reader.scrollTo({ top: 0, behavior: 'smooth' });
+  else reader.scrollTo({ top: reader.scrollHeight, behavior: 'smooth' });
+});
+
+var scrollTicking = false;
+document.getElementById('reader').addEventListener('scroll', function () {
+  if (scrollTicking) return;
+  scrollTicking = true;
+  requestAnimationFrame(function () {
+    scrollTicking = false;
+    updateEdgeBars();
+    expandNearbyStubs();
+    queueVisibleBodies();
+    updateRailCurrent();
+    if (!state.atBottom && state.follow) {
+      state.follow = false;
+      document.getElementById('follow').checked = false;
+    }
+    scheduleSeenUpdate();
+  });
+});
+
+function updateRailCurrent() {
+  var reader = document.getElementById('reader');
+  var heads = reader.querySelectorAll('[data-anchor]');
+  var curAnchor = null;
+  for (var i = 0; i < heads.length; i++) {
+    var r = heads[i].getBoundingClientRect();
+    var readerRect = reader.getBoundingClientRect();
+    if (r.top - readerRect.top <= 24) curAnchor = heads[i].getAttribute('data-anchor');
+    else break;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.sec-entry'), function (entry) {
+    entry.classList.toggle('cur', entry.getAttribute('data-anchor') === curAnchor);
+  });
+  var curEntry = document.querySelector('.sec-entry.cur .txt');
+  document.getElementById('railCurTurn').textContent = curEntry ? curEntry.textContent : 'Story';
+}
+
+// "seen" tracking: while the tab is visible, debounce-send the last step currently in view.
+function scheduleSeenUpdate() {
+  clearTimeout(state.seenTimer);
+  state.seenTimer = setTimeout(function () {
+    if (document.hidden) return;
+    var reader = document.getElementById('reader');
+    var rows = reader.querySelectorAll('[data-step]');
+    var readerRect = reader.getBoundingClientRect();
+    var lastVisible = null;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i].getBoundingClientRect();
+      if (r.top < readerRect.bottom) lastVisible = rows[i].getAttribute('data-step');
+      else break;
+    }
+    if (lastVisible && lastVisible !== state.lastSeenSent) {
+      state.lastSeenSent = lastVisible;
+      call({ type: 'seen', stepId: lastVisible });
+    }
+  }, SEEN_DEBOUNCE_MS);
+}
+document.addEventListener('visibilitychange', function () { if (!document.hidden) scheduleSeenUpdate(); });
+
+// -- compact index maintenance on open / pushes ----------------------------------------------
+
+var _mergeSections = mergeSections;
+mergeSections = function (sections, strip, isReset) {
+  _mergeSections(sections, strip, isReset);
+  rebuildCompactIndex();
+};
+
+// a fresh open() reply also carries the flat "steps" compact list (kind/time/preview per step,
+// including ones bundled into Work rows that section bodies only reference by id); fold it into
+// compactById once up front so work-line summaries and timestamps have something to read before
+// any body text has loaded.
+var _openSession = openSession;
+openSession = function () {
+  state.compactById = Object.create(null);
+  startPolling();
+  if (!SESSION_ID) { showError('no session to show'); return; }
+  call({ type: 'open' }).then(function (reply) {
+    if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
+    state.loaded = true;
+    state.title = reply.title || 'Session ' + SESSION_ID.slice(0, 8);
+    (reply.steps || []).forEach(function (s) { state.compactById[s.id] = s; });
+    state.sections = reply.sections || [];
+    state.strip = reply.strip || null;
+    state.generation = reply.generation || 0;
+    state.indexing = Boolean(reply.indexing);
+    state.seenStepId = reply.seenStepId || null;
+    document.getElementById('title').textContent = state.title;
+    document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
+    rebuildCompactIndex();
+    renderIndexNote();
+    renderStrip();
+    renderAll();
+    scrollToEndOnLoad();
+  });
+};
+
+// -- narrow layout: outline drawer -----------------------------------------------------------
+
+function toggleDrawer() {
+  state.drawerOpen = !state.drawerOpen;
+  document.getElementById('rail').classList.toggle('open', state.drawerOpen);
+  document.getElementById('railCar').textContent = state.drawerOpen ? '▾' : '▸';
+}
+function closeDrawer() {
+  if (!state.drawerOpen) return;
+  state.drawerOpen = false;
+  document.getElementById('rail').classList.remove('open');
+  document.getElementById('railCar').textContent = '▸';
+}
+document.getElementById('railToggle').addEventListener('click', toggleDrawer);
+
+// -- boot --------------------------------------------------------------------------------
+
+openSession();
+$
+</script>
+</body>
+</html>
