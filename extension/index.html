@@ -502,7 +502,7 @@ function actionsHtml(s, opts) {
   var flash = state.flashes[s.sessionId];
   var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
   var html = '<span class="age">' + esc(age) + '</span>';
-  if (s.path || s.transcriptPath) html += '<button class="iconbtn steps" data-act="steps" title="Steps: read, search and follow this session\'s story">≡</button>';
+  if (s.path || s.transcriptPath) html += '<button class="iconbtn steps" data-act="steps" title="Steps">≡</button>';
   html += '<button class="iconbtn info" data-act="details" aria-expanded="' + (state.details[s.sessionId] ? 'true' : 'false') + '" title="details: full id, start, process, window, transcript">ⓘ</button>';
   if (opts.endable || (opts.past && !s.live)) {
     html += state.retitling[s.sessionId]
