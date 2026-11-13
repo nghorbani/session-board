@@ -68,6 +68,11 @@ function createStepsService(deps) {
   const setIntervalFn = deps.setInterval || setInterval;
   const clearIntervalFn = deps.clearInterval || clearInterval;
   const pollIntervalMs = deps.pollIntervalMs || 1000;
+  // While the backward pass runs, a provisional push (the sections and strip built so far) goes
+  // out at most this often; every push carries the whole section list, so one per chunk of a
+  // large transcript would send the same megabytes hundreds of times over.
+  const progressIntervalMs = deps.progressIntervalMs === undefined ? 500 : deps.progressIntervalMs;
+  const now = deps.now || Date.now;
   const rg = deps.rg || {};
   const dataDir = deps.dataDir || path.join(require('os').homedir(), '.session-board-steps');
   const chunkBytes = deps.chunkBytes;
@@ -118,13 +123,13 @@ function createStepsService(deps) {
      register before "open" runs (the transport wires up its push listener first); that leaves
      a slot with no index yet, which this fills in rather than replacing, so the earlier
      subscriber is never dropped.
-     idx.open() walks backward one tree line at a time and calls its progress callback after
-     each one, so on a file at or under `tailBytes` (the ordinary case until a session gets
-     large) the "tail" is the whole file and every line fires that callback; resolving on the
-     first one would mean indexing almost nothing before replying. Instead this tracks the
-     fraction of the file covered so far and takes first paint once it reaches the tail's own
-     share of the file (1.0 for a file no bigger than the tail, which then finishes indexing in
-     full before this resolves) or once indexing completes outright, whichever comes first.
+     idx.open() walks backward in chunks and calls its progress callback after each one. On a
+     file at or under `tailBytes` (the ordinary case until a session gets large) there is no
+     separate tail step, so resolving on the first callback would mean replying with one chunk
+     of a small file. Instead this tracks the fraction of the file covered so far and takes
+     first paint once it reaches the tail's own share of the file (1.0 for a file no bigger
+     than the tail, which then finishes indexing in full before this resolves) or once indexing
+     completes outright, whichever comes first.
      idx.open()'s own promise keeps running after first paint: further backward progress lands
      in the background, each step pushed to subscribers as a provisional update with the
      sections and strip built so far, and the index is marked "still indexing" for this session
@@ -147,6 +152,7 @@ function createStepsService(deps) {
     const tailFraction = totalSize > 0 ? Math.min(1, (tailBytes || 2 * 1024 * 1024) / totalSize) : 1;
     return new Promise((resolveFirstPaint) => {
       let firstPaintSeen = false;
+      let lastProgressAt = null;
       const takeFirstPaint = () => { if (!firstPaintSeen) { firstPaintSeen = true; resolveFirstPaint(s); } };
       // indexingDone only turns false, and startFollow only starts polling, once this settles:
       // idx.poll() reads forward from the index's own sizeSeen, which open() does not set until
@@ -160,7 +166,8 @@ function createStepsService(deps) {
         // finished and a caller reading s.indexing right after first paint would see stale
         // (true) state for a file that is in fact already fully indexed.
         if (frac >= tailFraction && frac < 1) takeFirstPaint();
-        if (sameSlot()) {
+        if (sameSlot() && (lastProgressAt === null || now() - lastProgressAt >= progressIntervalMs)) {
+          lastProgressAt = now();
           const { sections, strip } = buildSections(idx.steps(), idx.body);
           push(sessionId, { type: 'stepsProgress', sessionId, fraction: frac, done: false, sections, strip });
         }

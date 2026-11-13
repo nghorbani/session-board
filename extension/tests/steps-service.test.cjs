@@ -64,6 +64,7 @@ function makeDeps(overrides) {
     setInterval: timer.setInterval,
     clearInterval: timer.clearInterval,
     pollIntervalMs: 1000,
+    progressIntervalMs: 0,
     rg: {
       probe: async () => ({ path: null, error: 'not used in this test' }),
       run: async () => ({ code: 1, stdout: '', stderr: '' }),
@@ -160,6 +161,34 @@ test('provisional pushes while indexing carry the growing section list under a s
   const lastKeys = progress[progress.length - 1].sections.map((s) => s.openerId).filter(Boolean);
   for (const k of firstKeys) assert.ok(lastKeys.includes(k), 'a section seen early is still present, under the same key, once indexing finishes');
   assert.ok(progress[progress.length - 1].sections.length >= progress[0].sections.length, 'sections only grow as indexing proceeds backward');
+});
+
+test('progress pushes while indexing are spaced in time: a pass faster than the interval sends one provisional push and the completion', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 40; i++) {
+    objs.push(i % 4 === 1 ? userLine(uuid(i), i === 1 ? null : uuid(i - 1), 'turn ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
+  }
+  writeLines(file, objs);
+  // the clock stands still, so every chunk after the first reports inside the interval
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096, progressIntervalMs: 500, now: () => 1000 });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const progress = [];
+  let doneSeen;
+  const donePromise = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => {
+    if (msg.type !== 'stepsProgress') return;
+    progress.push(msg);
+    if (msg.done) doneSeen();
+  });
+  const reply = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  assert.equal(reply.indexing, true, 'first paint still comes before the whole pass');
+  await donePromise;
+  assert.equal(progress.length, 2, 'one provisional push, then the completion');
+  assert.equal(progress[0].done, false);
+  assert.equal(progress[1].done, true);
+  assert.equal(progress[1].sections.length, 10, 'the completion push carries every section');
 });
 
 test('bodies: one round trip loads the texts of several steps at once', async () => {

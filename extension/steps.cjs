@@ -46,6 +46,8 @@ const KNOWN_HOOK_SUBTYPES = new Set(['stop_hook_summary', 'informational']);
 const BODY_LIMIT = 200 * 1024;
 const DEFAULT_TAIL_BYTES = 2 * 1024 * 1024;
 const DEFAULT_CHUNK_BYTES = 1024 * 1024;
+// first window when looking backward for a line start; it doubles until a newline turns up
+const LINE_SEARCH_BYTES = 64 * 1024;
 
 /* ---------- small text helpers (ported in spirit from the wireframe script) ---------- */
 
@@ -226,7 +228,7 @@ function createStepIndex(file, deps) {
 
   let generation = 0;
   let nodes = new Map();       // uuid -> node
-  let toolResults = new Map(); // tool_use_id -> node (whichever node carries that result)
+  let toolResults = new Map(); // tool_use_id -> { offset, length } of the line that carries that result
   let reportsByToolUse = new Map(); // tool_use_id -> report text (task-notification)
   let reportsByAgentId = new Map(); // agentId -> report text (agent-message)
   let agentIdOfToolUse = new Map(); // tool_use_id -> agentId (from the launch result)
@@ -234,6 +236,8 @@ function createStepIndex(file, deps) {
   let identity = null;  // { dev, ino, birthtimeMs } best-effort file identity
   let sizeSeen = 0;     // bytes already folded into the node map
   let path = [];        // step records along the active path, in order
+  let pathById = new Map();    // step id -> step record of the active path
+  let resultFacts = new Map(); // tool_use_id -> what a plan or question step takes from its result
 
   function fileIdentity() {
     try {
@@ -259,6 +263,8 @@ function createStepIndex(file, deps) {
     unreadable = 0;
     sizeSeen = 0;
     path = [];
+    pathById = new Map();
+    resultFacts = new Map();
   }
 
   /* feed one parsed line object plus its byte range into the shared maps */
@@ -272,6 +278,8 @@ function createStepIndex(file, deps) {
     }
     if (!o || !TREE_TYPES.has(o.type) || !o.uuid) return;
     const node = makeNode(o, offset, length);
+    const specs = stepSpecsOf(o);
+    if (specs.length) { node.at = o.timestamp || ''; node.specs = specs; }
     nodes.set(o.uuid, node);
     const content = o.message ? o.message.content : null;
     if (o.type === 'user') {
@@ -279,15 +287,13 @@ function createStepIndex(file, deps) {
         for (const b of content) {
           if (!b || b.type !== 'tool_result') continue;
           const t = resultText(b.content);
-          toolResults.set(b.tool_use_id, { text: cut(t, 20000), fullOffset: offset, fullLength: length, resultBlock: b });
+          toolResults.set(b.tool_use_id, { offset, length });
           const agMatch = /agentId:\s*([^\s).]+)/.exec(t);
           if (agMatch) agentIdOfToolUse.set(b.tool_use_id, agMatch[1]);
         }
       }
       grabReports(rawText(content));
     }
-    // drop the transient raw reference once result-joining has read what it needs
-    delete node.raw;
   }
 
   function grabReports(raw) {
@@ -338,13 +344,13 @@ function createStepIndex(file, deps) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 
-  /* The offset right after the nearest newline at or before `searchEnd` (0 when there is none,
-     i.e. the file's first line reaches all the way to `searchEnd`). Reads backward in
-     `chunkBytes` steps, growing the window until that newline turns up or the file start is
-     reached, so one very long line (well over a chunk) is still found whole. */
+  /* The offset right after the nearest newline before `searchEnd` (0 when there is none,
+     i.e. the file's first line reaches all the way to `searchEnd`). Reads backward in a small
+     window that doubles until that newline turns up or the file start is reached, so one very
+     long line (well over a chunk) is still found whole and a short one costs a short read. */
   function lineStartBefore(searchEnd) {
     if (searchEnd <= 0) return 0;
-    let windowBytes = chunkBytes;
+    let windowBytes = Math.min(chunkBytes, LINE_SEARCH_BYTES);
     for (;;) {
       const start = Math.max(0, searchEnd - windowBytes);
       const buf = readRange(start, searchEnd);
@@ -354,25 +360,17 @@ function createStepIndex(file, deps) {
       windowBytes *= 2;
     }
   }
-  /* The true start of the line that ends at `rightBoundary` (always either the file size or a
-     position right after some newline): the nearest newline strictly before `rightBoundary - 1`,
-     so a line's own trailing newline (sitting at `rightBoundary - 1`) is never mistaken for its
-     predecessor's. */
-  function findLineStart(rightBoundary) {
-    return rightBoundary <= 0 ? 0 : lineStartBefore(rightBoundary - 1);
-  }
-
-  /* One backward step: find the true start of the line ending at `rightBoundary` and ingest
-     every complete line from there up to `rightBoundary`. Returns that line start, the new
-     right boundary for the caller's next step. Reading always targets a true line start, so a
-     step never parses a partial line. */
-  function readBackwardStep(rightBoundary) {
+  /* One backward step of about `wantBytes`: ingest every complete line between the line start
+     at or before `rightBoundary - wantBytes` and `rightBoundary` (always either the file size
+     or a position right after some newline), in one read. Returns that line start, the new
+     right boundary for the caller's next step. The step starts at a true line start, so it
+     never parses a partial line, and it reaches back at least one whole line however long
+     that line is. */
+  function readBackwardStep(rightBoundary, wantBytes) {
     if (rightBoundary <= 0) return 0;
-    const lineStart = findLineStart(rightBoundary);
-    if (lineStart < rightBoundary) {
-      const lines = splitLines(readRange(lineStart, rightBoundary), lineStart);
-      for (const r of lines.records) ingest(r.obj, r.offset, r.length);
-    }
+    const lineStart = lineStartBefore(Math.min(rightBoundary - 1, Math.max(0, rightBoundary - wantBytes)));
+    const lines = splitLines(readRange(lineStart, rightBoundary), lineStart);
+    for (const r of lines.records) ingest(r.obj, r.offset, r.length);
     return lineStart;
   }
 
@@ -391,7 +389,7 @@ function createStepIndex(file, deps) {
     // if incomplete, path to show.
     let rightBoundary = totalSize;
     if (totalSize > tailBytes) {
-      rightBoundary = readBackwardStep(totalSize);
+      rightBoundary = readBackwardStep(totalSize, tailBytes);
       recomputePath();
       if (onProgress) onProgress((totalSize - rightBoundary) / totalSize);
     }
@@ -399,7 +397,7 @@ function createStepIndex(file, deps) {
     // Then continue backward in `chunkBytes` steps, yielding the event loop between them,
     // until the start of the file.
     while (rightBoundary > 0) {
-      rightBoundary = readBackwardStep(rightBoundary);
+      rightBoundary = readBackwardStep(rightBoundary, chunkBytes);
       recomputePath();
       if (onProgress) onProgress((totalSize - rightBoundary) / totalSize);
       if (rightBoundary > 0) await yieldTurn();
@@ -478,6 +476,8 @@ function createStepIndex(file, deps) {
     }
     chainUuids.reverse();
     path = buildSteps(chainUuids);
+    pathById = new Map();
+    for (const st of path) pathById.set(st.id, st);
   }
 
   /* ---------- turning ancestor nodes into step records ---------- */
@@ -488,9 +488,31 @@ function createStepIndex(file, deps) {
     try { return JSON.parse(s); } catch (_) { return null; }
   }
 
-  function toolResultFor(toolUseId) {
+  /* A tool result is read from its line when someone asks for it; the index keeps only where
+     that line is, so the results of a long session never sit in memory. */
+  function resultContentFor(toolUseId) {
     const r = toolResults.get(toolUseId);
-    return r ? r.text : '';
+    if (!r) return undefined;
+    const o = readLineObj(r);
+    const content = o && o.message ? o.message.content : null;
+    if (!Array.isArray(content)) return undefined;
+    const b = content.find((x) => x && x.type === 'tool_result' && x.tool_use_id === toolUseId);
+    return b ? b.content : undefined;
+  }
+  function toolResultFor(toolUseId) {
+    const c = resultContentFor(toolUseId);
+    return c === undefined ? '' : cut(resultText(c), 20000);
+  }
+  /* What a plan step (approved or not) or a question step (the answers) takes from its result,
+     read once per call and kept: results do not change. Nothing is kept while the result has
+     not arrived, so a later look finds it. */
+  function resultFact(toolUseId, derive, missing) {
+    if (resultFacts.has(toolUseId)) return resultFacts.get(toolUseId);
+    const c = resultContentFor(toolUseId);
+    if (c === undefined) return missing;
+    const v = derive(c);
+    resultFacts.set(toolUseId, v);
+    return v;
   }
   function reportFor(toolUseId) {
     if (reportsByToolUse.has(toolUseId)) return reportsByToolUse.get(toolUseId);
@@ -500,115 +522,114 @@ function createStepIndex(file, deps) {
     return res.indexOf('Async agent launched') === -1 ? res : '';
   }
 
-  function buildSteps(chainUuids) {
+  /* The steps one tree line gives, worked out once while the parsed line is in hand: block
+     index, kind and the fields of the step record. The path is rebuilt from these after every
+     chunk and every poll, so it must not go back to the file for them. What depends on a tool
+     result (a plan's approval, a question's answers) is filled in by buildSteps, because a
+     result is read before its call on the backward pass and after it on a poll. */
+  function stepSpecsOf(o) {
     const out = [];
-    for (const u of chainUuids) {
-      const node = nodes.get(u);
-      if (!node) continue;
-      const o = readLineObj(node);
-      if (!o) continue;
-      curLineTimestamp = o.timestamp || '';
-      const content = o.message ? o.message.content : null;
-      if (o.type === 'attachment') {
-        // A message typed while the model was still working is queued and delivered as an
-        // attachment line, not a user line: attachment.type "queued_command" with
-        // attachment.origin.kind "human" is the owner's own words (origin "peer" is another
-        // session's message, "task-notification" is bookkeeping; neither is a you step). Left
-        // unhandled, this line contributes nothing, so the section it opens is attributed to
-        // whatever came next instead of to the owner.
-        const att = o.attachment;
-        if (att && att.type === 'queued_command' && att.origin && att.origin.kind === 'human') {
-          const t = ownerText(att.prompt).trim();
-          if (t && !isNotificationUserText(t)) out.push(makeStep(node, 0, 'you', { preview: previewOf(t) }));
-        }
-      } else if (o.type === 'user') {
-        if (o.isMeta || o.isCompactSummary) continue;
-        if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) continue;
-        const t = ownerText(content).trim();
-        if (!t || isNotificationUserText(t)) continue;
-        // A cancelled-turn line the system writes, never a word the owner typed: it must not
-        // read as one of their messages or open a section (A3).
-        if (isInterruptedMarkerText(t)) { out.push(makeStep(node, 0, 'interrupted', { preview: 'Interrupted' })); continue; }
-        out.push(makeStep(node, 0, 'you', { preview: previewOf(t) }));
-      } else if (o.type === 'assistant') {
-        if (o.isApiErrorMessage) {
-          out.push(makeStep(node, 0, 'error', { preview: previewOf(textOf(content) || 'API error') }));
-          continue;
-        }
-        const blocks = Array.isArray(content) ? content : [];
-        for (let bi = 0; bi < blocks.length; bi++) {
-          const b = blocks[bi];
-          if (!b) continue;
-          if (b.type === 'text' && String(b.text || '').trim()) {
-            out.push(makeStep(node, bi, 'text', { preview: previewOf(b.text) }));
-          } else if (b.type === 'thinking') {
-            const text = String(b.thinking || '');
-            if (text) out.push(makeStep(node, bi, 'update', { preview: previewOf(text) }));
-            else out.push(makeStep(node, bi, 'reasoning', { preview: '', durationMs: Number(o.thinkingDurationMs) || 0 }));
-          } else if (b.type === 'tool_use') {
-            if (b.name === 'ExitPlanMode') {
-              const res = toolResultFor(b.id);
-              out.push(makeStep(node, bi, 'plan', { preview: previewOf(String((b.input || {}).plan || '')), approved: res.indexOf('approved') !== -1, toolUseId: b.id }));
-            } else if (b.name === 'Agent') {
-              const input = b.input || {};
-              out.push(makeStep(node, bi, 'subagent', {
-                title: String(input.subagent_type || 'agent'),
-                preview: previewOf(String(input.description || '')),
-                toolUseId: b.id,
-              }));
-            } else if (b.name === 'AskUserQuestion') {
-              const res = toolResultFor(b.id);
-              const resultBlock = toolResults.get(b.id);
-              const parsed = parseAnswers(resultBlock ? resultBlock.resultBlock.content : res);
-              out.push(makeStep(node, bi, 'question', {
-                preview: previewOf(stripTags(summary(b.name, b.input))),
-                toolUseId: b.id,
-                rawAnswers: parsed,
-                rawInput: b.input,
-              }));
-            } else {
-              out.push(makeStep(node, bi, 'tool', {
-                title: b.name || 'tool',
-                preview: previewOf(summary(b.name, b.input)),
-                toolUseId: b.id,
-              }));
-            }
+    const add = (bi, kind, fields) => { out.push({ bi, kind, fields }); };
+    const content = o.message ? o.message.content : null;
+    if (o.type === 'attachment') {
+      // A message typed while the model was still working is queued and delivered as an
+      // attachment line, not a user line: attachment.type "queued_command" with
+      // attachment.origin.kind "human" is the owner's own words (origin "peer" is another
+      // session's message, "task-notification" is bookkeeping; neither is a you step). Left
+      // unhandled, this line contributes nothing, so the section it opens is attributed to
+      // whatever came next instead of to the owner.
+      const att = o.attachment;
+      if (att && att.type === 'queued_command' && att.origin && att.origin.kind === 'human') {
+        const t = ownerText(att.prompt).trim();
+        if (t && !isNotificationUserText(t)) add(0, 'you', { preview: previewOf(t) });
+      }
+    } else if (o.type === 'user') {
+      if (o.isMeta || o.isCompactSummary) return out;
+      if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) return out;
+      const t = ownerText(content).trim();
+      if (!t || isNotificationUserText(t)) return out;
+      // A cancelled-turn line the system writes, never a word the owner typed: it must not
+      // read as one of their messages or open a section.
+      if (isInterruptedMarkerText(t)) add(0, 'interrupted', { preview: 'Interrupted' });
+      else add(0, 'you', { preview: previewOf(t) });
+    } else if (o.type === 'assistant') {
+      if (o.isApiErrorMessage) {
+        add(0, 'error', { preview: previewOf(textOf(content) || 'API error') });
+        return out;
+      }
+      const blocks = Array.isArray(content) ? content : [];
+      for (let bi = 0; bi < blocks.length; bi++) {
+        const b = blocks[bi];
+        if (!b) continue;
+        if (b.type === 'text' && String(b.text || '').trim()) {
+          add(bi, 'text', { preview: previewOf(b.text) });
+        } else if (b.type === 'thinking') {
+          const text = String(b.thinking || '');
+          if (text) add(bi, 'update', { preview: previewOf(text) });
+          else add(bi, 'reasoning', { preview: '', durationMs: Number(o.thinkingDurationMs) || 0 });
+        } else if (b.type === 'tool_use') {
+          const input = b.input || {};
+          if (b.name === 'ExitPlanMode') {
+            add(bi, 'plan', { preview: previewOf(String(input.plan || '')), toolUseId: b.id });
+          } else if (b.name === 'Agent') {
+            add(bi, 'subagent', {
+              title: String(input.subagent_type || 'agent'),
+              preview: previewOf(String(input.description || '')),
+              toolUseId: b.id,
+            });
+          } else if (b.name === 'AskUserQuestion') {
+            add(bi, 'question', { preview: previewOf(stripTags(summary(b.name, b.input))), toolUseId: b.id, rawInput: b.input });
           } else {
-            out.push(makeStep(node, bi, 'other', { preview: '', blockType: String(b.type || 'unknown') }));
+            const fields = { title: b.name || 'tool', preview: previewOf(summary(b.name, b.input)), toolUseId: b.id };
+            // the file an edit changed, kept on the step so counting files needs no read
+            if (b.name === 'Edit' || b.name === 'Write') fields.path = String(input.file_path || '');
+            add(bi, 'tool', fields);
           }
-        }
-      } else if (o.type === 'system') {
-        if (o.subtype === 'compact_boundary') {
-          const m = o.compactMetadata || {};
-          out.push(makeStep(node, 0, 'compaction', { preview: 'Context compacted: ' + (m.preTokens || '?') + ' to ' + (m.postTokens || '?') + ' tokens' }));
-        } else if (o.subtype === 'api_error') {
-          out.push(makeStep(node, 0, 'error', { preview: previewOf(String(o.content || 'API error')) }));
-        } else if (KNOWN_HOOK_SUBTYPES.has(o.subtype)) {
-          // bookkeeping the reader already understands and deliberately leaves out, not "other".
         } else {
-          out.push(makeStep(node, 0, 'other', { preview: '', blockType: 'system:' + String(o.subtype || 'unknown') }));
+          add(bi, 'other', { preview: '', blockType: String(b.type || 'unknown') });
         }
       }
-      // attachments are bookkeeping for reports; nothing shown as a step on their own.
+    } else if (o.type === 'system') {
+      if (o.subtype === 'compact_boundary') {
+        const m = o.compactMetadata || {};
+        add(0, 'compaction', { preview: 'Context compacted: ' + (m.preTokens || '?') + ' to ' + (m.postTokens || '?') + ' tokens' });
+      } else if (o.subtype === 'api_error') {
+        add(0, 'error', { preview: previewOf(String(o.content || 'API error')) });
+      } else if (KNOWN_HOOK_SUBTYPES.has(o.subtype)) {
+        // bookkeeping the reader already understands and deliberately leaves out, not "other".
+      } else {
+        add(0, 'other', { preview: '', blockType: 'system:' + String(o.subtype || 'unknown') });
+      }
     }
     return out;
   }
 
+  function buildSteps(chainUuids) {
+    const out = [];
+    for (const u of chainUuids) {
+      const node = nodes.get(u);
+      if (!node || !node.specs) continue;
+      for (const sp of node.specs) {
+        const step = Object.assign({ id: node.uuid + ':' + sp.bi, at: node.at, kind: sp.kind, nodeUuid: node.uuid, blockIndex: sp.bi, generation }, sp.fields);
+        if (sp.kind === 'plan') step.approved = resultFact(step.toolUseId, (c) => resultText(c).indexOf('approved') !== -1, false);
+        else if (sp.kind === 'question') step.rawAnswers = resultFact(step.toolUseId, parseAnswers, []);
+        out.push(step);
+      }
+    }
+    return out;
+  }
+
+  /* The first 200 characters, as a copy: a slice of a long string keeps the whole string alive,
+     and these previews stay in memory for every step of the session. */
   function previewOf(s) {
     s = String(s || '');
-    return s.length > 200 ? s.slice(0, 200) : s;
-  }
-  let curLineTimestamp = '';
-  function makeStep(node, blockIndex, kind, fields) {
-    const id = node.uuid + ':' + blockIndex;
-    return Object.assign({ id, at: curLineTimestamp, kind, nodeUuid: node.uuid, blockIndex, generation }, fields);
+    return s.length > 200 ? Buffer.from(s.slice(0, 200), 'utf8').toString('utf8') : s;
   }
 
   /* ---------- body on demand ---------- */
 
   function findStep(stepId) {
-    for (const s of path) if (s.id === stepId) return s;
-    return null;
+    return pathById.get(stepId) || null;
   }
 
   /* `stepId` is a plain step id (the common case: look it up in the current path) or a step
@@ -709,8 +730,10 @@ function createStepIndex(file, deps) {
 const QUIET_KINDS = new Set(['tool', 'reasoning', 'subagent', 'update']);
 
 function headingForYou(step, bodyFn) {
-  const b = bodyFn(step.id);
-  return firstSentence(b && b.text, 90) || 'Message';
+  // the preview is the start of the same text and longer than any heading, so it serves
+  // without a read; a step that carries none (a caller's own record) is read
+  const text = step.preview || ((bodyFn(step.id) || {}).text);
+  return firstSentence(text, 90) || 'Message';
 }
 function headingForQuestion(step, bodyFn) {
   const b = bodyFn(step.id);
@@ -820,8 +843,8 @@ function buildSections(stepsArr, bodyFn) {
         if (!st || (st.kind !== 'tool' && st.kind !== 'subagent')) continue;
         sec.toolCalls++;
         if (st.kind === 'tool' && (st.title === 'Edit' || st.title === 'Write')) {
-          const b = bodyFn(id);
-          if (b && b.path) { filesChangedAll.add(b.path); filesChangedHere.add(b.path); }
+          const file = st.path !== undefined ? st.path : (bodyFn(id) || {}).path;
+          if (file) { filesChangedAll.add(file); filesChangedHere.add(file); }
         }
       }
     }

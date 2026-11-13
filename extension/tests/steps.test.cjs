@@ -333,6 +333,47 @@ test('backward indexing in several small chunks yields and reports progress', as
   assert.equal(idx.steps()[0].kind, 'you');
 });
 
+test('backward indexing reads whole chunks: progress calls and bytes read follow the file size, not the number of lines', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 400; i++) {
+    objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i }]));
+  }
+  writeLines(file, objs);
+  const size = fs.statSync(file).size;
+  const chunk = 16 * 1024;
+  assert.ok(size > 4 * chunk, 'fixture spans several chunks');
+  let bytesRead = 0;
+  const countingFs = Object.assign({}, fs, {
+    readSync: (fd, buf, off, len, pos) => { bytesRead += len; return fs.readSync(fd, buf, off, len, pos); },
+  });
+  const idx = steps.createStepIndex(file, { fs: countingFs, chunkBytes: chunk, tailBytes: chunk });
+  let calls = 0;
+  await idx.open(() => { calls += 1; });
+  assert.equal(idx.steps().length, 400, 'every line is still indexed');
+  const chunks = Math.ceil(size / chunk);
+  assert.ok(calls <= chunks + 1, 'one progress call per chunk at most: ' + calls + ' calls for ' + chunks + ' chunks');
+  assert.ok(bytesRead <= 3 * size, 'the file is not read over and over: ' + bytesRead + ' bytes read for a file of ' + size);
+});
+
+test('backward indexing in chunks keeps a line longer than a chunk whole and loses no line at a chunk border', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 60; i++) {
+    const pad = i % 7 === 0 ? 'x'.repeat(9000) : 'y'.repeat(i * 13 % 300);
+    objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' ' + pad }]));
+  }
+  writeLines(file, objs);
+  for (const chunk of [512, 1000, 4096, 5000]) {
+    const idx = steps.createStepIndex(file, { chunkBytes: chunk, tailBytes: chunk });
+    await idx.open();
+    const got = idx.steps();
+    assert.equal(got.length, 60, 'all 60 lines with chunk ' + chunk);
+    assert.equal(idx.counts().unreadable, 0, 'no line was cut in two with chunk ' + chunk);
+    assert.equal(idx.body(got[59].id).text.indexOf('line 60 '), 0);
+  }
+});
+
 test('a partial last line completes on the next poll', async () => {
   const file = newFile();
   writeLines(file, [userLine(uuid(1), null, 'first')]);
