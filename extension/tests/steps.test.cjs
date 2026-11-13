@@ -520,3 +520,37 @@ test('Work lines stay in time order: a run of tool calls between two texts becom
   assert.deepEqual(rowKinds, ['work', 'text', 'work', 'text'],
     'two separate Work lines in time order, not one work lump after both texts: got ' + JSON.stringify(rowKinds));
 });
+
+test('a message typed mid-turn (a queued_command attachment with a human origin) is a you step that opens its own section', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'start the long task'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'sleep 60', description: 'run a long command' } }]),
+    {
+      type: 'attachment', uuid: uuid(3), parentUuid: uuid(2), timestamp: new Date(2026, 0, 1, 0, 5).toISOString(),
+      attachment: { type: 'queued_command', commandMode: 'prompt', prompt: 'while that runs, also check the other file', origin: { kind: 'human' } },
+    },
+    // a peer-origin or task-notification queued_command must NOT become a you step
+    {
+      type: 'attachment', uuid: uuid(4), parentUuid: uuid(3), timestamp: new Date(2026, 0, 1, 0, 6).toISOString(),
+      attachment: { type: 'queued_command', commandMode: 'prompt', prompt: 'a message from another session', origin: { kind: 'peer' } },
+    },
+    toolResultLine(uuid(5), uuid(4), 'b1', 'done'),
+    assistantLine(uuid(6), uuid(5), 'm2', [{ type: 'text', text: 'checked it, all good' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const allSteps = idx.steps();
+  const kinds = allSteps.map((s) => s.kind);
+  assert.deepEqual(kinds.filter((k) => k === 'you'), ['you', 'you'], 'the first message and the human-origin queued command both become you steps');
+  const typed = allSteps.find((s) => s.nodeUuid === uuid(3));
+  assert.ok(typed, 'the human-origin attachment produced a step');
+  assert.equal(idx.body(typed.id).text, 'while that runs, also check the other file');
+  const peerStep = allSteps.find((s) => s.nodeUuid === uuid(4));
+  assert.equal(peerStep, undefined, 'a peer-origin queued command is not a you step');
+
+  const { sections } = steps.buildSections(allSteps, idx.body.bind(idx));
+  const typedSection = sections.find((s) => s.openerId === typed.id);
+  assert.ok(typedSection, 'the typed message opens its own section');
+  assert.equal(typedSection.kind, 'you', 'labelled You, not Claude');
+});

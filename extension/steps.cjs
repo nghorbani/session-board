@@ -485,7 +485,19 @@ function createStepIndex(file, deps) {
       if (!o) continue;
       curLineTimestamp = o.timestamp || '';
       const content = o.message ? o.message.content : null;
-      if (o.type === 'user') {
+      if (o.type === 'attachment') {
+        // A message typed while the model was still working is queued and delivered as an
+        // attachment line, not a user line: attachment.type "queued_command" with
+        // attachment.origin.kind "human" is the owner's own words (origin "peer" is another
+        // session's message, "task-notification" is bookkeeping; neither is a you step). Left
+        // unhandled, this line contributes nothing, so the section it opens is attributed to
+        // whatever came next instead of to the owner.
+        const att = o.attachment;
+        if (att && att.type === 'queued_command' && att.origin && att.origin.kind === 'human') {
+          const t = String(att.prompt || '').trim();
+          if (t && !isNotificationUserText(t)) out.push(makeStep(node, 0, 'you', { preview: previewOf(t) }));
+        }
+      } else if (o.type === 'user') {
         if (o.isMeta || o.isCompactSummary) continue;
         if (Array.isArray(content) && content.some((b) => b && b.type === 'tool_result')) continue;
         const t = textOf(content).trim();
@@ -590,7 +602,7 @@ function createStepIndex(file, deps) {
     const blocks = Array.isArray(content) ? content : [];
     const b = blocks[step.blockIndex];
 
-    if (step.kind === 'you') return textBody(textOf(content));
+    if (step.kind === 'you') return textBody(o.type === 'attachment' ? String((o.attachment && o.attachment.prompt) || '') : textOf(content));
     if (step.kind === 'error') return textBody(textOf(content) || String(o.content || 'API error'));
     if (step.kind === 'compaction') return textBody(step.preview);
     if (step.kind === 'text') return textBody(b ? b.text : '');
