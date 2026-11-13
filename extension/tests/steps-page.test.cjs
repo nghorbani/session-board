@@ -428,6 +428,55 @@ test('page: a single command Work line names it by its own description', opts, a
   await page.close();
 });
 
+test('page: a Work line holding only empty reasoning reads "Thought for Ns", never "1 step"', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('r1:0', 'reasoning', { durationMs: 12000 })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'think about it', 'u1:0', [{ kind: 'work', items: ['r1:0'] }]),
+    ],
+    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0] !== '1 step', 'the Work line to settle');
+  assert.equal(s.workSums[0], 'Thought for 12 s', 'names the pause in words: ' + s.workSums[0]);
+  await page.close();
+});
+
+test('page: a Work line holding reasoning with no stored duration reads "Thought", never "1 step"', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('r1:0', 'reasoning', { durationMs: 0 })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'think about it', 'u1:0', [{ kind: 'work', items: ['r1:0'] }]),
+    ],
+    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0] !== '1 step', 'the Work line to settle');
+  assert.equal(s.workSums[0], 'Thought', 'no duration: still says what happened, not a step count: ' + s.workSums[0]);
+  await page.close();
+});
+
+test('page: a Work line holding one tool the summary has no dedicated phrasing for names the tool', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'tool', { title: 'ToolSearch' })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'find the right tool', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
+    ],
+    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+  });
+  fake.body = (stepId) => {
+    if (stepId === 't1:0') return { title: 'ToolSearch', input: 'select:Read', result: 'ok' };
+    return { text: 'body of ' + stepId, truncated: false, size: 10 };
+  };
+  const page = await openPage(A);
+  const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0] !== '1 step', 'the Work line to settle once the body loads');
+  assert.equal(s.workSums[0], 'Used ToolSearch', 'names the unrecognised tool rather than folding it into a step count: ' + s.workSums[0]);
+  await page.close();
+});
+
 test('page: the owner\'s message appears once per section, in the heading card, never a second time below it', opts, async () => {
   const longMsg = 'line one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight';
   fake.open = () => openReply({

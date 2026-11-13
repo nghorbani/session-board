@@ -326,6 +326,15 @@ function fmtDuration(ms) {
   var h = Math.floor(m / 60);
   return h + 'h ' + (m % 60) + 'm';
 }
+/* A short span in seconds or minutes, for a reasoning duration ("Thought for 12 s", "Thought for
+   3m"): fmtDuration's "under a minute" says too little for a Work line reporting an exact pause. */
+function fmtShortDuration(ms) {
+  ms = Number(ms) || 0;
+  var s = Math.round(ms / 1000);
+  if (s < 60) return Math.max(s, 1) + ' s';
+  var m = Math.round(ms / 60000);
+  return m + 'm';
+}
 
 // -- transport ----------------------------------------------------------------------------
 
@@ -1392,14 +1401,19 @@ function fileBaseName(p) { return String(p || '').split(/[\\/]/).pop(); }
 
 /* A Work line says in words what happened: "Edited 1 file, ran 2 commands", not a bare tool-call
    tally. A single command (Bash/PowerShell) is named by its own description rather than counted,
-   since "ran a command" says nothing a reader can act on. Bodies not yet loaded fall back to the
-   compact preview, so the line is never empty while a batch is still in flight. */
+   since "ran a command" says nothing a reader can act on. An unnamed tool kind is named by its
+   own tool name rather than folded into a silent "N other steps" count, so "Used ToolSearch"
+   says what happened even for a tool this summary has no dedicated phrasing for. Bodies not yet
+   loaded fall back to the compact preview, so the line is never empty while a batch is still in
+   flight. A run that holds only empty reasoning (no tool, no subagent, nothing else) reads as
+   "Thought for 12 s", or "Thought" when no duration was stored, rather than a bare step count. */
 function summarizeWork(items) {
-  var edited = [], created = [], searches = 0, reads = 0, bash = [], subs = [], skills = [], other = 0;
+  var edited = [], created = [], searches = 0, reads = 0, bash = [], subs = [], skills = [], namedOther = [], reasoningMs = 0, reasoningCount = 0;
   items.forEach(function (id) {
     var c = state.compactById && state.compactById[id];
     if (!c) return;
     if (c.kind === 'subagent') { subs.push((state.bodies[id] && state.bodies[id].description) || c.preview || ''); return; }
+    if (c.kind === 'reasoning') { reasoningCount++; reasoningMs += Number(c.durationMs) || 0; return; }
     if (c.kind !== 'tool') return;
     var title = c.title || 'tool';
     var b = state.bodies[id];
@@ -1411,7 +1425,7 @@ function summarizeWork(items) {
       var input = (b && b.input) || c.preview || '';
       bash.push(String(input).split('\n')[0]);
     } else if (title === 'Skill') skills.push(((b && b.input) || c.preview || '').split('\n')[0]);
-    else other++;
+    else namedOther.push(title);
   });
   var parts = [];
   if (created.length) parts.push('created ' + created.length + (created.length === 1 ? ' file' : ' files'));
@@ -1422,7 +1436,10 @@ function summarizeWork(items) {
   else if (bash.length > 1) parts.push('ran ' + bash.length + ' commands');
   if (skills.length) parts.push('used ' + skills.slice(0, 2).join(', '));
   if (subs.length) parts.push('sent out ' + subs.length + (subs.length === 1 ? ' subagent' : ' subagents') + (subs[0] ? ' (' + subs.slice(0, 2).join('; ') + ')' : ''));
-  if (other) parts.push(other + ' other step' + (other === 1 ? '' : 's'));
+  if (namedOther.length) parts.push('used ' + namedOther.join(', '));
+  if (!parts.length && reasoningCount) {
+    return reasoningMs > 0 ? 'Thought for ' + fmtShortDuration(reasoningMs) : 'Thought';
+  }
   if (!parts.length) return items.length + (items.length === 1 ? ' step' : ' steps');
   var s = parts.join(', ');
   return s.charAt(0).toUpperCase() + s.slice(1);
