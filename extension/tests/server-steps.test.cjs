@@ -188,3 +188,34 @@ test('a note just under the 16 KB cap is accepted over the 64 KB body limit', as
   assert.equal(r.status, 200);
   assert.equal(r.body.ok, true, JSON.stringify(r.body));
 });
+
+// -- B4: the browser transport's deliver (copy only) ---------------------------------------
+
+test('noteSend over the browser transport always answers copy-only: ok false, the clipboard line, no sent record', async () => {
+  const opened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: A }) });
+  const stepId = opened.body.steps[0].id;
+  const added = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteAdd', sessionId: A, stepId, text: 'why this approach?' }) });
+  const noteId = added.body.note.id;
+
+  const sent = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteSend', sessionId: A, noteId }) });
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.type, 'noteSendResult');
+  assert.equal(sent.body.ok, false, 'the server never delivers into a chat box');
+  assert.equal(sent.body.message, 'On the clipboard. Paste it into the session.');
+
+  const reopened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r2', sessionId: A }) });
+  const note = reopened.body.notes.find((n) => n.id === noteId);
+  assert.deepEqual(note.sent, [], 'a copy-only reply is not recorded as sent');
+});
+
+test('notesSendAll over the browser transport answers copy-only the same way', async () => {
+  const opened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: A }) });
+  const stepId = opened.body.steps[0].id;
+  await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteAdd', sessionId: A, stepId, text: 'a note' }) });
+
+  const result = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'notesSendAll', sessionId: A }) });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.type, 'notesSendAllResult');
+  assert.equal(result.body.ok, false);
+  assert.equal(result.body.message, 'On the clipboard. Paste it into the session.');
+});
