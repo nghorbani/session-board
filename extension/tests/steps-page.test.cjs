@@ -166,6 +166,7 @@ const SAMPLE = `(function () {
     railOpen: document.getElementById('rail').classList.contains('open'),
     domRowCount: q('.row, .sec-stub').length,
     openLinkCalls: window.__openLinkCalls || 0,
+    workSums: q('.worksum').map(function (e) { return e.textContent; }),
   };
 })()`;
 
@@ -290,6 +291,52 @@ test('page: the Files changed tile shows clickable names that send openLink', op
   assert.ok(s.fileLinks.some((f) => f.indexOf('foo.py') !== -1));
   await page.click('.fp');
   await page.until((x) => x.openLinkCalls > 0, 'the click to call dispatchLink');
+  await page.close();
+});
+
+test('page: a Work line says in words what was done, never "N tool calls: Bash, Edit"', opts, async () => {
+  fake.open = () => openReply({
+    steps: [
+      step('u1:0', 'you'),
+      step('t1:0', 'tool', { title: 'Edit' }),
+      step('t2:0', 'tool', { title: 'Bash' }),
+      step('t3:0', 'tool', { title: 'Bash' }),
+    ],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'fix the bug', 'u1:0', [{ kind: 'work', items: ['t1:0', 't2:0', 't3:0'] }]),
+    ],
+    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 1 },
+  });
+  fake.body = (stepId) => {
+    if (stepId === 't1:0') return { title: 'Edit', input: 'C:\\proj\\foo.py', result: 'ok', path: 'C:\\proj\\foo.py' };
+    if (stepId === 't2:0' || stepId === 't3:0') return { title: 'Bash', input: 'run tests\n$ npm test', result: 'ok' };
+    return { text: 'body of ' + stepId, truncated: false, size: 10 };
+  };
+  const page = await openPage(A);
+  const s = await page.until((x) => x.workSums.length > 0 && /edited/i.test(x.workSums[0]), 'the Work line to settle once bodies load');
+  assert.ok(/edited/i.test(s.workSums[0]), 'names the edit in words: ' + s.workSums[0]);
+  assert.ok(/ran 2 commands/i.test(s.workSums[0]), 'names the commands in words: ' + s.workSums[0]);
+  assert.equal(/\d+ tool calls?:/i.test(s.workSums[0]), false, 'never the bare "N tool calls: Bash, Edit" phrasing: ' + s.workSums[0]);
+  await page.close();
+});
+
+test('page: a single command Work line names it by its own description', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'tool', { title: 'Bash' })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'run the tests', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
+    ],
+    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+  });
+  fake.body = (stepId) => {
+    if (stepId === 't1:0') return { title: 'Bash', input: 'run the test suite\n$ npm test', result: 'ok' };
+    return { text: 'body of ' + stepId, truncated: false, size: 10 };
+  };
+  const page = await openPage(A);
+  const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0].indexOf('run the test suite') !== -1, 'the Work line to settle once the body loads');
+  assert.ok(s.workSums[0].indexOf('run the test suite') !== -1, 'a single command is named by its own description: ' + s.workSums[0]);
   await page.close();
 });
 

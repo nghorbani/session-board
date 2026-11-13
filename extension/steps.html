@@ -1086,18 +1086,44 @@ function fillQuestionBody(el, stepId) {
   });
 }
 
+function fileBaseName(p) { return String(p || '').split(/[\\/]/).pop(); }
+
+/* A Work line says in words what happened: "Edited 1 file, ran 2 commands", not a bare tool-call
+   tally. A single command (Bash/PowerShell) is named by its own description rather than counted,
+   since "ran a command" says nothing a reader can act on. Bodies not yet loaded fall back to the
+   compact preview, so the line is never empty while a batch is still in flight. */
 function summarizeWork(items) {
-  var kinds = Object.create(null);
-  var toolCount = 0;
+  var edited = [], created = [], searches = 0, reads = 0, bash = [], subs = [], skills = [], other = 0;
   items.forEach(function (id) {
     var c = state.compactById && state.compactById[id];
     if (!c) return;
-    if (c.kind === 'tool') { toolCount++; kinds[c.title || 'tool'] = (kinds[c.title || 'tool'] || 0) + 1; }
+    if (c.kind === 'subagent') { subs.push((state.bodies[id] && state.bodies[id].description) || c.preview || ''); return; }
+    if (c.kind !== 'tool') return;
+    var title = c.title || 'tool';
+    var b = state.bodies[id];
+    if (title === 'Edit') { var ep = (b && b.path) || ''; if (ep && edited.indexOf(ep) === -1) edited.push(ep); }
+    else if (title === 'Write') { var wp = (b && b.path) || ''; if (wp && created.indexOf(wp) === -1) created.push(wp); }
+    else if (title === 'Grep' || title === 'Glob') searches++;
+    else if (title === 'Read') reads++;
+    else if (title === 'Bash' || title === 'PowerShell') {
+      var input = (b && b.input) || c.preview || '';
+      bash.push(String(input).split('\n')[0]);
+    } else if (title === 'Skill') skills.push(((b && b.input) || c.preview || '').split('\n')[0]);
+    else other++;
   });
-  var names = Object.keys(kinds);
-  if (!names.length) return items.length + (items.length === 1 ? ' step' : ' steps');
-  var parts = names.map(function (n) { return n + (kinds[n] > 1 ? ' x' + kinds[n] : ''); });
-  return (toolCount === 1 ? '1 tool call: ' : toolCount + ' tool calls: ') + parts.join(', ');
+  var parts = [];
+  if (created.length) parts.push('created ' + created.length + (created.length === 1 ? ' file' : ' files'));
+  if (edited.length) parts.push('edited ' + (edited.length === 1 ? (fileBaseName(edited[0]) || '1 file') : edited.length + ' files'));
+  if (reads) parts.push('read ' + reads + (reads === 1 ? ' file' : ' files'));
+  if (searches) parts.push('ran ' + searches + (searches === 1 ? ' search' : ' searches'));
+  if (bash.length === 1) parts.push('ran ' + (bash[0] || 'a command'));
+  else if (bash.length > 1) parts.push('ran ' + bash.length + ' commands');
+  if (skills.length) parts.push('used ' + skills.slice(0, 2).join(', '));
+  if (subs.length) parts.push('sent out ' + subs.length + (subs.length === 1 ? ' subagent' : ' subagents') + (subs[0] ? ' (' + subs.slice(0, 2).join('; ') + ')' : ''));
+  if (other) parts.push(other + ' other step' + (other === 1 ? '' : 's'));
+  if (!parts.length) return items.length + (items.length === 1 ? ' step' : ' steps');
+  var s = parts.join(', ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function filesTouchedIn(items) {

@@ -500,3 +500,23 @@ test('total time is working time, not the wall-clock span: a session left open o
   assert.ok(strip.totalTimeMs >= 4 * 60 * 1000, 'the actual working spans should still be counted: got ' + strip.totalTimeMs + 'ms');
   assert.ok(strip.wallClockMs >= 18 * 60 * 60000, 'the wall-clock span is kept too, for the tooltip');
 });
+
+test('Work lines stay in time order: a run of tool calls between two texts becomes its own Work line, not a lump at the end', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'do two things and report on each'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: 'C:/proj/a.txt' } }]),
+    toolResultLine(uuid(3), uuid(2), 'e1', 'ok'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'first one is done' }]),
+    assistantLine(uuid(5), uuid(4), 'm3', [{ type: 'tool_use', id: 'e2', name: 'Write', input: { file_path: 'C:/proj/b.txt' } }]),
+    toolResultLine(uuid(6), uuid(5), 'e2', 'ok'),
+    assistantLine(uuid(7), uuid(6), 'm4', [{ type: 'text', text: 'second one is done too' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const { sections } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  const youSection = sections.find((s) => s.kind === 'you');
+  const rowKinds = youSection.body.map((r) => r.kind);
+  assert.deepEqual(rowKinds, ['work', 'text', 'work', 'text'],
+    'two separate Work lines in time order, not one work lump after both texts: got ' + JSON.stringify(rowKinds));
+});

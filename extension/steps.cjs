@@ -724,16 +724,19 @@ function buildSections(stepsArr, bodyFn) {
       if (answered) {
         openSection('question', headingForQuestion(s, bodyFn), s.at, s.id);
       } else {
+        flushQuiet();
         cur.body.push({ kind: 'question', stepId: s.id });
       }
       continue;
     }
     if (s.kind === 'plan') {
+      flushQuiet();
       cur.body.push({ kind: 'plan', stepId: s.id });
       if (s.approved) openSection('approve', 'Plan approved', s.at, s.id);
       continue;
     }
     if (s.kind === 'text' || s.kind === 'error' || s.kind === 'compaction') {
+      flushQuiet();
       cur.body.push({ kind: s.kind, stepId: s.id });
       continue;
     }
