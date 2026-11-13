@@ -146,6 +146,7 @@ function createStepsService(deps) {
       sessions.set(sessionId, s);
     }
     s.indexing = true;
+    s.pushedIds = new Set();
     const sameSlot = () => sessions.get(sessionId) === s;
     let totalSize = 0;
     try { totalSize = fs.statSync(file).size; } catch (_) { /* open() will find the same miss */ }
@@ -169,14 +170,14 @@ function createStepsService(deps) {
         if (sameSlot() && (lastProgressAt === null || now() - lastProgressAt >= progressIntervalMs)) {
           lastProgressAt = now();
           const { sections, strip } = buildSections(idx.steps(), idx.body);
-          push(sessionId, { type: 'stepsProgress', sessionId, fraction: frac, done: false, sections, strip });
+          push(sessionId, { type: 'stepsProgress', sessionId, fraction: frac, done: false, sections, strip, steps: freshCompact(s, idx.steps()) });
         }
       }).then(() => {
         takeFirstPaint();   // settling is always a cue too, however small the file or short the pass
         if (sameSlot()) {
           s.indexing = false;
           const { sections, strip } = buildSections(idx.steps(), idx.body);
-          push(sessionId, { type: 'stepsProgress', sessionId, fraction: 1, done: true, sections, strip });
+          push(sessionId, { type: 'stepsProgress', sessionId, fraction: 1, done: true, sections, strip, steps: freshCompact(s, idx.steps()) });
         }
       }, (e) => {
         takeFirstPaint();
@@ -201,9 +202,11 @@ function createStepsService(deps) {
         if (!res.appended.length && res.reset === null) return;
         const { sections, strip } = buildSections(s.index.steps(), s.index.body);
         if (res.reset !== null && res.reset !== undefined) {
-          push(sessionId, { type: 'stepsChanged', sessionId, reset: res.reset, sections, strip });
+          // the path changed further back: ids may answer to other steps now, so send them all
+          s.pushedIds = new Set();
+          push(sessionId, { type: 'stepsChanged', sessionId, reset: res.reset, sections, strip, steps: freshCompact(s, s.index.steps()) });
         } else {
-          push(sessionId, { type: 'stepsChanged', sessionId, appended: res.appended, sections, strip });
+          push(sessionId, { type: 'stepsChanged', sessionId, appended: res.appended.map((st) => st.id), sections, strip, steps: freshCompact(s, res.appended) });
         }
       } catch (e) {
         push(sessionId, { type: 'stepsChanged', sessionId, error: errorMessage(e) });
@@ -220,6 +223,16 @@ function createStepsService(deps) {
     if (!s || s.subscribers.size) return;
     stopFollow(s);
     sessions.delete(sessionId);
+  }
+
+  /* The compact records of the steps no push has carried yet. A section list names steps by
+     id only, so a viewer can draw a section only when it holds the records of its steps:
+     the open reply gives the ones known then, and every later push gives the ones it adds
+     (earlier steps while the index walks backward, new ones while the session runs). */
+  function freshCompact(s, stepsArr) {
+    const fresh = stepsArr.filter((st) => !s.pushedIds.has(st.id));
+    for (const st of fresh) s.pushedIds.add(st.id);
+    return compactSteps(fresh);
   }
 
   function compactSteps(stepsArr) {
@@ -502,7 +515,7 @@ function createStepsService(deps) {
       if (visible.indexOf(ql) !== -1) confirmed.push(id);
       if (confirmed.length >= SEARCH_CAP) break;
     }
-    // Notes are searched too (plan decision 11): a hit in a note's text lands on the step the
+    // Notes are searched too: a hit in a note's text lands on the step the
     // note is attached to, same as any other hit on that step.
     if (ql && confirmed.length < SEARCH_CAP) {
       const seen = new Set(confirmed);

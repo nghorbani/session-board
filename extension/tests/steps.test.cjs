@@ -520,6 +520,26 @@ test('sections and the strip counts; a you step is never doubled', async () => {
   assert.equal(strip.sections, sections.length);
 });
 
+test('an update (the short text shown between tool calls) is a row of its own in the story, not folded into a Work line', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'fix the bug'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'npm test' } }]),
+    toolResultLine(uuid(3), uuid(2), 'b1', 'one failure'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'thinking', thinking: 'The failure is in the parser; reading it next.', signature: 'x' }]),
+    assistantLine(uuid(5), uuid(4), 'm2', [{ type: 'thinking', thinking: '', signature: 'y' }]),
+    assistantLine(uuid(6), uuid(5), 'm3', [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'C:/proj/parser.js' } }]),
+    toolResultLine(uuid(7), uuid(6), 'r1', 'contents'),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const { sections } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  const sec = sections.find((x) => x.heading.indexOf('fix the bug') !== -1);
+  assert.deepEqual(sec.body.map((r) => r.kind), ['work', 'update', 'work'], 'the update stands between the two runs of work');
+  assert.equal(idx.body(sec.body[1].stepId).text, 'The failure is in the parser; reading it next.');
+  assert.equal(sec.body[2].items.length, 2, 'the empty reasoning stays folded with the tool call after it');
+});
+
 test('each section carries its tool call count and its changed files, for the facts line', async () => {
   const file = newFile();
   writeLines(file, [

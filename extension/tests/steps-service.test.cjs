@@ -417,6 +417,70 @@ test('follow: appended steps and a reset are pushed as stepsChanged', async () =
   assert.ok(changed[changed.length - 1].sections);
 });
 
+// every step id a section list names: its opener, its own rows and the items of its Work lines
+function idsNamedBy(sections) {
+  const ids = [];
+  for (const sec of sections) {
+    if (sec.openerId) ids.push(sec.openerId);
+    for (const row of sec.body || []) {
+      if (row.stepId) ids.push(row.stepId);
+      for (const id of row.items || []) ids.push(id);
+    }
+  }
+  return ids;
+}
+
+test('pushes carry the compact record of every step they add: after indexing, a viewer holds one for each step its sections name', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 40; i++) {
+    objs.push(i % 4 === 1 ? userLine(uuid(i), i === 1 ? null : uuid(i - 1), 'turn ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
+  }
+  writeLines(file, objs);
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096 });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const held = new Map(); // what a viewer keeps: step id -> compact record
+  let last = null;
+  let doneSeen;
+  const donePromise = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => {
+    if (msg.type !== 'stepsProgress') return;
+    for (const st of msg.steps || []) held.set(st.id, st);
+    last = msg;
+    if (msg.done) doneSeen();
+  });
+  const reply = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  for (const st of reply.steps) held.set(st.id, st);
+  assert.ok(reply.steps.length < 40, 'the reply holds the tail only');
+  await donePromise;
+  const named = idsNamedBy(last.sections);
+  assert.equal(named.length, 40);
+  for (const id of named) {
+    assert.ok(held.has(id), 'a compact record arrived for step ' + id);
+    assert.ok(held.get(id).kind && held.get(id).at, 'with its kind and time');
+  }
+});
+
+test('follow: a stepsChanged push carries the compact records of the steps it appends', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  svc.subscribe(A, (msg) => pushes.push(msg));
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  fs.appendFileSync(file, line(assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'ls', description: 'list the folder' } }])));
+  await deps.__timer.fireAll();
+  const changed = pushes.filter((m) => m.type === 'stepsChanged').pop();
+  assert.equal(changed.steps.length, 1);
+  assert.equal(changed.steps[0].kind, 'tool');
+  assert.equal(changed.steps[0].title, 'Bash');
+  assert.ok(changed.steps[0].at, 'with its time');
+  assert.equal(changed.steps[0].rawInput, undefined, 'the compact record, not the reader\'s own step object');
+});
+
 test('seen: stores and returns the last step the owner had in view', async () => {
   const file = newFile();
   writeLines(file, [userLine(uuid(1), null, 'hi'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])]);

@@ -727,7 +727,7 @@ function createStepIndex(file, deps) {
    opening step (never duplicated as a body row).
 ======================================================================= */
 
-const QUIET_KINDS = new Set(['tool', 'reasoning', 'subagent', 'update']);
+const QUIET_KINDS = new Set(['tool', 'reasoning', 'subagent']);
 
 function headingForYou(step, bodyFn) {
   // the preview is the start of the same text and longer than any heading, so it serves
@@ -815,7 +815,9 @@ function buildSections(stepsArr, bodyFn) {
       if (s.approved) openSection('approve', 'Plan approved', s.at, s.id);
       continue;
     }
-    if (s.kind === 'text' || s.kind === 'error' || s.kind === 'compaction' || s.kind === 'interrupted') {
+    // an update is the short text the chat showed between tool calls and then replaced: it reads
+    // as a text of its own, never folded into the Work line around it
+    if (s.kind === 'text' || s.kind === 'update' || s.kind === 'error' || s.kind === 'compaction' || s.kind === 'interrupted') {
       flushQuiet();
       cur.body.push({ kind: s.kind, stepId: s.id });
       continue;

@@ -18,6 +18,7 @@ const net = require('net');
 const { spawn, execFileSync } = require('child_process');
 const { browser } = require('../../tools/screenshot.cjs');
 const chromeLock = require('./shim/chrome-lock.cjs');
+const { createStepsService } = require('../steps-service.cjs');
 
 let CHROME = null;
 try { CHROME = browser(); } catch (_) { CHROME = null; }
@@ -140,6 +141,9 @@ async function serve(req, res) {
     // a connection that dies under a request: what a browser sees when it reuses an idle
     // socket the server is closing at that moment
     if (fake.dropOnce && fake.dropOnce === msg.type) { fake.dropOnce = null; req.socket.destroy(); return; }
+    // a test may put the real steps service behind this transport, so the page is fed by the
+    // real reader and not by a scripted reply
+    if (fake.service) return json(res, 200, await fake.service.handle(msg));
     if (msg.type === 'open') {
       const base = fake.open();
       const notes = base.notes && base.notes.length ? base.notes : noteList();
@@ -234,6 +238,8 @@ const SAMPLE = `(function () {
     openLinkCalls: window.__openLinkCalls || 0,
     lnkCount: q('a.lnk').length,
     workSums: q('.worksum').map(function (e) { return e.textContent; }),
+    secLabels: q('.sec-head .lbl').map(function (e) { return e.textContent; }),
+    rowTimes: q('.row .meta .time').map(function (e) { return e.textContent; }),
     facts: q('.facts').map(function (e) { return e.textContent; }),
     restateCount: q('.row.k-you .restate').length,
     youMsgCount: q('.row.k-you .you-msg').length,
@@ -352,7 +358,7 @@ test('page: a question card shows every option and marks the chosen ones', opts,
     steps: [step('q1:0', 'question')],
     sections: [
       section('lead', 'Session start', null, []),
-      section('qa', 'Option A', 'q1:0', []),
+      section('question', 'Option A', 'q1:0', []),
     ],
   });
   fake.body = (stepId) => {
@@ -378,6 +384,96 @@ test('page: a question card shows every option and marks the chosen ones', opts,
   assert.equal(other.chosen, false);
   assert.equal(other.tag, false);
   await page.close();
+});
+
+test('page: fed by the real reader and service, an answered question is a "Question and answer" section with its full card, and the Decisions switch keeps it', opts, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-real-'));
+  const file = path.join(dir, 'real.jsonl');
+  const u = (n) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
+  const at = (sec) => new Date(2026, 0, 1, 10, 0, sec).toISOString();
+  const lines = [
+    { type: 'user', uuid: u(1), parentUuid: null, timestamp: at(1), message: { role: 'user', content: 'please build the thing' } },
+    { type: 'assistant', uuid: u(2), parentUuid: u(1), timestamp: at(2), message: { id: 'm1', role: 'assistant', content: [{ type: 'tool_use', id: 'ask1', name: 'AskUserQuestion',
+      input: { questions: [{ header: 'Approach', question: 'Which way should we go?', multiSelect: false,
+        options: [{ label: 'Option A', description: 'the simple route' }, { label: 'Option B', description: 'the thorough route' }] }] } }] } },
+    { type: 'user', uuid: u(3), parentUuid: u(2), timestamp: at(3), toolUseResult: {}, sourceToolAssistantUUID: u(2),
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'ask1', content: 'Your questions have been answered: "Which way should we go?"="Option A". You can now continue.' }] } },
+    { type: 'assistant', uuid: u(4), parentUuid: u(3), timestamp: at(4), message: { id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'Going with A.' }] } },
+  ];
+  fs.writeFileSync(file, lines.map((l) => JSON.stringify(l) + '\n').join(''));
+  fake.service = createStepsService({ resolveTranscript: () => file, sessionTitle: () => 'Real reader', dataDir: dir, setInterval: () => 0, clearInterval: () => {} });
+  try {
+    const page = await openPage(A);
+    const s = await page.until((x) => x.qOptions.length === 2, 'the question card to render in the section its answer opened');
+    assert.equal(s.qOptions.find((o) => o.label === 'Option A').chosen, true, 'the chosen option is marked');
+    assert.ok(s.secLabels.some((l) => l.indexOf('Question and answer') === 0), 'the section is labelled Question and answer: ' + JSON.stringify(s.secLabels));
+    assert.ok(s.stripNums.includes('Decisions=2'), 'the message and the answer both count as decisions: ' + JSON.stringify(s.stripNums));
+    await page.click('.strip .item:nth-child(3)');
+    const d = await page.until((x) => x.decisionsOn, 'the Decisions switch to turn on');
+    assert.ok(d.sectionHeadings.some((h) => h.indexOf('Option A') !== -1), 'the answered question stays under Decisions: ' + JSON.stringify(d.sectionHeadings));
+    assert.ok(d.sectionHeadings.some((h) => h.indexOf('please build the thing') !== -1));
+    await page.close();
+  } finally {
+    fake.service = null;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A transcript written to a temp dir and the real steps service over it, put behind the fake
+// transport: the page is fed by the real reader, and the service's pushes reach the poll route.
+function realService(lines, extraDeps) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-real-'));
+  const file = path.join(dir, 'real.jsonl');
+  fs.writeFileSync(file, lines.map((l) => JSON.stringify(l) + '\n').join(''));
+  const ticks = [];
+  const svc = createStepsService(Object.assign({
+    resolveTranscript: () => file, sessionTitle: () => 'Real reader', dataDir: dir,
+    setInterval: (fn) => { ticks.push(fn); return ticks.length; }, clearInterval: () => {},
+  }, extraDeps));
+  svc.subscribe(A, (msg) => fake.pushes.push(msg));
+  fake.service = svc;
+  return {
+    file,
+    tick: async () => { for (const fn of ticks) await fn(); },
+    done: () => { fake.service = null; fs.rmSync(dir, { recursive: true, force: true }); },
+  };
+}
+const ru = (n) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
+const rat = (sec) => new Date(2026, 0, 1, 10, Math.floor(sec / 60), sec % 60).toISOString();
+const rUser = (n, text) => ({ type: 'user', uuid: ru(n), parentUuid: n === 1 ? null : ru(n - 1), timestamp: rat(n), message: { role: 'user', content: text } });
+const rText = (n, text) => ({ type: 'assistant', uuid: ru(n), parentUuid: ru(n - 1), timestamp: rat(n), message: { id: 'm' + n, role: 'assistant', content: [{ type: 'text', text }] } });
+const rBash = (n, id) => ({ type: 'assistant', uuid: ru(n), parentUuid: ru(n - 1), timestamp: rat(n), message: { id: 'm' + n, role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'npm test', description: 'run the tests' } }] } });
+const rResult = (n, id) => ({ type: 'user', uuid: ru(n), parentUuid: ru(n - 1), timestamp: rat(n), toolUseResult: {}, sourceToolAssistantUUID: ru(n - 1), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+
+test('page: sections the index reaches after the first paint show in the outline, their rows drawn with time and Work text (real reader, small chunks)', opts, async () => {
+  const lines = [];
+  for (let turn = 0; turn < 10; turn++) {
+    const n = turn * 4 + 1;
+    lines.push(rUser(n, 'turn ' + (turn + 1)), rBash(n + 1, 'b' + turn), rResult(n + 2, 'b' + turn), rText(n + 3, 'answer ' + (turn + 1) + ' '.repeat(1500)));
+  }
+  const real = realService(lines, { chunkBytes: 4096, tailBytes: 4096, progressIntervalMs: 0 });
+  try {
+    const page = await openPage(A, '/steps?session=' + A + '&top=1');
+    const s = await page.until((x) => x.sectionHeadings.length === 10 && x.workSums.length === 10, 'all ten sections in the outline and in the reader');
+    assert.equal(s.sectionHeadings[0], 'turn 1', 'the earliest section leads the outline');
+    assert.ok(s.rowTimes.length >= 10 && s.rowTimes.every((t) => /^\d\d:\d\d:\d\d$/.test(t)), 'every text row carries its time: ' + JSON.stringify(s.rowTimes));
+    assert.ok(s.workSums.every((w) => w.indexOf('run the tests') !== -1), 'every Work line says what was done: ' + JSON.stringify(s.workSums));
+    await page.close();
+  } finally { real.done(); }
+});
+
+test('page: a step that arrives while following is drawn with its time and its Work text (real reader)', opts, async () => {
+  const real = realService([rUser(1, 'start'), rText(2, 'first answer')]);
+  try {
+    const page = await openPage(A);
+    await page.until((x) => x.rowTimes.length === 1, 'first paint');
+    fs.appendFileSync(real.file, [rBash(3, 'b1'), rResult(4, 'b1'), rText(5, 'second answer')].map((l) => JSON.stringify(l) + '\n').join(''));
+    await real.tick();
+    const s = await page.until((x) => x.rowTimes.length === 3 && x.workSums.length === 1, 'the appended Work line and text (two text rows and the Work line carry a time)');
+    assert.ok(s.rowTimes.every((t) => /^\d\d:\d\d:\d\d$/.test(t)), 'the new text row carries its time: ' + JSON.stringify(s.rowTimes));
+    assert.ok(s.workSums[0].indexOf('run the tests') !== -1, 'the new Work line says what was done: ' + JSON.stringify(s.workSums));
+    await page.close();
+  } finally { real.done(); }
 });
 
 test('page: a cancelled-turn marker shows as a quiet line inside its section, not a you row', opts, async () => {

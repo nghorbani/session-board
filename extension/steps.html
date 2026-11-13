@@ -78,7 +78,7 @@
   .sec-entry:hover { background: var(--panel); }
   .sec-entry.cur { background: var(--panel); box-shadow: inset 2px 0 0 var(--accent); }
   .sec-entry .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--you); flex: 0 0 auto; }
-  .sec-entry.k-qa .dot, .sec-entry.k-approve .dot { background: var(--plan); }
+  .sec-entry.k-question .dot, .sec-entry.k-approve .dot { background: var(--plan); }
   .sec-entry .body-col { min-width: 0; flex: 1 1 auto; }
   .sec-entry .txt { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sec-entry.has-hit .txt { color: var(--hit); }
@@ -91,7 +91,7 @@
 
   .sec-head { display: flex; gap: 8px; margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 2px solid var(--you); scroll-margin-top: 10px; }
   .sec-head .lbl { color: var(--you); font-weight: 600; font-size: 11px; text-transform: uppercase; }
-  .sec-head.k-qa .lbl, .sec-head.k-approve .lbl { color: var(--plan); }
+  .sec-head.k-question .lbl, .sec-head.k-approve .lbl { color: var(--plan); }
   .restate { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
 
   .row { padding: 9px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 10px; }
@@ -418,13 +418,16 @@ function onPush(msg) {
   if (msg.type === 'stepsProgress') {
     state.indexing = !msg.done;
     if (msg.error) { showStatus('indexing stopped: ' + msg.error); return; }
+    foldCompact(msg.steps);
     if (msg.sections) mergeSections(msg.sections, msg.strip);
     renderIndexNote();
     renderStrip();
+    if (msg.sections) renderAllKeepingView();
     return;
   }
   if (msg.type === 'stepsChanged') {
     if (msg.error) { showStatus(msg.error); return; }
+    foldCompact(msg.steps);
     if (msg.reset !== undefined && msg.reset !== null) {
       // the active path changed further back than the tail (a retry, an edited message): the
       // simplest correct answer is to redraw from the service's own current section list,
@@ -448,6 +451,38 @@ function onPush(msg) {
     renderNotesJumpLabel();
     return;
   }
+}
+
+/* A push names its steps by id in its sections and carries the compact records (kind, time,
+   preview, title) of the steps it adds; rows and Work lines are drawn from those. */
+function foldCompact(steps) {
+  if (!state.compactById) state.compactById = Object.create(null);
+  (steps || []).forEach(function (s) { state.compactById[s.id] = s; });
+}
+
+/* Redraws after sections arrived in front of what is shown (the index reaching further back
+   in the transcript). At the end with Follow on, the reader stays at the end; otherwise the
+   row at the top of the viewport stays where it is. */
+function renderAllKeepingView() {
+  if (state.lens === 'files') { renderAll(); return; }
+  var reader = document.getElementById('reader');
+  if (state.follow && state.atBottom) { renderRail(); scrollToEnd(); updateEdgeBars(); queueVisibleBodies(); return; }
+  var top = reader.getBoundingClientRect().top;
+  var rows = reader.querySelectorAll('[data-step]');
+  var keep = null, offset = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i].getBoundingClientRect();
+    if (r.bottom > top) { keep = rows[i].getAttribute('data-step'); offset = r.top - top; break; }
+  }
+  if (keep) {
+    var secs = visibleSections();
+    for (var j = 0; j < secs.length; j++) {
+      if (sectionStepIds(secs[j]).indexOf(keep) !== -1) { anchorIndex = j; break; }
+    }
+  }
+  renderAll();
+  var el = keep ? document.getElementById('step-' + keep) : null;
+  if (el) reader.scrollTop += el.getBoundingClientRect().top - top - offset;
 }
 
 /* Merge an incoming section list onto what the page already has. Every section carries a
@@ -834,7 +869,7 @@ function toggleLens(key) {
 
 // -- sections: rail + reader, rendered lazily ------------------------------------------------
 
-function isDecisionSection(sec) { return sec.kind === 'you' || sec.kind === 'qa' || sec.kind === 'approve'; }
+function isDecisionSection(sec) { return sec.kind === 'you' || sec.kind === 'question' || sec.kind === 'approve'; }
 
 function visibleSections() {
   if (state.lens === 'decisions') return state.sections.filter(isDecisionSection);
@@ -845,7 +880,7 @@ function visibleSections() {
 function sectionLabel(sec) {
   if (sec.kind === 'lead') return 'Session start';
   if (sec.kind === 'you') return 'You';
-  if (sec.kind === 'qa') return 'Question and answer';
+  if (sec.kind === 'question') return 'Question and answer';
   if (sec.kind === 'approve') return 'Plan';
   return 'Claude';
 }
@@ -1222,7 +1257,7 @@ function buildOpenerRow(sec, i) {
     restate.className = 'restate';
     restate.textContent = sec.heading || '';
     row.appendChild(restate);
-    if (sec.kind === 'qa') row.appendChild(buildQuestionBody(sec.openerId));
+    if (sec.kind === 'question') row.appendChild(buildQuestionBody(sec.openerId));
   }
   addNoteUi(row, sec.openerId);
   return row;
@@ -1476,7 +1511,7 @@ function summarizeWork(items) {
   if (edited.length) parts.push('edited ' + (edited.length === 1 ? (fileBaseName(edited[0]) || '1 file') : edited.length + ' files'));
   if (reads) parts.push('read ' + reads + (reads === 1 ? ' file' : ' files'));
   if (searches) parts.push('ran ' + searches + (searches === 1 ? ' search' : ' searches'));
-  if (bash.length === 1) parts.push('ran ' + (bash[0] || 'a command'));
+  if (bash.length === 1) parts.push('ran a command' + (bash[0] ? ' (' + bash[0] + ')' : ''));
   else if (bash.length > 1) parts.push('ran ' + bash.length + ' commands');
   if (skills.length) parts.push('used ' + skills.slice(0, 2).join(', '));
   if (subs.length) parts.push('sent out ' + subs.length + (subs.length === 1 ? ' subagent' : ' subagents') + (subs[0] ? ' (' + subs.slice(0, 2).join('; ') + ')' : ''));
