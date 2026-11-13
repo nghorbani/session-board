@@ -167,6 +167,10 @@ const SAMPLE = `(function () {
     domRowCount: q('.row, .sec-stub').length,
     openLinkCalls: window.__openLinkCalls || 0,
     workSums: q('.worksum').map(function (e) { return e.textContent; }),
+    restateCount: q('.row.k-you .restate').length,
+    youMsgCount: q('.row.k-you .you-msg').length,
+    youMsgOpen: !!document.querySelector('.row.k-you .you-msg.open'),
+    showAllYou: !!document.querySelector('.row.k-you .showall'),
   };
 })()`;
 
@@ -337,6 +341,24 @@ test('page: a single command Work line names it by its own description', opts, a
   const page = await openPage(A);
   const s = await page.until((x) => x.workSums.length > 0 && x.workSums[0].indexOf('run the test suite') !== -1, 'the Work line to settle once the body loads');
   assert.ok(s.workSums[0].indexOf('run the test suite') !== -1, 'a single command is named by its own description: ' + s.workSums[0]);
+  await page.close();
+});
+
+test('page: the owner\'s message appears once per section, in the heading card, never a second time below it', opts, async () => {
+  const longMsg = 'line one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight';
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'line one', 'u1:0', [])],
+  });
+  fake.body = () => ({ text: longMsg, truncated: false, size: longMsg.length });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.youMsgCount > 0, 'the you message to render');
+  assert.equal(s.restateCount, 1, 'one heading card for the you step');
+  assert.equal(s.youMsgCount, 1, 'the full message lives in that one card, not a second block');
+  assert.ok(s.showAllYou, 'a message past about six lines offers Show all rather than showing unfolded');
+  await page.click('.row.k-you .showall');
+  const s2 = await page.until((x) => x.youMsgOpen === true, 'the message to unfold on Show all');
+  assert.equal(s2.youMsgCount, 1, 'still one card after unfolding');
   await page.close();
 });
 

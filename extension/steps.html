@@ -104,6 +104,9 @@
   .row.k-plan .body { border-left: 3px solid var(--plan); padding-left: 10px; }
   .row.cur-hit { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
   .you-msg { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; }
+  .you-msg.folded-you { max-height: 150px; overflow: hidden; position: relative; }
+  .you-msg.folded-you:not(.open)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(to bottom, transparent, var(--panel)); }
+  .you-msg.folded-you.open { max-height: none; }
   .approved-line { color: var(--plan); font-size: 12px; margin-top: 6px; font-weight: 600; }
 
   .qcard .qhead { color: var(--plan); text-transform: uppercase; font-weight: 600; font-size: 11px; margin-bottom: 4px; }
@@ -902,27 +905,61 @@ function chipTextFor(stepKind) {
 }
 
 /* The opener step's own row: the one that gives the section its heading (a you message or an
-   answered question or approved plan). It is not duplicated anywhere else in the section. */
+   answered question or approved plan). It is not duplicated anywhere else in the section: for a
+   you step, the heading card itself holds the full message (folded past about six lines, with
+   Show all), rather than a short restated line followed by a second block repeating it. */
 function buildOpenerRow(sec, i) {
   var row = document.createElement('div');
   row.className = 'row ' + (sec.kind === 'you' ? 'k-you' : 'k-qa');
   row.setAttribute('data-step', sec.openerId);
   row.id = 'step-' + sec.openerId;
-  var restate = document.createElement('div');
-  restate.className = 'restate';
-  restate.textContent = sec.heading || '';
-  row.appendChild(restate);
-  if (sec.kind === 'you') row.appendChild(buildYouBody(sec.openerId));
-  else if (sec.kind === 'qa') row.appendChild(buildQuestionBody(sec.openerId));
+  if (sec.kind === 'you') {
+    var youDiv = buildYouBody(sec.openerId);
+    row.appendChild(youDiv);
+    foldYouBodyIfLong(youDiv, sec.openerId);
+  } else {
+    var restate = document.createElement('div');
+    restate.className = 'restate';
+    restate.textContent = sec.heading || '';
+    row.appendChild(restate);
+    if (sec.kind === 'qa') row.appendChild(buildQuestionBody(sec.openerId));
+  }
   return row;
 }
 
+var YOU_MSG_FOLD_LINES = 6;
+
 function buildYouBody(stepId) {
   var div = document.createElement('div');
-  div.className = 'you-msg';
+  div.className = 'you-msg restate';
   div.setAttribute('data-step-body', stepId);
   fillTextBody(div, stepId, false);
   return div;
+}
+
+/* Folds a you message past YOU_MSG_FOLD_LINES lines behind a Show all button, same pattern as a
+   subagent report. Runs after the text is in place (fillTextBody already ran) and after the div
+   is attached to its row, so it measures the real line count rather than guessing from character
+   length, and can insert its button as a sibling. Idempotent: a stale button from an earlier
+   call (the re-render after a body batch lands) is removed first rather than duplicated. */
+function foldYouBodyIfLong(div, stepId) {
+  var old = div.nextSibling;
+  if (old && old.classList && old.classList.contains('showall')) old.parentNode.removeChild(old);
+  var text = (state.bodies[stepId] && state.bodies[stepId].text) || '';
+  var lineCount = text.split('\n').length;
+  div.classList.remove('folded-you', 'open');
+  if (lineCount <= YOU_MSG_FOLD_LINES) return;
+  div.classList.add('folded-you');
+  var btn = document.createElement('button');
+  btn.className = 'showall';
+  btn.textContent = 'Show all';
+  btn.addEventListener('click', function () {
+    var open = div.classList.toggle('open');
+    state.openWork['you-' + stepId] = open;
+    btn.textContent = open ? 'Show less' : 'Show all';
+  });
+  if (state.openWork['you-' + stepId]) { div.classList.add('open'); btn.textContent = 'Show less'; }
+  div.parentNode.insertBefore(btn, div.nextSibling);
 }
 
 function buildBodyRow(row, sec) {
@@ -1358,7 +1395,7 @@ function renderVisibleBodiesOnly() {
     var row = node.closest('.row');
     if (!row) return;
     if (row.classList.contains('k-qa') && node.className.indexOf('qcard') !== -1) fillQuestionBody(node, stepId);
-    else if (node.className.indexOf('you-msg') !== -1) fillTextBody(node, stepId, false);
+    else if (node.className.indexOf('you-msg') !== -1) { fillTextBody(node, stepId, false); foldYouBodyIfLong(node, stepId); }
     else fillMdBody(node, stepId);
   });
   Array.prototype.forEach.call(reader.querySelectorAll('[data-work-key]'), function (node) {
