@@ -18,6 +18,7 @@ const nodeFs = require('fs');
 const path = require('path');
 
 const stepsMod = require('./steps.cjs');
+const { createNotesStore } = require('./notes.cjs');
 
 const SEARCH_CAP = 500;
 
@@ -39,6 +40,7 @@ function createStepsService(deps) {
   const tailBytes = deps.tailBytes;
   const createStepIndex = deps.createStepIndex || stepsMod.createStepIndex;
   const buildSections = deps.buildSections || stepsMod.buildSections;
+  const notes = deps.notes || createNotesStore({ fs, dataDir });
 
   const sessions = new Map(); // sessionId -> { index, file, subscribers: Set, timer, searchRun }
 
@@ -210,7 +212,18 @@ function createStepsService(deps) {
       // are provisional until a stepsProgress push with done:true lands.
       indexing: Boolean(s.indexing),
       seenStepId: readSeen(sessionId),
+      notes: notesSafe(sessionId),
     });
+  }
+
+  /* notes.cjs throws on a bad id or empty/oversized text; the open reply and every push must
+     still carry whatever list it can read rather than fail the whole message over a stray file. */
+  function notesSafe(sessionId) {
+    try { return notes.list(sessionId); } catch (_) { return []; }
+  }
+
+  function pushNotesChanged(sessionId) {
+    push(sessionId, { type: 'notesChanged', sessionId, notes: notesSafe(sessionId) });
   }
 
   async function handleBody(msg) {
@@ -251,6 +264,42 @@ function createStepsService(deps) {
       return { type: 'seenResult', ok: true, sessionId, stepId: msg.stepId };
     } catch (e) {
       return { type: 'seenResult', ok: false, message: errorMessage(e) };
+    }
+  }
+
+  // -- notes -------------------------------------------------------------------------------
+
+  async function handleNoteAdd(msg) {
+    const sessionId = String(msg.sessionId || '');
+    try {
+      const note = notes.add(sessionId, String(msg.stepId || ''), msg.text);
+      pushNotesChanged(sessionId);
+      return { type: 'noteAddResult', ok: true, sessionId, note };
+    } catch (e) {
+      return { type: 'noteAddResult', ok: false, sessionId, message: errorMessage(e) };
+    }
+  }
+
+  async function handleNoteEdit(msg) {
+    const sessionId = String(msg.sessionId || '');
+    try {
+      const note = notes.edit(sessionId, String(msg.noteId || ''), msg.text);
+      if (!note) return { type: 'noteEditResult', ok: false, sessionId, message: 'that note is gone' };
+      pushNotesChanged(sessionId);
+      return { type: 'noteEditResult', ok: true, sessionId, note };
+    } catch (e) {
+      return { type: 'noteEditResult', ok: false, sessionId, message: errorMessage(e) };
+    }
+  }
+
+  async function handleNoteDelete(msg) {
+    const sessionId = String(msg.sessionId || '');
+    try {
+      const removed = notes.delete(sessionId, String(msg.noteId || ''));
+      pushNotesChanged(sessionId);
+      return { type: 'noteDeleteResult', ok: true, sessionId, removed };
+    } catch (e) {
+      return { type: 'noteDeleteResult', ok: false, sessionId, message: errorMessage(e) };
     }
   }
 
@@ -328,6 +377,16 @@ function createStepsService(deps) {
       const visible = stepVisibleText(s, id).toLowerCase();
       if (visible.indexOf(ql) !== -1) confirmed.push(id);
       if (confirmed.length >= SEARCH_CAP) break;
+    }
+    // Notes are searched too (plan decision 11): a hit in a note's text lands on the step the
+    // note is attached to, same as any other hit on that step.
+    if (ql && confirmed.length < SEARCH_CAP) {
+      const seen = new Set(confirmed);
+      for (const note of notesSafe(sessionId)) {
+        if (seen.has(note.stepId)) continue;
+        if (String(note.text || '').toLowerCase().indexOf(ql) !== -1) { confirmed.push(note.stepId); seen.add(note.stepId); }
+        if (confirmed.length >= SEARCH_CAP) break;
+      }
     }
     const capped = confirmed.length >= SEARCH_CAP && candidateIds.length > confirmed.length;
     return { type: 'searchResult', sessionId, requestId, query: q, stepIds: confirmed, capped };
@@ -414,6 +473,9 @@ function createStepsService(deps) {
       case 'search': return handleSearch(msg);
       case 'cancelSearch': return handleCancelSearch(msg);
       case 'seen': return handleSeen(msg);
+      case 'noteAdd': return handleNoteAdd(msg);
+      case 'noteEdit': return handleNoteEdit(msg);
+      case 'noteDelete': return handleNoteDelete(msg);
       case 'close': return handleClose(msg);
       default: return { type: 'errorResult', message: 'unknown message type: ' + String(msg.type) };
     }

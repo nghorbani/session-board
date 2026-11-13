@@ -460,4 +460,121 @@ test('with a real ripgrep on this machine, search still maps offsets to the righ
   assert.equal(res.stepIds[0], opened.steps[0].id);
 });
 
+// -- notes -----------------------------------------------------------------------------------
+
+test('open carries the session\'s notes', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const stepId = opened.steps[0].id;
+  assert.deepEqual(opened.notes, []);
+  const added = await svc.handle({ type: 'noteAdd', sessionId: A, stepId, text: 'why this?' });
+  assert.equal(added.ok, true);
+  assert.equal(added.note.stepId, stepId);
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.equal(reopened.notes.length, 1);
+  assert.equal(reopened.notes[0].text, 'why this?');
+});
+
+test('noteAdd, noteEdit, noteDelete: typed replies and the note store underneath', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const stepId = opened.steps[0].id;
+
+  const added = await svc.handle({ type: 'noteAdd', sessionId: A, stepId, text: 'first' });
+  assert.equal(added.type, 'noteAddResult');
+  assert.equal(added.ok, true);
+  const noteId = added.note.id;
+
+  const edited = await svc.handle({ type: 'noteEdit', sessionId: A, noteId, text: 'second' });
+  assert.equal(edited.type, 'noteEditResult');
+  assert.equal(edited.ok, true);
+  assert.equal(edited.note.text, 'second');
+
+  const deleted = await svc.handle({ type: 'noteDelete', sessionId: A, noteId });
+  assert.equal(deleted.type, 'noteDeleteResult');
+  assert.equal(deleted.ok, true);
+  assert.equal(deleted.removed, true);
+
+  const after = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.deepEqual(after.notes, []);
+});
+
+test('noteAdd rejects empty text with a typed, unsuccessful reply rather than throwing', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const reply = await svc.handle({ type: 'noteAdd', sessionId: A, stepId: opened.steps[0].id, text: '' });
+  assert.equal(reply.ok, false);
+  assert.equal(typeof reply.message, 'string');
+});
+
+test('noteEdit on a note raced out by a delete answers unsuccessful, never revives the note', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const stepId = opened.steps[0].id;
+  const added = await svc.handle({ type: 'noteAdd', sessionId: A, stepId, text: 'first' });
+  await svc.handle({ type: 'noteDelete', sessionId: A, noteId: added.note.id });
+  const edited = await svc.handle({ type: 'noteEdit', sessionId: A, noteId: added.note.id, text: 'revived?' });
+  assert.equal(edited.ok, false);
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.deepEqual(reopened.notes, []);
+});
+
+test('every note change pushes notesChanged with the full list, to every subscriber of that session', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const stepId = opened.steps[0].id;
+  const pushesOne = [];
+  const pushesTwo = [];
+  svc.subscribe(A, (msg) => pushesOne.push(msg));
+  svc.subscribe(A, (msg) => pushesTwo.push(msg));
+
+  const added = await svc.handle({ type: 'noteAdd', sessionId: A, stepId, text: 'seen by both' });
+  const notesPushesOne = pushesOne.filter((m) => m.type === 'notesChanged');
+  const notesPushesTwo = pushesTwo.filter((m) => m.type === 'notesChanged');
+  assert.equal(notesPushesOne.length, 1);
+  assert.equal(notesPushesTwo.length, 1);
+  assert.equal(notesPushesOne[0].notes.length, 1);
+  assert.equal(notesPushesTwo[0].notes[0].text, 'seen by both');
+
+  await svc.handle({ type: 'noteDelete', sessionId: A, noteId: added.note.id });
+  assert.equal(pushesOne.filter((m) => m.type === 'notesChanged').length, 2);
+  assert.equal(pushesTwo.filter((m) => m.type === 'notesChanged').length, 2);
+});
+
+test('search also matches note text; a hit lands on the note\'s step', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'please build the thing'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'nothing relevant here' }]),
+  ]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const youStepId = opened.steps[0].id;
+  await svc.handle({ type: 'noteAdd', sessionId: A, stepId: youStepId, text: 'a genuinely distinct note phrase' });
+  const res = await svc.handle({ type: 'search', sessionId: A, query: 'distinct note phrase', requestId: 's1' });
+  assert.ok(res.stepIds.indexOf(youStepId) !== -1);
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

@@ -17,6 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
+const { createNotesStore } = require('./notes.cjs');
 
 const PKG = require('./package.json');
 const EXTENSION_ID = PKG.publisher + '.' + PKG.name;
@@ -798,6 +799,10 @@ const LIMIT_KINDS = { session: ['five_hour', '5h'], weekly_all: ['seven_day', '7
 const SHAPE_CHANGED = "Claude Code's usage reply changed; update Session Board";
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
+
+// Shared with steps-service.cjs (both hosts construct it with this same dataDir), so a note
+// written through the viewer and pruned here live under the one store.
+const notesStore = createNotesStore({ dataDir: DATA_DIR });
 
 // ---------------------------------------------------------------------------------------
 // Archived sessions: the board's own flag (Claude Code's archive is private to it)
@@ -2071,6 +2076,7 @@ async function snapshot(opts) {
   forgetStatuses(liveIds);
   pruneDead(MUTED_DIR, muted, liveIds, index);
   pruneDead(ORDER_DIR, order, liveIds, index);
+  notesStore.pruneDead(liveIds, index);
 
   const windows = new Map();
   for (const r of rows) {
@@ -2573,6 +2579,7 @@ module.exports = {
   EXTENSION_ID,
   UUID_RE,
   IS_WINDOWS,
+  notesStore,
   snapshot,
   lastGoodRows,
   lastSnapshotRows,

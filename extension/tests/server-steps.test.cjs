@@ -157,3 +157,34 @@ test('a bad session id on /api/steps/poll is a 400', async () => {
   const r = await call('GET', '/api/steps/poll?session=not-a-uuid&after=0');
   assert.equal(r.status, 400);
 });
+
+test('a note round trip over POST /api/steps: add, carried by open, edit, delete', async () => {
+  const opened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: A }) });
+  const stepId = opened.body.steps[0].id;
+
+  const added = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteAdd', sessionId: A, stepId, text: 'a browser-side note' }) });
+  assert.equal(added.status, 200);
+  assert.equal(added.body.ok, true);
+  const noteId = added.body.note.id;
+
+  const reopened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r2', sessionId: A }) });
+  assert.ok(Array.isArray(reopened.body.notes));
+  assert.ok(reopened.body.notes.some((n) => n.id === noteId && n.text === 'a browser-side note'));
+
+  const edited = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteEdit', sessionId: A, noteId, text: 'edited over the wire' }) });
+  assert.equal(edited.body.ok, true);
+  assert.equal(edited.body.note.text, 'edited over the wire');
+
+  const deleted = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteDelete', sessionId: A, noteId }) });
+  assert.equal(deleted.body.ok, true);
+  assert.equal(deleted.body.removed, true);
+});
+
+test('a note just under the 16 KB cap is accepted over the 64 KB body limit', async () => {
+  const opened = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: A }) });
+  const stepId = opened.body.steps[0].id;
+  const text = 'x'.repeat(16 * 1024 - 1);
+  const r = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'noteAdd', sessionId: A, stepId, text }) });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ok, true, JSON.stringify(r.body));
+});
