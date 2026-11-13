@@ -180,6 +180,22 @@
   .error-state, .status-line { color: var(--dim); padding: 30px 10px; text-align: center; }
   .error-state { color: var(--err); }
 
+  .row { position: relative; }
+  .add-note { float: right; padding: 0 7px; color: var(--dim); background: none; border: 1px solid transparent; opacity: 0; font-size: 11px; }
+  .row:hover .add-note, .row.noted .add-note, .row.note-open .add-note { opacity: 1; }
+  .row.noted .add-note { color: var(--note); border-color: var(--note); }
+  .notebox { background: var(--panel); border: 1px solid var(--note); border-radius: 4px; padding: 8px; margin-top: 8px; clear: both; }
+  .notebox textarea { width: 100%; min-height: 54px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px; resize: vertical; }
+  .notebox .row2 { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
+  .notebox .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+  .notebox .quick button { font-size: 11px; color: var(--dim); }
+  .saved-note { border-left: 3px solid var(--note); padding: 2px 0 2px 10px; margin-top: 8px; color: var(--note); white-space: pre-wrap; clear: both; overflow-wrap: anywhere; }
+  .saved-note .off-path { display: block; color: var(--dim); font-style: italic; font-size: 11px; margin-top: 2px; }
+
+  .allnotes-bar { display: none; align-items: center; gap: 8px; padding: 7px 14px; border-top: 1px solid var(--note); background: var(--panel); font-size: 12px; flex: 0 0 auto; }
+  .allnotes-bar.show { display: flex; }
+  .allnotes-bar .n { color: var(--note); font-weight: 600; }
+
   @media (max-width: 760px) {
     header { padding: 8px 10px; }
     .bar input[type=search] { flex-basis: 100px; min-width: 70px; }
@@ -208,6 +224,7 @@
     <span class="count" id="count"></span>
     <button id="prev" title="Previous hit">&#8593;</button>
     <button id="next" title="Next hit">&#8595;</button>
+    <button id="notesJump" title="Jump between your notes">Notes 0</button>
     <button id="decisions" title="Show only your messages, answered questions and approved plans">Decisions</button>
     <label class="sw" title="Show the tool calls under every Work line"><input type="checkbox" id="allTools"> Tool calls</label>
     <label class="sw" title="Stay at the end as new steps arrive"><input type="checkbox" id="follow" checked> Follow</label>
@@ -221,6 +238,7 @@
 </div>
 <div class="edgebar top" id="topBar" style="display:none"><button class="pill" id="toStart">Jump to the start</button></div>
 <div class="edgebar bottom" id="endBar" style="display:none"><button class="pill" id="endPill"></button></div>
+<div class="allnotes-bar" id="allNotesBar"><span class="n" id="allNotesN"></span><button class="primary" id="sendAllNotes">Send all notes</button></div>
 
 <script>
 'use strict';
@@ -262,6 +280,9 @@ var state = {
   generation: 0,
   indexing: false,
   seenStepId: null,
+  notes: [],                   // every note of this session, from open()/notesChanged, any order
+  curNote: -1,                 // index into a stable sort of state.notes, for the header's Notes jump
+  noteBoxFor: null,            // stepId whose note box is currently open, or null
   bodies: Object.create(null), // stepId -> body record (text/truncated/size/... or the typed shapes)
   bodiesPending: Object.create(null),
   lens: 'all',                 // 'all' | 'decisions' | 'files'
@@ -396,6 +417,17 @@ function onPush(msg) {
     maybeStickToBottom();
     return;
   }
+  if (msg.type === 'notesChanged') {
+    // a push from this viewer's own change re-renders a note box it just emptied by deleting;
+    // one closed by the same action is fine to leave shut, so the box only reopens for a step
+    // that still carries a note after this update.
+    state.notes = msg.notes || [];
+    if (state.noteBoxFor && !state.notes.some(function (n) { return n.stepId === state.noteBoxFor; })) state.noteBoxFor = null;
+    renderStrip();
+    renderAll();
+    renderNotesJumpLabel();
+    return;
+  }
 }
 
 /* Merge an incoming section list onto what the page already has. Every section carries a
@@ -433,6 +465,7 @@ function openSession() {
     state.generation = reply.generation || 0;
     state.indexing = Boolean(reply.indexing);
     state.seenStepId = reply.seenStepId || null;
+    state.notes = reply.notes || [];
     document.getElementById('title').textContent = state.title;
     document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
     renderIndexNote();
@@ -719,10 +752,58 @@ function renderStrip() {
   var filesTile = tile('files', strip.filesChanged, 'Files changed', true);
   if (state.lens === 'files') filesTile.classList.add('on');
   el.appendChild(filesTile);
-  // Notes arrive with the next part of this feature; the tile holds its place, inactive, at 0.
-  el.appendChild(tile('notes', 0, 'Notes', false, ' inactive'));
+  var notesTile = tile('notes', state.notes.length, 'Notes', true);
+  if (state.lens === 'notes') notesTile.classList.add('on');
+  el.appendChild(notesTile);
   var decisionsBtn = document.getElementById('decisions');
   decisionsBtn.classList.toggle('on', state.lens === 'decisions');
+}
+
+// -- notes: lookup, lens, jump between notes, "Send all" bar --------------------------------
+
+/** stepId -> its note (at most one note per step), rebuilt whenever state.notes changes. */
+function notesByStep() {
+  var map = Object.create(null);
+  state.notes.forEach(function (n) { map[n.stepId] = n; });
+  return map;
+}
+
+function stepIsOnPath(stepId) {
+  for (var i = 0; i < state.sections.length; i++) if (sectionStepIds(state.sections[i]).indexOf(stepId) !== -1) return true;
+  return false;
+}
+
+function sectionHasNote(sec) {
+  if (!state.notes.length) return false;
+  var ids = sectionStepIds(sec);
+  return state.notes.some(function (n) { return ids.indexOf(n.stepId) !== -1; });
+}
+
+/** A stable order for the header's Notes jump: by creation time, same as list() already returns. */
+function sortedNotes() { return state.notes.slice().sort(function (a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); }); }
+
+function renderNotesJumpLabel() {
+  var btn = document.getElementById('notesJump');
+  btn.textContent = 'Notes ' + state.notes.length;
+  updateAllNotesBar();
+}
+
+function updateAllNotesBar() {
+  var bar = document.getElementById('allNotesBar');
+  var n = document.getElementById('allNotesN');
+  if (state.notes.length > 1) {
+    bar.classList.add('show');
+    n.textContent = state.notes.length + ' notes kept';
+  } else {
+    bar.classList.remove('show');
+  }
+}
+
+function jumpToNote(delta) {
+  var ns = sortedNotes();
+  if (!ns.length) return;
+  state.curNote = ((state.curNote + delta) % ns.length + ns.length) % ns.length;
+  scrollToStepId(ns[state.curNote].stepId);
 }
 
 function toggleLens(key) {
@@ -737,6 +818,7 @@ function isDecisionSection(sec) { return sec.kind === 'you' || sec.kind === 'qa'
 
 function visibleSections() {
   if (state.lens === 'decisions') return state.sections.filter(isDecisionSection);
+  if (state.lens === 'notes') return state.sections.filter(sectionHasNote);
   return state.sections;
 }
 
@@ -780,6 +862,10 @@ function renderRail() {
     var t = document.createElement('div'); t.className = 't'; t.textContent = fmtClock(sec.at);
     col.appendChild(txt); col.appendChild(t);
     entry.appendChild(dot); entry.appendChild(col);
+    if (sectionHasNote(sec)) {
+      var mark = document.createElement('span'); mark.className = 'note-mark'; mark.textContent = '✎'; mark.title = 'This section carries a note';
+      entry.appendChild(mark);
+    }
     entry.addEventListener('click', function () { scrollToSectionIndex(i); closeDrawer(); });
     rail.appendChild(entry);
   });
@@ -807,17 +893,46 @@ function sectionStepIds(sec) {
    jump targets) stays stable. */
 var anchorIndex = 0;
 
+/** Notes whose step is not found on any current section: a retry or an edited message moved the
+    active path, and the step the note was filed against is gone from it. The note itself is
+    never deleted by this (notes.cjs only prunes on a dead transcript), so it needs somewhere to
+    show in the notes lens even with no row to attach to. */
+function orphanNotes() {
+  var onPath = Object.create(null);
+  state.sections.forEach(function (sec) { sectionStepIds(sec).forEach(function (id) { onPath[id] = true; }); });
+  return state.notes.filter(function (n) { return !onPath[n.stepId]; });
+}
+
+function buildOrphanNotes(reader) {
+  var orphans = orphanNotes();
+  if (!orphans.length) return;
+  orphans.forEach(function (n) {
+    var div = document.createElement('div');
+    div.className = 'saved-note';
+    div.textContent = 'Note: ' + n.text;
+    var off = document.createElement('span');
+    off.className = 'off-path';
+    off.textContent = 'step not on the current path';
+    div.appendChild(off);
+    reader.appendChild(div);
+  });
+}
+
 function renderReader() {
   var reader = document.getElementById('readerInner');
   reader.textContent = '';
   var secs = visibleSections();
   if (!secs.length) {
+    if (state.lens === 'notes' && orphanNotes().length) { buildOrphanNotes(reader); return; }
     var empty = document.createElement('div');
     empty.className = 'empty-state';
-    empty.textContent = state.indexing ? 'indexing still running…' : 'no steps yet';
+    empty.textContent = state.lens === 'notes' ? 'No sections carry a note yet.'
+      : state.lens === 'decisions' ? 'No messages, answers or plans in this session.'
+      : state.indexing ? 'indexing still running…' : 'no steps yet';
     reader.appendChild(empty);
     return;
   }
+  if (state.lens === 'notes') buildOrphanNotes(reader);
   // Two spacers carry the weight of everything outside the render window (one estimated-height
   // div each, never one per hidden section), so the DOM a 5,000-step session holds stays
   // bounded by RENDER_WINDOW regardless of how many sections sit off screen; only the window
@@ -904,6 +1019,140 @@ function chipTextFor(stepKind) {
   return 'Claude';
 }
 
+// -- notes on a step: the "Add note" control, the note box, the kept-note display ------------
+
+var QUICK_REPLIES = ['Why this?', 'This is wrong:', 'Go back to this'];
+
+/** Appended to every step row: a quiet "Add note" control, plus the open note box or the kept
+    note's display when one applies. stepId is the step this note is filed against; the
+    row's own element gets the "noted" class so the control stays visible without hover. */
+function addNoteUi(rowDiv, stepId) {
+  var note = notesByStep()[stepId];
+  rowDiv.classList.toggle('noted', Boolean(note));
+  rowDiv.classList.toggle('note-open', state.noteBoxFor === stepId);
+  var btn = document.createElement('button');
+  btn.className = 'add-note';
+  btn.type = 'button';
+  btn.title = 'Note on this step';
+  btn.textContent = note ? '✎ Note' : '+ Note';
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    state.noteBoxFor = state.noteBoxFor === stepId ? null : stepId;
+    renderReader();
+    queueVisibleBodies();
+  });
+  rowDiv.appendChild(btn);
+  if (state.noteBoxFor === stepId) {
+    rowDiv.appendChild(buildNoteBox(stepId, note));
+  } else if (note) {
+    rowDiv.appendChild(buildSavedNote(stepId, note));
+  }
+}
+
+function buildSavedNote(stepId, note) {
+  var div = document.createElement('div');
+  div.className = 'saved-note';
+  div.textContent = 'Note: ' + note.text;
+  if (!stepIsOnPath(stepId)) {
+    var off = document.createElement('span');
+    off.className = 'off-path';
+    off.textContent = 'step not on the current path';
+    div.appendChild(off);
+  }
+  return div;
+}
+
+function buildNoteBox(stepId, existing) {
+  var box = document.createElement('div');
+  box.className = 'notebox';
+  box.addEventListener('click', function (ev) { ev.stopPropagation(); });
+
+  var quick = document.createElement('div');
+  quick.className = 'quick';
+  var ta = document.createElement('textarea');
+  ta.placeholder = 'What is wrong or worth keeping at this step?';
+  ta.value = existing ? existing.text : '';
+  QUICK_REPLIES.forEach(function (phrase) {
+    var qb = document.createElement('button');
+    qb.type = 'button';
+    qb.textContent = phrase;
+    qb.addEventListener('click', function () {
+      ta.value = ta.value ? ta.value.replace(/\s*$/, ' ') + phrase : phrase;
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = ta.value.length;
+    });
+    quick.appendChild(qb);
+  });
+
+  var row2 = document.createElement('div');
+  row2.className = 'row2';
+  var keep = document.createElement('button'); keep.type = 'button'; keep.textContent = 'Keep note';
+  var send = document.createElement('button'); send.type = 'button'; send.className = 'primary';
+  send.textContent = 'Send to session';
+  send.title = 'Sending arrives with the next step.';
+  var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
+  branch.disabled = true; branch.title = 'Arrives with 0.13.0';
+
+  function afterSave() { state.noteBoxFor = null; renderReader(); queueVisibleBodies(); }
+
+  keep.addEventListener('click', function () {
+    var text = ta.value.trim();
+    if (!text) return;
+    var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
+    req.then(function (reply) {
+      if (reply && reply.ok && reply.note) applyNoteLocally(reply.note);
+      afterSave();
+    });
+  });
+  send.addEventListener('click', function () {
+    var text = ta.value.trim();
+    if (!text) return;
+    var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
+    req.then(function (reply) {
+      if (reply && reply.ok && reply.note) applyNoteLocally(reply.note);
+      flashNotice('Sending arrives with the next step.');
+      afterSave();
+    });
+  });
+  row2.appendChild(keep);
+  row2.appendChild(send);
+  row2.appendChild(branch);
+  if (existing) {
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.addEventListener('click', function () {
+      call({ type: 'noteDelete', noteId: existing.id }).then(function (reply) {
+        if (reply && reply.ok) removeNoteLocally(existing.id);
+        afterSave();
+      });
+    });
+    row2.appendChild(del);
+  }
+
+  box.appendChild(quick);
+  box.appendChild(ta);
+  box.appendChild(row2);
+  setTimeout(function () { ta.focus(); }, 0);
+  return box;
+}
+
+/* Applies a note change to state.notes immediately, ahead of the notesChanged push that is on
+   its way from the same action: the box the user just used closes and shows the right text at
+   once rather than waiting a round trip, and the later push (same content) is a no-op merge. */
+function applyNoteLocally(note) {
+  var idx = state.notes.findIndex(function (n) { return n.id === note.id; });
+  if (idx === -1) state.notes.push(note); else state.notes[idx] = note;
+  renderStrip();
+  renderNotesJumpLabel();
+}
+
+function removeNoteLocally(noteId) {
+  state.notes = state.notes.filter(function (n) { return n.id !== noteId; });
+  renderStrip();
+  renderNotesJumpLabel();
+}
+
 /* The opener step's own row: the one that gives the section its heading (a you message or an
    answered question or approved plan). It is not duplicated anywhere else in the section: for a
    you step, the heading card itself holds the full message (folded past about six lines, with
@@ -924,6 +1173,7 @@ function buildOpenerRow(sec, i) {
     row.appendChild(restate);
     if (sec.kind === 'qa') row.appendChild(buildQuestionBody(sec.openerId));
   }
+  addNoteUi(row, sec.openerId);
   return row;
 }
 
@@ -985,6 +1235,7 @@ function buildClaudeRow(row) {
   var body = document.createElement('div'); body.className = 'body md'; body.setAttribute('data-step-body', stepId);
   fillMdBody(body, stepId);
   div.appendChild(body);
+  addNoteUi(div, stepId);
   return div;
 }
 
@@ -1008,6 +1259,7 @@ function buildPlanRow(row) {
     body.appendChild(approved);
   }
   div.appendChild(body);
+  addNoteUi(div, row.stepId);
   return div;
 }
 
@@ -1025,6 +1277,7 @@ function buildQuestionRow(row) {
   var body = document.createElement('div'); body.className = 'body qcard'; body.setAttribute('data-step-body', row.stepId);
   fillQuestionBody(body, row.stepId);
   div.appendChild(body);
+  addNoteUi(div, row.stepId);
   return div;
 }
 
@@ -1051,6 +1304,7 @@ function buildWorkRow(row, sec) {
   var body = document.createElement('div'); body.className = 'body';
   div.appendChild(body);
   fillWorkBody(body, row.items, key);
+  addNoteUi(div, row.items[0]);
   return div;
 }
 
@@ -1508,6 +1762,10 @@ qInput.addEventListener('keydown', function (ev) {
 });
 document.getElementById('next').addEventListener('click', function () { moveHit(1); });
 document.getElementById('prev').addEventListener('click', function () { moveHit(-1); });
+document.getElementById('notesJump').addEventListener('click', function () { jumpToNote(1); });
+document.getElementById('sendAllNotes').addEventListener('click', function () {
+  flashNotice('Sending arrives with the next step.');
+});
 document.getElementById('decisions').addEventListener('click', function () { toggleLens('decisions'); });
 document.getElementById('allTools').addEventListener('change', function (ev) { state.showAllTools = ev.target.checked; renderReader(); queueVisibleBodies(); });
 document.getElementById('follow').addEventListener('change', function (ev) {
@@ -1661,12 +1919,14 @@ openSession = function () {
     state.generation = reply.generation || 0;
     state.indexing = Boolean(reply.indexing);
     state.seenStepId = reply.seenStepId || null;
+    state.notes = reply.notes || [];
     document.getElementById('title').textContent = state.title;
     document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
     rebuildCompactIndex();
     renderIndexNote();
     renderStrip();
     renderAll();
+    renderNotesJumpLabel();
     scrollToEndOnLoad();
   });
 };
@@ -1689,7 +1949,6 @@ document.getElementById('railToggle').addEventListener('click', toggleDrawer);
 // -- boot --------------------------------------------------------------------------------
 
 openSession();
-$
 </script>
 </body>
 </html>

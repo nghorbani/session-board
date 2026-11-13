@@ -40,11 +40,13 @@ function openReply(overrides) {
     seenStepId: null, counts: { byKind: {}, unreadable: 0 },
     steps: [], sections: [section('lead', 'Session start', null, [])],
     strip: { totalTimeMs: 60000, sections: 1, decisions: 0, filesChanged: 0 },
+    notes: [],
   }, overrides || {});
 }
 
 // -- fake API ------------------------------------------------------------------------------
 
+let noteSeq = 0;
 const fake = {
   open: () => openReply(),
   body: (stepId) => ({ text: 'body of ' + stepId, truncated: false, size: 10 }),
@@ -53,7 +55,32 @@ const fake = {
   seen: () => ({ ok: true }),
   calls: [],
   pushes: [], // queued push messages the poll route drains in order
+  notes: new Map(), // noteId -> { id, stepId, at, text }
 };
+
+/* A minimal in-memory stand-in for notes.cjs, just enough for the page suite to drive a real
+   add/edit/delete round trip the way the real service answers it (typed result plus the open
+   reply and notesChanged carrying the full list), without touching a real data directory. */
+function noteList() { return [...fake.notes.values()].sort((a, b) => a.at - b.at); }
+function handleNoteMessage(msg) {
+  if (msg.type === 'noteAdd') {
+    const id = 'note-' + (++noteSeq);
+    const note = { id, stepId: msg.stepId, at: Date.now(), text: msg.text };
+    fake.notes.set(id, note);
+    return { type: 'noteAddResult', ok: true, note };
+  }
+  if (msg.type === 'noteEdit') {
+    const note = fake.notes.get(msg.noteId);
+    if (!note) return { type: 'noteEditResult', ok: false, message: 'that note is gone' };
+    note.text = msg.text;
+    return { type: 'noteEditResult', ok: true, note };
+  }
+  if (msg.type === 'noteDelete') {
+    const removed = fake.notes.delete(msg.noteId);
+    return { type: 'noteDeleteResult', ok: true, removed };
+  }
+  return null;
+}
 let PORT = 0;
 
 function json(res, code, body) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
@@ -90,13 +117,22 @@ async function serve(req, res) {
     const msg = await readBody(req);
     fake.calls.push(msg);
     if (!msg) return json(res, 400, { error: 'bad json' });
-    if (msg.type === 'open') return json(res, 200, Object.assign({ requestId: msg.requestId }, fake.open()));
+    if (msg.type === 'open') {
+      const base = fake.open();
+      const notes = base.notes && base.notes.length ? base.notes : noteList();
+      return json(res, 200, Object.assign({ requestId: msg.requestId }, base, { notes }));
+    }
     if (msg.type === 'body') return json(res, 200, Object.assign({ type: 'bodyResult', sessionId: msg.sessionId, stepId: msg.stepId }, fake.body(msg.stepId)));
     if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: fake.bodies(msg.stepIds || []) });
     if (msg.type === 'search') return json(res, 200, Object.assign({ type: 'searchResult', requestId: msg.requestId, query: msg.query }, fake.search(msg.query)));
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return json(res, 200, { type: 'openTextResult', notAvailable: true });
+    if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete') {
+      const reply = handleNoteMessage(msg);
+      fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
+      return json(res, 200, reply);
+    }
     return json(res, 200, { type: 'errorResult' });
   }
   return json(res, 404, { error: 'not found' });
@@ -176,6 +212,19 @@ const SAMPLE = `(function () {
     youMsgOpen: !!document.querySelector('.row.k-you .you-msg.open'),
     showAllYou: !!document.querySelector('.row.k-you .showall'),
     indexNoteShown: document.getElementById('indexnote').classList.contains('show'),
+    notesTileNum: (function () { var t = q('.strip .item')[4]; return t ? t.querySelector('.num').textContent : null; })(),
+    notesTileOn: (function () { var t = q('.strip .item')[4]; return t ? t.classList.contains('on') : false; })(),
+    notesJumpLabel: text('#notesJump'),
+    addNoteButtons: q('.add-note').map(function (b) { return b.textContent; }),
+    notedRows: q('.row.noted').length,
+    noteBoxOpen: !!document.querySelector('.notebox'),
+    noteBoxText: (function () { var t = document.querySelector('.notebox textarea'); return t ? t.value : null; })(),
+    savedNoteText: (function () { var e = document.querySelector('.saved-note'); return e ? e.textContent : null; })(),
+    savedNoteOffPath: !!document.querySelector('.saved-note .off-path'),
+    noteMarkCount: q('.sec-entry .note-mark').length,
+    allNotesBarShown: document.getElementById('allNotesBar').classList.contains('show'),
+    allNotesBarText: text('#allNotesN'),
+    emptyStateText: text('.empty-state'),
   };
 })()`;
 
@@ -206,7 +255,13 @@ async function openPage(sessionId, path) {
   return page;
 }
 
-test.beforeEach(() => { fake.calls.length = 0; fake.pushes.length = 0; fake.open = () => openReply(); fake.search = () => ({ stepIds: [], capped: false }); });
+test.beforeEach(() => {
+  fake.calls.length = 0; fake.pushes.length = 0;
+  fake.open = () => openReply();
+  fake.body = (stepId) => ({ text: 'body of ' + stepId, truncated: false, size: 10 });
+  fake.search = () => ({ stepIds: [], capped: false });
+  fake.notes.clear();
+});
 
 // -- first paint ----------------------------------------------------------------------------
 
@@ -537,6 +592,223 @@ test('page: the narrow layout shows the outline drawer toggle', opts, async () =
   assert.ok(sample, 'the page rendered within the timeout');
   assert.equal(sample.drawerVisible, true, 'the rail-toggle bar is visible at a narrow width');
   await cdp.send('Target.closeTarget', { targetId });
+});
+
+// -- notes -----------------------------------------------------------------------------------
+
+test('page: adding a note through the box shows it under the step and makes the Notes tile live', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  assert.deepEqual((await page.sample()).addNoteButtons.filter(Boolean).length > 0, true, 'every step offers Add note');
+  await page.click('.row.k-you .add-note');
+  const opened = await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  assert.equal(opened.noteBoxText, '', 'an empty box for a fresh note');
+  await page.eval('(function () { var t = document.querySelector(".notebox textarea"); t.value = "why this step?"; })()');
+  await page.click('.notebox .row2 button:first-child'); // Keep note
+  const kept = await page.until((x) => x.savedNoteText, 'the note to show under the step');
+  assert.ok(kept.savedNoteText.indexOf('why this step?') !== -1);
+  assert.equal(kept.notedRows, 1);
+  assert.equal(kept.notesTileNum, '1');
+  assert.equal(kept.notesJumpLabel, 'Notes 1');
+  await page.close();
+});
+
+test('page: a quick reply prefills the note text', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  await page.click('.row.k-you .add-note');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.click('.notebox .quick button'); // "Why this?"
+  const s = await page.until((x) => x.noteBoxText, 'the quick reply to land in the box');
+  assert.ok(s.noteBoxText.indexOf('Why this?') !== -1);
+  await page.close();
+});
+
+test('page: editing a kept note changes its text in place', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  await page.click('.row.k-you .add-note');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "first version"; })()');
+  await page.click('.notebox .row2 button:first-child');
+  await page.until((x) => x.savedNoteText && x.savedNoteText.indexOf('first version') !== -1, 'the first version to show');
+  await page.click('.add-note'); // reopen, now showing "Note" since one exists
+  const reopened = await page.until((x) => x.noteBoxOpen, 'the box to reopen with the existing text');
+  assert.ok(reopened.noteBoxText.indexOf('first version') !== -1);
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "edited version"; })()');
+  await page.click('.notebox .row2 button:first-child');
+  const edited = await page.until((x) => x.savedNoteText && x.savedNoteText.indexOf('edited version') !== -1, 'the edit to land');
+  assert.equal(edited.notedRows, 1, 'still one note, not a second one added');
+  await page.close();
+});
+
+test('page: deleting a note clears it from the step and the tile', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  await page.click('.row.k-you .add-note');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "to be deleted"; })()');
+  await page.click('.notebox .row2 button:first-child');
+  await page.until((x) => x.savedNoteText, 'the note to be kept first');
+  await page.click('.add-note');
+  await page.until((x) => x.noteBoxOpen, 'the box to reopen');
+  const sample = await page.sample();
+  const buttons = await page.eval('Array.prototype.map.call(document.querySelectorAll(".notebox .row2 button"), function (b) { return b.textContent; })');
+  assert.ok(buttons.indexOf('Delete') !== -1, 'a Delete button appears for an existing note');
+  void sample;
+  await page.click('.notebox .row2 button:last-child'); // Delete is appended last
+  const after = await page.until((x) => x.notesTileNum === '0', 'the tile to drop back to zero');
+  assert.equal(after.savedNoteText, null);
+  assert.equal(after.notedRows, 0);
+  await page.close();
+});
+
+test('page: the Notes switch narrows the outline to sections with a note, with its own empty state', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('u2:0', 'you')],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'first message', 'u1:0', []),
+      section('you', 'second message', 'u2:0', []),
+    ],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'first paint');
+  const beforeNotes = await page.sample();
+  assert.equal(beforeNotes.emptyStateText, null);
+  // switching to the notes lens with no notes yet shows the stated empty state
+  await page.click('.strip .item:nth-child(5)');
+  const empty = await page.until((x) => x.emptyStateText, 'the notes-empty state to show');
+  assert.equal(empty.emptyStateText, 'No sections carry a note yet.');
+  await page.click('.strip .item:nth-child(5)'); // back to the full story
+  await page.until((x) => x.sectionHeadings.length >= 2, 'back to the full story');
+
+  // now add a note on the second message only, then switch to the notes lens
+  await page.eval('(function () { document.getElementById("step-u2:0").querySelector(".add-note").click(); })()');
+  await page.until((x) => x.noteBoxOpen, 'the note box on the second message to open');
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "note on the second one"; })()');
+  await page.click('.notebox .row2 button:first-child');
+  await page.until((x) => x.notesTileNum === '1', 'the tile to count the new note');
+  await page.click('.strip .item:nth-child(5)');
+  const narrowed = await page.until((x) => x.notesTileOn, 'the notes lens to switch on');
+  assert.deepEqual(narrowed.sectionHeadings, ['second message']);
+  assert.equal(narrowed.noteMarkCount >= 1, true, 'the outline marks the section carrying a note');
+  await page.close();
+});
+
+test('page: the notes counter in the header jumps between notes', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('u2:0', 'you')],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'first message', 'u1:0', []),
+      section('you', 'second message', 'u2:0', []),
+    ],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'first paint');
+  for (const sid of ['u1:0', 'u2:0']) {
+    await page.eval('(function () { document.getElementById("step-' + sid + '").querySelector(".add-note").click(); })()');
+    await page.until((x) => x.noteBoxOpen, 'a note box to open for ' + sid);
+    await page.eval('(function () { document.querySelector(".notebox textarea").value = "note on ' + sid + '"; })()');
+    // a notesChanged push for an earlier note in this same loop can land mid-click and redraw
+    // the reader (rebuilding the open box's own DOM in the process); retry the click rather than
+    // assume the button found a moment ago by page.until is still the one attached to the page.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { await page.click('.notebox .row2 button:first-child'); break; } catch (_) { await sleep(100); }
+    }
+    await page.until((x) => !x.noteBoxOpen, 'the box to close after keeping');
+  }
+  await page.until((x) => x.notesJumpLabel === 'Notes 2', 'both notes counted');
+  await page.click('#notesJump');
+  const s1 = await page.until((x) => x.curHitText === null || true, 'a jump landed'); // jump uses cur-hit styling via scrollToStepId's own marker
+  void s1;
+  const scrolledOnce = await page.eval('document.querySelector(".cur-hit") ? document.querySelector(".cur-hit").id : null');
+  assert.ok(scrolledOnce === 'step-u1:0' || scrolledOnce === 'step-u2:0', 'the jump landed on one of the noted steps');
+  await page.click('#notesJump');
+  const scrolledTwice = await page.eval('document.querySelector(".cur-hit") ? document.querySelector(".cur-hit").id : null');
+  assert.notEqual(scrolledTwice, scrolledOnce, 'a second click moves to the other note');
+  await page.close();
+});
+
+test('page: a note on a step off the current path stays listed, marked accordingly', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('u2:0', 'you')],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'first message', 'u1:0', []),
+      section('you', 'second message', 'u2:0', []),
+    ],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'first paint');
+  await page.eval('(function () { document.getElementById("step-u1:0").querySelector(".add-note").click(); })()');
+  await page.until((x) => x.noteBoxOpen, 'the note box on the first message to open');
+  await page.eval('(function () { document.querySelector(".notebox textarea").value = "note before the retry"; })()');
+  await page.click('.notebox .row2 button:first-child');
+  await page.until((x) => x.savedNoteText, 'the note to be kept while the step is still on the path');
+  const onPath = await page.sample();
+  assert.equal(onPath.savedNoteOffPath, false, 'the note shows no warning while its step is on the path');
+
+  // a retry drops the first message from the active path: the service sends a reset with a
+  // shorter section list that no longer carries u1:0 anywhere, the note itself is untouched.
+  fake.pushes.push({
+    type: 'stepsChanged', sessionId: A, reset: 'u1:0',
+    sections: [section('lead', 'Session start', null, []), section('you', 'retried message', 'u3:0', [])],
+    strip: { totalTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 0 },
+  });
+  await page.until((x) => x.sectionHeadings.indexOf('retried message') !== -1, 'the reset to land');
+  const s = await page.sample();
+  assert.equal(s.notesTileNum, '1', 'the note survives the reset, it is not deleted by a path change');
+  await page.click('.strip .item:nth-child(5)');
+  const narrowed = await page.until((x) => x.notesTileOn, 'the notes lens to switch on');
+  assert.equal(narrowed.savedNoteOffPath, true, 'the orphaned note is listed with its off-path warning in the notes lens');
+  assert.ok((await page.sample()).savedNoteText.indexOf('note before the retry') !== -1);
+  await page.close();
+});
+
+test('page: a note containing markup renders as text, not as an element', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+    notes: [{ id: 'n1', stepId: 'u1:0', at: 1, text: '<img src=x onerror=alert(1)>', sent: [] }],
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.savedNoteText, 'the note to render');
+  assert.ok(s.savedNoteText.indexOf('<img') !== -1, 'the tag shows as literal text');
+  assert.equal(s.imgCount, 0, 'no element was created from the note text');
+  await page.close();
+});
+
+test('page: a note arriving by push from another viewer shows up without a reload', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])],
+  });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  fake.notes.set('pushed-note', { id: 'pushed-note', stepId: 'u1:0', at: Date.now(), text: 'added from another window' });
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: noteList() });
+  const s = await page.until((x) => x.savedNoteText, 'the pushed note to appear');
+  assert.ok(s.savedNoteText.indexOf('added from another window') !== -1);
+  assert.equal(s.notesTileNum, '1');
+  await page.close();
 });
 
 test.after(() => {});
