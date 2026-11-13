@@ -82,6 +82,7 @@ class BoardProvider {
       sessionTitle: (sessionId) => this.stepsSessionTitle(sessionId),
       dataDir: core.DATA_DIR,
       rg: { probe: (appRoot) => core.rgProbe(appRoot), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
+      deliver: (sessionId, text, meta) => this.deliverToSession(sessionId, text, meta),
     });
     this.stepsPanels = new Map();   // sessionId -> panel, one per session (E9)
   }
@@ -342,11 +343,21 @@ class BoardProvider {
    * `claude-vscode.editor.open` honours claudeCode.preferredLocation only when its sixth
    * argument marks the call as programmatic; called bare it opens an editor tab and rewrites
    * the preference to "panel". `primaryEditor.open` is the fallback (always an editor tab).
+   *
+   * `prompt`, when given, is passed as the command's own second argument (B3: the Steps
+   * viewer's "Send to session" hand-over). The call without a prompt keeps its exact six
+   * arguments unchanged (a regression the host suite pins), since `undefined` and an omitted
+   * argument are the same thing to `executeCommand` either way, but writing it out keeps that
+   * guarantee visible in the source rather than resting on an engine detail.
    */
-  async revealHere(sessionId) {
+  async revealHere(sessionId, prompt) {
     const honour = { programmatic: 'honor-preferred-location' };
     try {
-      await vscode.commands.executeCommand('claude-vscode.editor.open', sessionId, undefined, undefined, undefined, undefined, honour);
+      if (prompt === undefined) {
+        await vscode.commands.executeCommand('claude-vscode.editor.open', sessionId, undefined, undefined, undefined, undefined, honour);
+      } else {
+        await vscode.commands.executeCommand('claude-vscode.editor.open', sessionId, prompt, undefined, undefined, undefined, honour);
+      }
       this.log.info('revealed ' + sessionId + ' via claude-vscode.editor.open');
       return true;
     } catch (e) {
@@ -362,6 +373,109 @@ class BoardProvider {
     }
   }
 
+  // -- B3: send to session (the steps-service "deliver" hand-over) -----------------------
+
+  /**
+   * The Claude Code extension version from which `claude-vscode.editor.open`'s prompt argument
+   * is known to fill the chat box (the plan's spike, E13): below it, or when the extension is
+   * missing altogether, hand-over is never attempted and the text goes to the clipboard plus
+   * the existing open instead.
+   */
+  static get STEER_MIN_CLAUDE_VERSION() { return '2.1.322'; }
+
+  /** Whether this window's own Claude Code extension is new enough for prompt hand-over. */
+  claudeHandOverOk() {
+    const ext = vscode.extensions.getExtension('anthropic.claude-code');
+    const version = ext && ext.packageJSON && ext.packageJSON.version;
+    return Boolean(version) && core.versionAtLeast(version, BoardProvider.STEER_MIN_CLAUDE_VERSION);
+  }
+
+  /** A stowed transcript is restored first, the way copyResume does, before anything else about
+   *  the session (its window, whether it is running) is decided from it. */
+  async restoreStowedForDeliver(sessionId) {
+    if (!core.stowedTranscripts(sessionId).length) return;
+    try {
+      const r = await core.unarchiveSession(sessionId);
+      this.log.info('unarchive ' + sessionId + ' (send to session)' + (r && r.restoredTo ? ': ' + r.restoredTo : ''));
+    } catch (e) {
+      this.log.warn('unarchive ' + sessionId + ' (send to session) failed: ' + String((e && e.message) || e));
+    }
+  }
+
+  /**
+   * B2's `deliver(sessionId, text, meta)`: the text always lands on the clipboard; whether it
+   * also reaches the session's own chat box depends on where the session runs and whether this
+   * window's Claude Code is new enough (E13, the spike's own finding that "fill" cannot be
+   * guaranteed on an older or missing extension). Returns { ok, message } where message is
+   * exactly the line steps.html shows under the note.
+   *   - a terminal or background session (no VS Code window at all): clipboard only.
+   *   - owned by this window: hand-over here when claudeHandOverOk(), else clipboard only.
+   *   - owned by another window: a one-shot claim plus the board's own /steer route, when that
+   *     window runs a board 0.12.0 or newer; otherwise clipboard only (that window's Claude
+   *     Code version cannot be known from here, so the fallback is the same as "unknown").
+   *   - not running: resumed by the same call (revealHere / the /steer hand-over both resume a
+   *     session that is not alive, the way Claude Code's own editor.open already does).
+   * `ok: true` only when the text reached a chat box, not merely the clipboard: noteSend/
+   * notesSendAll record a "sent" mark on that signal, and clipboard-only is not a sent note.
+   */
+  async deliverToSession(sessionId, text, meta) {
+    await this.restoreStowedForDeliver(sessionId);
+    await vscode.env.clipboard.writeText(text);
+    const clipboardOnly = (message) => ({ ok: false, message: message || 'On the clipboard. Paste it into the session.' });
+
+    const row = this.sessionRow(sessionId);
+    if (!row || !row.window) {
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): no VS Code window, clipboard only');
+      return clipboardOnly();
+    }
+    const owner = await core.exthostForPid(Number(row.pid));
+    if (owner === process.pid) {
+      if (!this.claudeHandOverOk()) {
+        this.log.info('send to session ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION + ', clipboard only');
+        return clipboardOnly();
+      }
+      const revealed = await this.revealHere(sessionId, text);
+      if (!revealed) return clipboardOnly();
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): delivered in this window');
+      return { ok: true, message: 'In the chat box and on the clipboard.' };
+    }
+    const win = await core.windowForPid(Number(row.pid));
+    if (!win) return clipboardOnly();
+    const board = core.boardAlive(win.exthostPid);
+    if (!board || !core.versionAtLeast(core.boardVersion(win.exthostPid), '0.12.0')) {
+      this.log.info('send to session ' + sessionId + ': owning window has no current board, clipboard only');
+      return clipboardOnly();
+    }
+    const claimId = core.writeSteerClaim(text);
+    try {
+      await core.steerToWindow(sessionId, win.windowId, board, claimId);
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): handed to window ' + win.windowId);
+      return { ok: true, message: 'In the chat box and on the clipboard.' };
+    } catch (e) {
+      this.log.warn('send to session ' + sessionId + ' failed to reach window ' + win.windowId + ': ' + String((e && e.message) || e));
+      return clipboardOnly();
+    }
+  }
+
+  /**
+   * The owning side of a /steer hand-over: takeSteerClaim both reads and deletes the claim in
+   * one step, so a replayed or logged URI finds nothing the second time, and the text never
+   * comes from anywhere but that claim (never the URL's own query string). A malformed id, a
+   * missing claim or one past its 30-second window all simply do nothing, same as an /open on a
+   * session this window no longer has.
+   */
+  async handleSteerUri(uri) {
+    const params = new URLSearchParams(uri.query);
+    const sessionId = params.get('session') || '';
+    const claimId = params.get('note') || '';
+    if (!core.UUID_RE.test(sessionId)) return;
+    const text = core.takeSteerClaim(claimId);
+    if (text === null) { this.log.warn('steer ' + sessionId + ': no fresh claim for this URI'); return; }
+    await this.restoreStowedForDeliver(sessionId);
+    if (!this.claudeHandOverOk()) { this.log.warn('steer ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION); return; }
+    if (!(await this.revealHere(sessionId, text))) this.log.warn('steer ' + sessionId + ': could not reveal the session in this window');
+  }
+
   /** vscode://<this extension id>/open?session=<id>, routed here by windowId. */
   async handleUri(uri) {
     this.log.info('uri ' + uri.toString(true));
@@ -370,6 +484,7 @@ class BoardProvider {
       if (core.UUID_RE.test(id)) await this.openClaudeRename(id);
       return;
     }
+    if (uri.path === '/steer') { await this.handleSteerUri(uri); return; }
     if (uri.path !== '/open') return;
     const sessionId = new URLSearchParams(uri.query).get('session') || '';
     if (!core.UUID_RE.test(sessionId)) return;

@@ -8,7 +8,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { boot, cleanup, vscode } = require('./shim/host.cjs');
+const { boot, cleanup, vscode, core } = require('./shim/host.cjs');
 
 const A = '11111111-2222-4333-8444-555555555555';
 const B = '66666666-7777-4888-9999-000000000000';
@@ -360,6 +360,182 @@ test('revealHere without a prompt keeps its six positional arguments (regression
   assert.equal(call[1], A);
   assert.equal(call[2], undefined);
   assert.deepEqual(call[6], { programmatic: 'honor-preferred-location' });
+});
+
+test('revealHere with a prompt passes it as the command\'s own second argument', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: last() });
+  await provider.revealHere(A, 'About your step at 14:05 ("x"): why this?');
+  const call = vscode.__executed.find((c) => c[0] === 'claude-vscode.editor.open');
+  assert.ok(call);
+  assert.equal(call.length, 7);
+  assert.equal(call[1], A);
+  assert.equal(call[2], 'About your step at 14:05 ("x"): why this?');
+  assert.deepEqual(call[6], { programmatic: 'honor-preferred-location' });
+});
+
+// -- B3: deliverToSession (the steps-service "deliver" hand-over) -------------------------
+
+const runningWindow = () => { const l = last(); Object.assign(l.sessions[0], { window: { id: 3, exthostPid: 4242, label: 'x' } }); return l; };
+const terminalRow = () => last();   // window: null already, from LAST
+
+function setExtensionVersion(version) {
+  if (version === undefined) { delete vscode.__extensions['anthropic.claude-code']; return; }
+  vscode.__extensions['anthropic.claude-code'] = { packageJSON: { version } };
+}
+
+test('deliverToSession, same window, Claude Code 2.1.322 (the gate version): hand-over plus clipboard', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: runningWindow() });
+  setExtensionVersion('2.1.322');
+  const result = await provider.deliverToSession(A, 'About your step at 14:05 ("x"): why this?', { kind: 'single' });
+  assert.deepEqual(result, { ok: true, message: 'In the chat box and on the clipboard.' });
+  const call = vscode.__executed.find((c) => c[0] === 'claude-vscode.editor.open');
+  assert.equal(call[2], 'About your step at 14:05 ("x"): why this?');
+  assert.deepEqual(vscode.__clipboard, ['About your step at 14:05 ("x"): why this?']);
+});
+
+test('deliverToSession, same window, Claude Code 2.1.400 (newer than the gate): hand-over plus clipboard', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: runningWindow() });
+  setExtensionVersion('2.1.400');
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.equal(result.ok, true);
+  assert.ok(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open' && c[2] === 'text'));
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession, same window, Claude Code 2.1.100 (below the gate): clipboard only, no hand-over attempted', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: runningWindow() });
+  setExtensionVersion('2.1.100');
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+  assert.equal(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open'), false);
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession, same window, Claude Code absent: clipboard only, no hand-over attempted', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: runningWindow() });
+  setExtensionVersion(undefined);
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+  assert.equal(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open'), false);
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession, another window with a current board: a claim is written and the /steer URI is opened', async () => {
+  const opened = [];
+  const h = boot({
+    exthostForPid: async () => 999,
+    windowForPid: async () => ({ windowId: 3, exthostPid: 4242 }),
+    boardAlive: () => 'nima-ghorbani.session-board-vscode',
+    boardVersion: () => '0.12.0',
+    steerToWindow: async (sessionId, windowId, board, claimId) => { opened.push({ sessionId, windowId, board, claimId }); },
+  }, { last: runningWindow() });
+  const result = await h.provider.deliverToSession(A, 'About your step at 09:00 ("x"): a note', { kind: 'single' });
+  assert.deepEqual(result, { ok: true, message: 'In the chat box and on the clipboard.' });
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].sessionId, A);
+  assert.equal(opened[0].windowId, 3);
+  assert.equal(opened[0].board, 'nima-ghorbani.session-board-vscode');
+  assert.match(opened[0].claimId, /^[0-9a-f]{32}$/);
+  assert.deepEqual(vscode.__clipboard, ['About your step at 09:00 ("x"): a note']);
+});
+
+test('deliverToSession, another window without a current board (old or no board): clipboard only', async () => {
+  const h = boot({
+    exthostForPid: async () => 999,
+    windowForPid: async () => ({ windowId: 3, exthostPid: 4242 }),
+    boardAlive: () => null,
+  }, { last: runningWindow() });
+  const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+});
+
+test('deliverToSession, another window with a board older than 0.12.0: clipboard only', async () => {
+  const h = boot({
+    exthostForPid: async () => 999,
+    windowForPid: async () => ({ windowId: 3, exthostPid: 4242 }),
+    boardAlive: () => 'nima-ghorbani.session-board-vscode',
+    boardVersion: () => '0.11.2',
+  }, { last: runningWindow() });
+  const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+});
+
+test('deliverToSession, a terminal or background session (no VS Code window at all): clipboard only', async () => {
+  const { provider } = boot({}, { last: terminalRow() });
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession restores a stowed transcript first, the way copyResume does', async () => {
+  const restored = [];
+  const h = boot({
+    stowedTranscripts: () => ['C:\\t\\a.jsonl'],
+    unarchiveSession: async (id) => { restored.push(id); return { restoredTo: 'C:\\p\\a.jsonl' }; },
+  }, { last: terminalRow() });
+  await h.provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(restored, [A]);
+});
+
+test('deliverToSession always writes to the clipboard, whichever branch it takes', async () => {
+  const scenarios = [
+    boot({}, { last: terminalRow() }),
+    boot({ exthostForPid: async () => 999, windowForPid: async () => null }, { last: runningWindow() }),
+  ];
+  for (const h of scenarios) {
+    vscode.__clipboard.length = 0;
+    await h.provider.deliverToSession(A, 'always on the clipboard', { kind: 'single' });
+    assert.deepEqual(vscode.__clipboard, ['always on the clipboard']);
+  }
+});
+
+// -- B3: the owning side of /steer ---------------------------------------------------------
+
+test('handleSteerUri: a fresh claim is read, the stowed transcript restored first, and the session revealed with the text as the prompt', async () => {
+  const restored = [];
+  const h = boot({
+    exthostForPid: async () => process.pid, pidAlive: () => true,
+    stowedTranscripts: () => ['C:\\t\\a.jsonl'],
+    unarchiveSession: async (id) => { restored.push(id); return { restoredTo: 'C:\\p\\a.jsonl' }; },
+  }, { last: last() });
+  setExtensionVersion('2.1.322');
+  const claimId = core.writeSteerClaim('About your step at 10:00 ("x"): steer text');
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  assert.deepEqual(restored, [A]);
+  const call = vscode.__executed.find((c) => c[0] === 'claude-vscode.editor.open');
+  assert.ok(call, 'the session was revealed');
+  assert.equal(call[2], 'About your step at 10:00 ("x"): steer text');
+});
+
+test('handleSteerUri: a stale claim (past 30 seconds) is ignored, nothing is revealed', async () => {
+  const h = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: last() });
+  setExtensionVersion('2.1.322');
+  const claimId = core.writeSteerClaim('late text');
+  // age the claim file past the 30-second window directly, the way the core.cjs suite does
+  const fs = require('fs');
+  const path = require('path');
+  const file = path.join(core.DATA_DIR, 'steers', claimId + '.json');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify(Object.assign(rec, { at: Date.now() - 31000 })));
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  assert.equal(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open'), false);
+});
+
+test('handleSteerUri: a replayed URI (the claim already taken) does nothing the second time', async () => {
+  const h = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: last() });
+  setExtensionVersion('2.1.322');
+  const claimId = core.writeSteerClaim('once only');
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  vscode.__executed.length = 0;
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  assert.equal(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open'), false, 'the second, replayed call finds no claim');
+});
+
+test('handleSteerUri: a malformed claim id does nothing, never throws', async () => {
+  const h = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: last() });
+  setExtensionVersion('2.1.322');
+  await assert.doesNotReject(h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=not-a-claim-id', toString: () => '' }));
+  assert.equal(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open'), false);
 });
 
 test.after(() => cleanup());

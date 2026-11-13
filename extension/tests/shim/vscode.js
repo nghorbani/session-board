@@ -57,6 +57,7 @@ const api = {
   __statRejects: Object.create(null),   // fsPath -> error, so a test can make workspace.fs.stat fail for a path
   __statTypes: Object.create(null),     // fsPath -> FileType (default: File) for a path that should stat ok
   __statCalls: [],                      // every fsPath workspace.fs.stat was asked about, in order
+  __extensions: Object.create(null),    // extensionId -> { packageJSON: { version } }, what extensions.getExtension(id) returns
   __reset() {
     api.__providers.length = 0;
     api.__status.length = 0;
@@ -80,6 +81,7 @@ const api = {
     api.__answer = undefined;
     api.__pick = undefined;
     for (const k of Object.keys(api.__commands)) delete api.__commands[k];
+    for (const k of Object.keys(api.__extensions)) delete api.__extensions[k];
   },
   window: {
     state: { focused: true },
@@ -109,6 +111,9 @@ const api = {
   commands: {
     registerCommand: (id, fn) => { api.__commands[id] = fn; return disposable(); },
     executeCommand: async (id, ...args) => { api.__executed.push([id, ...args]); return undefined; },
+  },
+  extensions: {
+    getExtension: (id) => api.__extensions[id] || undefined,
   },
   env: {
     appRoot: '',
