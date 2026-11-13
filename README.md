@@ -42,8 +42,12 @@ shows background agents only, not the sessions you talk to.
   from its first question; ✎ suggests a new one from the recent prompts and the last answer
   (one short haiku call) and you confirm or edit it. The title is Claude Code's own, so its
   sidebar and `claude --resume` show it too, and a rename in Claude Code shows on the board.
-- **The session id.** Each row shows "Session f8005c0d"; a click folds out the full id, start
-  time, process and transcript path, each copyable, and search finds a session by its id.
+- **Ids you can copy.** Each row shows its agent name and "Session f8005c0d"; a click on
+  either copies it (the full id for the session). ⓘ folds out the start time, process and
+  transcript path, each copied by a click, and search finds a session by its id.
+- **Running, open or all.** A header switch shows only the running sessions, what Claude
+  Code's own list shows (the default: running plus ended ones not archived), or the archived
+  ones too.
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
 - **Archive a session.** ⤓ ends it the same way and keeps it off the board. It also moves
   the transcript out of Claude Code's project folder, so Claude Code's own session list drops

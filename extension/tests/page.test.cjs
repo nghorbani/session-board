@@ -101,10 +101,20 @@ test.before(async () => {
   await new Promise((res) => server.listen(PORT, '127.0.0.1', res));
   const cdpPort = await freePort();
   userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-page-chrome-'));
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + userDataDir, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
+  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + userDataDir, '--no-first-run', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // Chrome's own output, so a start that fails (seen on the release runner) says why
+  let chromeErr = '';
+  let chromeExit = null;
+  chrome.stderr.on('data', (d) => { chromeErr = (chromeErr + d.toString('utf8')).slice(-4000); });
+  chrome.on('exit', (code, signal) => { chromeExit = signal || code; });
+  chrome.on('error', (e) => { chromeErr += '\nspawn failed: ' + e.message; });
   let info = null;
   for (let i = 0; i < 100 && !info; i++) { try { info = await getJson('http://127.0.0.1:' + cdpPort + '/json/version'); } catch (_) { await sleep(200); } }
-  if (!info) throw new Error('Chrome did not open its debugging port');
+  if (!info) {
+    throw new Error('Chrome (' + CHROME + ') did not open its debugging port within 20 s'
+      + (chromeExit !== null ? '; it exited with ' + chromeExit : '; it is still running')
+      + '. Its last output:\n' + (chromeErr.trim().split(/\r?\n/).slice(-15).join('\n') || '(nothing)'));
+  }
   const ws = new WebSocket(info.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   cdp = new CDP(ws);
@@ -157,6 +167,9 @@ const SAMPLE = `(function () {
     prompts: window.__prompts || [],
     showSwitch: (function () { var b = document.querySelector('#showMode button[aria-pressed="true"]'); return b && document.getElementById('showMode').style.display !== 'none' ? b.getAttribute('data-show') : null; })(),
     endedRows: q('#sections .row.past[data-session]').map(function (r) { return r.getAttribute('data-session'); }),
+    archivedInSections: q('#sections .row[data-archived="1"]').map(function (r) { return r.getAttribute('data-session'); }),
+    archivedGroup: document.getElementById('g-archived').style.display !== 'none',
+    copyButtons: q('.row .iconbtn.copy').length,
     heads: q('#sections > .section > .section-head .n').map(function (n) { return n.textContent; }),
     sids: q('.row[data-session] .sid').map(function (b) { return b.closest('.row').getAttribute('data-session') + '=' + b.textContent; }),
     details: q('.row[data-session] .details').map(function (d) { return d.closest('.row').getAttribute('data-session') + '=' + d.textContent; }),
@@ -306,23 +319,6 @@ test('page: a failed restore on a search row click copies nothing and shows the 
   assert.match(s.notice, /unarchive failed: a different file is already at/);
   assert.equal(s.copied, null, 'nothing copied');
   assert.ok(s.chips >= 1, 'the row stays archived');
-  fake.search = { rows: [] };
-  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: null } });
-  await page.close();
-});
-
-test('page: ⧉ on a board-archived search row restores first, then copies', opts, async () => {
-  fake.calls.length = 0;
-  fake.snapshot = snapshotOf([]);
-  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, archived: true, archivedBy: 'board', snippets: [] }] };
-  fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: 'C:\\p\\x\\p.jsonl' } });
-  const page = await openPage();
-  await page.search('Old');
-  await page.until((x) => x.results.includes(P), 'the search row');
-  await page.click(rowSel(P) + ' .iconbtn.copy');
-  const s = await page.until((x) => x.copied === 'claude --resume ' + P, 'the copy after the restore');
-  assert.deepEqual(fake.calls.filter((c) => c.path.startsWith('/api/unarchive/')).map((c) => c.path), ['/api/unarchive/' + P]);
-  assert.equal(s.chips, 0, 'the chip went with the restore');
   fake.search = { rows: [] };
   fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: null } });
   await page.close();
@@ -514,19 +510,26 @@ test('page: an archive whose move failed shows the notice after the row has left
 
 // -- session id and details --------------------------------------------------------------
 
-test('page: every row shows "Session <first 8>"; a click folds out the details with the full id, start, pid, window and transcript; ⧉ copies; the row does not open', opts, async () => {
+test('page: every row shows "Session <first 8>", and a click copies the full id without opening the row; ⓘ folds out the details (full id, start, pid, window, transcript), where a click on a value copies it; no ⧉ resume copy', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Spike', 'idle', { startedAt: new Date(2026, 10, 9, 13, 5).getTime(), transcriptPath: 'C:\\p\\x\\' + A + '.jsonl', window: { id: 4, label: 'webapp' } })]);
   const page = await openPage();
   let s = await page.until((x) => x.rows.includes(A), 'the row');
-  assert.deepEqual([s.sids, s.details], [[A + '=Session ' + A.slice(0, 8)], []]);
+  assert.deepEqual([s.sids, s.details, s.copyButtons], [[A + '=Session ' + A.slice(0, 8)], [], 0]);
   await page.click(rowSel(A) + ' .sid');
-  s = await page.until((x) => x.details.length === 1, 'the details line');
-  assert.equal(s.details[0], A + '=id' + A + '⧉started2026-11-09 13:05 · pid100 · windowwebapptranscriptC:\\p\\x\\' + A + '.jsonl⧉');
+  s = await page.until((x) => x.copied === A, 'the full id copied');
+  assert.deepEqual(s.details, [], 'the id click folds out nothing');
   assert.equal(fake.calls.filter((c) => /^\/api\/(focus|seen)\//.test(c.path)).length, 0, 'the id click does not open the session');
+  await page.click(rowSel(A) + ' .iconbtn.info');
+  s = await page.until((x) => x.details.length === 1, 'the details line');
+  assert.equal(s.details[0], A + '=id' + A + 'started2026-11-09 13:05 · pid100 · windowwebapptranscriptC:\\p\\x\\' + A + '.jsonl');
+  await page.eval('window.__copied = null; true');
   await page.click(rowSel(A) + ' .details .copyval');
-  s = await page.until((x) => x.copied === A, 'the id copied');
-  await page.click(rowSel(A) + ' .sid');
+  s = await page.until((x) => x.copied === A, 'the id in the details copied');
+  await page.click(rowSel(A) + ' .details div:last-child .copyval');
+  s = await page.until((x) => x.copied === 'C:\\p\\x\\' + A + '.jsonl', 'the transcript path copied');
+  assert.equal(fake.calls.filter((c) => /^\/api\/(focus|seen)\//.test(c.path)).length, 0, 'copying never opens the session');
+  await page.click(rowSel(A) + ' .iconbtn.info');
   s = await page.until((x) => x.details.length === 0, 'folded again');
   await page.close();
 });
@@ -539,7 +542,8 @@ test('page: a search row shows its id too, and its details carry the transcript 
   await page.search('Old');
   let s = await page.until((x) => x.results.includes(P), 'the search row');
   assert.ok(s.sids.includes(P + '=Session ' + P.slice(0, 8)));
-  await page.click(rowSel(P) + ' .sid');
+  assert.equal(s.copyButtons, 0, 'no resume copy on a search row either');
+  await page.click(rowSel(P) + ' .iconbtn.info');
   s = await page.until((x) => x.details.length === 1, 'the details line');
   assert.ok(s.details[0].includes('transcriptC:\\t\\x\\p.jsonl'), s.details[0]);
   assert.equal(s.details[0].includes('pid'), false, 'no process for a past row');
@@ -636,12 +640,45 @@ test('page: typing filters running and ended rows and, after a pause, searches e
   await page.close();
 });
 
-test('page: a row without a title shows its agent name once', opts, async () => {
+test('page: a row without a title is headed by its last prompt, else "Untitled"; its agent name sits on the sub line and a click copies it without opening the row', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, null, 'idle', { name: 'cuvis-ai-37' })]);
+  fake.snapshot = snapshotOf([row(A, null, 'idle', { name: 'cuvis-ai-37' }), row(B, null, 'idle', { pid: 200, name: 'cuvis-ai-38', lastPrompt: 'fix the flaky test' })]);
   const page = await openPage();
-  const s = await page.until((x) => x.rows.length === 1, 'the row');
-  assert.deepEqual([s.agents, s.titles], [[], [A + '=cuvis-ai-37']]);
+  let s = await page.until((x) => x.rows.length === 2, 'the rows');
+  assert.deepEqual(s.titles.sort(), [A + '=Untitled', B + '=fix the flaky test'].sort());
+  assert.deepEqual(s.agents.sort(), [A + '=cuvis-ai-37', B + '=cuvis-ai-38'].sort());
+  await page.click(rowSel(A) + ' .agent');
+  s = await page.until((x) => x.copied === 'cuvis-ai-37', 'the name copied');
+  assert.equal(fake.calls.filter((c) => /^\/api\/(focus|seen)\//.test(c.path)).length, 0, 'copying does not open the session');
+  await page.close();
+});
+
+test('page: the switch offers running, open and all; open shows ended rows but no archived ones; all adds the archived ones (chips, ⤒ only where the board archived, no ⤓) and moves a running archived row into its section; the head counts all three', opts, async () => {
+  fake.calls.length = 0;
+  const runningArchived = row(C, 'Archived but running', 'idle', { pid: 300, archived: true, archivedBy: 'board' });
+  const archivedEnded = [
+    ended(D, 'Archived in Claude', { ageMinutes: 30, archived: true, archivedBy: 'claude-code' }),
+    ended(E, 'Archived here', { ageMinutes: 90, archived: true, archivedBy: 'board' }),
+  ];
+  const snap = (show) => snapshotOf([row(A, 'Running one', 'idle'), runningArchived], { ended: [ended(B, 'Recent ended', { ageMinutes: 20 })], archivedEnded: show === 'all' ? archivedEnded : [], order: { mode: 'activity', show } });
+  fake.snapshot = snap('open');
+  const page = await openPage();
+  let s = await page.until((x) => x.endedRows.length === 1, 'the open view');
+  assert.deepEqual(await page.eval('Array.prototype.map.call(document.querySelectorAll("#showMode button"), function (b) { return b.getAttribute("data-show"); })'), ['running', 'open', 'all']);
+  assert.deepEqual([s.showSwitch, s.archivedInSections, s.archivedGroup, s.heads], ['open', [], true, ['1 + 1 ended']], 'the running archived row waits in the bottom group');
+  await page.click('#showMode button[data-show="all"]');
+  await page.until(() => fake.calls.some((c) => c.path === '/api/order/show' && c.query === '?show=all'), 'the POST');
+  fake.snapshot = snap('all');
+  s = await page.until((x) => x.archivedInSections.length === 3, 'the archived rows');
+  assert.deepEqual(s.sections[0].rows, [A, B, C, D, E], 'running, ended, then archived newest first (the running archived row by its age)');
+  assert.deepEqual([s.showSwitch, s.archivedGroup, s.heads], ['all', false, ['1 + 1 ended + 3 archived']]);
+  assert.equal(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(D) + ' .iconbtn.unarchive') + ').length'), 0, 'Claude Code\'s archive is unarchived there');
+  assert.equal(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(E) + ' .iconbtn.unarchive') + ').length'), 1);
+  assert.equal(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(E) + ' .iconbtn.archive') + ').length'), 0, 'no ⤓ on an archived row');
+  assert.ok(s.chips >= 3, 'each archived row carries its chip');
+  await page.click('#showMode button[data-show="running"]');
+  s = await page.until((x) => x.endedRows.length === 0 && x.archivedInSections.length === 0, 'running hides both at once');
+  fake.snapshot = snapshotOf([]);
   await page.close();
 });
 
@@ -824,10 +861,14 @@ test('page: the agent name other sessions use shows on the row and in the detail
   let s = await page.until((x) => x.rows.length === 4, 'the rows');
   assert.deepEqual(s.agents.sort(), [A + '=cuvis-ai-6c', D + '=<i>x</i>'].sort());
   assert.equal(await page.eval('document.querySelectorAll(".row .agent i").length'), 0, 'rendered as text');
-  await page.click(rowSel(A) + ' .sid');
+  await page.click(rowSel(A) + ' .agent');
+  s = await page.until((x) => x.copied === 'cuvis-ai-6c', 'the name on the row copies');
+  await page.click(rowSel(A) + ' .iconbtn.info');
   s = await page.until((x) => x.details.length === 1, 'the details line');
-  assert.ok(s.details[0].includes('agentcuvis-ai-6c⧉'), s.details[0]);
-  await page.click(rowSel(A) + ' .details .copyval:nth-of-type(1)');
+  assert.ok(s.details[0].includes('agentcuvis-ai-6c'), s.details[0]);
+  await page.eval('window.__copied = null; true');
+  await page.click(rowSel(A) + ' .details div:nth-child(2) .copyval');
+  s = await page.until((x) => x.copied === 'cuvis-ai-6c', 'the name in the details copies');
   await page.close();
 });
 

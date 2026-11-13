@@ -35,25 +35,30 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   archived stays in its section, however long it has been idle; a click on the heading folds
   the whole section.
 - **Ended sessions stay until you archive them**, like Claude Code's own session list: under
-  the running ones, each window section lists the ended sessions of its folder and of that
-  repository's git worktrees that are not archived (in Claude Code or here), newest first,
-  marked "ended", "Untitled" when they have no title. The heading reads `1 + 18 ended`. A click
-  resumes one in its window; ⤓ archives it (the transcript moves to the board's archive, so
-  Claude Code's list drops it too, and search still finds it). A worktree open in a window of
-  its own shows its sessions there, once.
-- **all | running**: the switch in the header hides the ended sessions (board-wide, like the
-  order switch).
+  the running ones, each window section lists the ended sessions of its folder that are not
+  archived (in Claude Code or here), newest first, marked "ended", "Untitled" when they have
+  no title. Like Claude Code, it leaves out sessions run by scripts (`claude -p`, the SDK)
+  unless `claudeCode.claudeProcessWrapper` is set, and a git worktree's sessions show in a
+  window opened on that worktree. The heading reads `1 + 18 ended`. A click resumes one in its
+  window; ⤓ archives it (the transcript moves to the board's archive, so Claude Code's list
+  drops it too, and search still finds it).
+- **running | open | all**: the switch in the header picks what the sections hold, board-wide
+  like the order switch. running: only the running sessions. open (the default): what Claude
+  Code lists, the running sessions and the ended ones that are not archived. all: the
+  archived ones too, after the ended ones, each with its chip ("archived" here or "archived
+  in Claude Code"); ⤒ brings back one the board archived, and a click resumes any of them.
 - **A typed filter says so**: while the search box holds text, a line above the sections reads
   `Filter "cuvis-ai-6c": 1 of 17 sessions`, with a clear button (Esc does the same).
 - **The number on a heading** counts the sessions in that section that wait for you (amber)
   or are unseen (green). It goes down as you answer or open them.
 - Each row: the session's title (Claude Code's: a rename wins over the generated title; a
-  session with neither shows its last prompt), "Session" and the first 8 characters of its
-  id, its folder, status, a context bar, and time in that state. When the session's agent
-  name (the one other Claude sessions use for it, such as `cuvis-ai-6c`) differs from its
-  title, it shows before the id. A click on the id folds out a details line: the full id, the
-  agent name, when the session started, its process, its window and its transcript path; ⧉
-  copies the id, the name or the path. Search finds a session by its id, typed bare or as Claude Code shows it
+  session with neither shows its last prompt, else "Untitled"), its agent name (the one other
+  Claude sessions use for it, such as `cuvis-ai-6c`, when it differs from the title),
+  "Session" and the first 8 characters of its id, its folder, status, a context bar, and time
+  in that state. **A click on an id copies it**: the agent name copies the name, "Session
+  f8005c0d" copies the full id. ⓘ folds out a details line: the full id, the agent name, when
+  the session started, its process, its window and its transcript path; a click on a value
+  copies it. Search finds a session by its id, typed bare or as Claude Code shows it
   (`Session f8005c0d`).
 - **Muted**: a muted session stays in its place in its window section, marked "muted" and
   dimmed, waiting or not. It raises no toast and no notification and counts nowhere: not on
@@ -88,7 +93,6 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 - **Click a row**: the session opens where you keep Claude Code (sidebar or editor tab), in
   the window that owns it, and that window comes to the front. Without a mapped window the
   resume command is copied instead.
-- **⧉** copies `claude --resume <id>` (a transcript the board stowed comes back first).
 - **✎ renames the session in Claude Code** with a title suggested from its progress so far:
   one short haiku call over the recent prompts and the last answer (a few KB of the
   transcript, passed through your own `claude` command the way a prompt would be), hook-free
@@ -114,8 +118,8 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   off the board afterwards. It also moves the transcript from `~/.claude/projects` to
   `%LOCALAPPDATA%\SessionBoard\transcripts`, so Claude Code's session list drops it at its
   next refresh. If it runs again later (a resume), it comes back on its own only when it is
-  waiting for you; "Show N archived" lists the others, and ⤒, a click on the row or ⧉ brings
-  one back, transcript first. While a transcript is stowed, `claude --resume <id>` and
+  waiting for you; "Show N archived" lists the others (with "all" they sit in their window
+  section), and ⤒ or a click on the row brings one back, transcript first. While a transcript is stowed, `claude --resume <id>` and
   Claude Code's own picker do not find the session. A session archived in Claude Code's
   sidebar is put away here too, with the chip "archived in Claude Code"; unarchive it there.
   That flag is read from VS Code's default profile; other profiles, portable installs and

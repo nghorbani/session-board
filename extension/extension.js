@@ -82,7 +82,7 @@ class BoardProvider {
       switch (m.type) {
         case 'refresh': return await this.refresh();
         case 'open': if (core.UUID_RE.test(sid)) return await this.openSession(sid); return;
-        case 'copy': if (core.UUID_RE.test(sid)) return await this.copyResume(sid); return;
+        case 'copy': if (core.UUID_RE.test(sid)) return await this.copyResume(sid); return;   // a click that cannot open the session
         case 'copyText': return await this.copyText(m.text);
         case 'end': if (core.UUID_RE.test(sid)) return await this.endSession(sid, Boolean(m.force), Boolean(m.archive)); return;
         case 'unarchive': if (core.UUID_RE.test(sid)) return await this.unarchive(sid); return;
@@ -105,7 +105,7 @@ class BoardProvider {
     }
   }
 
-  /** The resume command; a transcript the board stowed is brought back first, or nothing is copied. */
+  /** The resume command, where a click cannot open the session; a transcript the board stowed is brought back first, or nothing is copied. */
   async copyResume(sid) {
     if (core.stowedTranscripts(sid).length) {
       try {
@@ -195,7 +195,8 @@ class BoardProvider {
     const mySeq = ++this.seq;
     this.beat();
     try {
-      const snap = await core.snapshot();
+      // Claude Code lists programmatic sessions (claude -p, SDK runs) only with a process wrapper set; the board follows.
+      const snap = await core.snapshot({ includeProgrammatic: Boolean(vscode.workspace.getConfiguration('claudeCode').get('claudeProcessWrapper')) });
       if (mySeq === this.seq) {          // an older result never overwrites a newer one
         snap.thisWindowId = core.windowIdForExthost(process.pid) || null;   // the page lists this window's section first
         this.last = snap;
@@ -487,7 +488,7 @@ class BoardProvider {
     this.schedule(0);
   }
 
-  /** The header's "all | running" switch: the board-wide file; every window follows with its next snapshot. */
+  /** The header's "running | open | all" switch: the board-wide file; every window follows with its next snapshot. */
   setShowMode(show) {
     let ok = true;
     let message = '';

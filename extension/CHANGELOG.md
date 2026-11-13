@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.3
+
+- Three filters in the header instead of two: running (only the running sessions), open (the default: what Claude Code's own list shows, the running sessions and the ended ones that are not archived) and all (the archived sessions too, each with its chip; ⤒ brings back one the board archived)
+- The ended sessions match Claude Code's list: a window lists its own folder only, no longer the folders of the repository's git worktrees, and leaves out sessions run by scripts (`claude -p`, the SDK) unless `claudeCode.claudeProcessWrapper` is set. 0.11.2 listed those too, and since Claude Code never lists them it never archived them either
+- A click on an id copies it: the agent name copies the name, "Session f8005c0d" copies the full id, and every value in the details line copies itself. The details line opens with ⓘ
+- The ⧉ button that copied `claude --resume <id>` is gone. A click that cannot open a session (no window for it, the browser page) still copies the resume command
+- A running session without a title is headed by its last prompt, else "Untitled"; its agent name sits next to the id
+- Reload every VS Code window after the update: a window still on 0.11.2 that switches to "all" makes the other windows show "open"
+
 ## 0.11.2
 
 - Ended sessions stay on the board until you archive them, like Claude Code's own session list: each window section lists, under its running sessions, the ended ones of its folder and of that repository's worktrees that are not archived (in Claude Code or on the board), newest first, marked "ended". A click resumes one; ⤓ archives it

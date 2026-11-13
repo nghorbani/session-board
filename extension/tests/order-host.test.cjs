@@ -57,21 +57,36 @@ test('the posted snapshot carries order.mode and rank as core gives them', async
 test('showMode and archivePast messages call core and post their results; a moved-nowhere archive warns', async () => {
   const calls = [];
   const { provider, posted } = boot({
-    setShowMode: (show) => { if (show !== 'all' && show !== 'running') throw new Error('unknown show mode: ' + show); calls.push(['show', show]); return show; },
+    setShowMode: (show) => { if (!['running', 'open', 'all'].includes(show)) throw new Error('unknown show mode: ' + show); calls.push(['show', show]); return show; },
     archivePast: async (sid) => { calls.push(['archive', sid]); return sid === A ? { ok: true, moved: false, moveError: 'the archive folder is on another volume' } : { ok: false, code: 'running', message: 'the session is running; end it first' }; },
   });
   let scheduled = 0;
   provider.schedule = () => { scheduled++; };
   await provider.onMessage({ type: 'showMode', show: 'running' });
+  await provider.onMessage({ type: 'showMode', show: 'open' });
   await provider.onMessage({ type: 'showMode', show: 'x' });
   await provider.onMessage({ type: 'archivePast', sessionId: A });
   await provider.onMessage({ type: 'archivePast', sessionId: B });
   await provider.onMessage({ type: 'archivePast', sessionId: 'nope' });
-  assert.deepEqual(calls, [['show', 'running'], ['archive', A], ['archive', B]]);
-  assert.deepEqual(posted.filter((m) => m.type === 'showModeResult').map((m) => [m.ok, m.show]), [[true, 'running'], [false, null]]);
+  assert.deepEqual(calls, [['show', 'running'], ['show', 'open'], ['archive', A], ['archive', B]]);
+  assert.deepEqual(posted.filter((m) => m.type === 'showModeResult').map((m) => [m.ok, m.show]), [[true, 'running'], [true, 'open'], [false, null]]);
   assert.deepEqual(posted.filter((m) => m.type === 'archivePastResult').map((m) => [m.sessionId, m.ok, m.message]), [[A, true, ''], [B, false, 'the session is running; end it first']]);
   assert.ok(vscode.__warnings.some((w) => /transcript not moved: the archive folder is on another volume/.test(w)));
-  assert.equal(scheduled, 4);
+  assert.equal(scheduled, 5);
+});
+
+test('the host asks core for programmatic sessions only when Claude Code shows them (claudeCode.claudeProcessWrapper set)', async () => {
+  const asked = [];
+  const { provider } = boot({
+    snapshot: async (opts) => { asked.push(Boolean(opts && opts.includeProgrammatic)); return { sessions: [], ended: [], order: { mode: 'activity', show: 'open' }, limits: {}, usage: null }; },
+    windowIdForExthost: () => 1,
+    refreshUsageIfStale: () => null,
+  });
+  provider.schedule = () => {};
+  await provider.refresh();
+  vscode.__config['claudeCode.claudeProcessWrapper'] = 'C:/tools/wrap.cmd';
+  try { await provider.refresh(); } finally { delete vscode.__config['claudeCode.claudeProcessWrapper']; }
+  assert.deepEqual(asked, [false, true]);
 });
 
 test.after(() => cleanup());

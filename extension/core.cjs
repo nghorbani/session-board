@@ -423,7 +423,7 @@ const HEARTBEAT_KEEP_MS = 24 * 60 * 60 * 1000;   // an older record belongs to a
 /**
  * One record per host and extension id; `name` is the window's workspace name, so other boards
  * can label its section; `focused` says whether that VS Code window has the OS focus, so the
- * other boards leave a notification to it; `root` is its first workspace folder (endedSessions).
+ * other boards leave a notification to it; `root` is its first workspace folder (listedSessions).
  */
 function writeHeartbeat(exthostPid, extensionId, name, focused, version, root) {
   const id = EXTENSION_ID_RE.test(String(extensionId || '')) ? extensionId : EXTENSION_ID;
@@ -515,96 +515,150 @@ function heartbeatNames() {
 // ---------------------------------------------------------------------------------------
 
 /*
- * Claude Code lists, per window, the sessions of its project root (the first workspace folder)
- * and of that repository's git worktrees: every top-level <id>.jsonl in their folders under
- * ~/.claude/projects that is not in its archive, running or not. Each board writes its root into
- * its heartbeat; endedSessions() turns every fresh heartbeat into that folder set and returns the
- * transcripts there that are not running and not archived (in Claude Code or on the board), each
- * with the window it belongs to:
+ * Claude Code (2.1.322, 2.1.323) lists, per window, the sessions in the folder of its project
+ * root (the first workspace folder) under ~/.claude/projects, also under the root's real path:
+ * every top-level <id>.jsonl there that is not in its archive and not programmatic. A git
+ * worktree has a folder of its own and shows only in a window opened on it. Each board writes
+ * its root into its heartbeat; listedSessions() turns every fresh heartbeat into that folder set
+ * and sorts each transcript there once:
  *
- *   heartbeat { root } ──▶ worktreesOf(root) (git, background, 60 s) ──▶ folder names
- *   transcriptsByFolder() (one directory walk per 60 s) ──▶ candidates per folder
- *   drop: running, Claude-archived, board-archived, no user message ──▶ rows, newest first
+ *   heartbeat { root } ──▶ folder keys of root and realpath(root)
+ *   transcriptsByFolder() (one walk per 60 s: live and stowed maps) ──▶ candidates per folder
+ *   skip: running, programmatic (unless Claude Code shows them), no user message
+ *   archived in Claude Code, on the board, or stowed ──▶ `archived` (only when asked for)
+ *   else                                             ──▶ `ended`
  *
- * A session two windows would list (a worktree open in a window of its own) goes to the window
- * whose root is its folder, else the window of the repository's main folder, else the lower
- * window id. Until git has answered for a root, its window lists the root folder alone.
+ * A folder two heartbeats share goes to the lower window id; an id in two places shows once,
+ * from its newest file.
  */
-const WORKTREE_TTL_MS = 60000;
-const worktreeCache = new Map();   // root -> { at, roots: [paths] | null, running }
 
 /** The folder name Claude Code uses under ~/.claude/projects: every character outside [A-Za-z0-9] becomes "-". */
 function projectFolderName(p) { return String(p || '').replace(/[^A-Za-z0-9]/g, '-'); }
 function folderKey(name) { return IS_WINDOWS ? String(name).toLowerCase() : String(name); }
 
-/** The worktree paths of the repository at `root` (main first), or null until git has answered; refreshed in the background. */
-function worktreesOf(root) {
-  if (process.env.SB_WORKTREES) {   // tests: { root: [paths] }
-    try { const m = JSON.parse(process.env.SB_WORKTREES); return Array.isArray(m[root]) ? m[root] : null; } catch (_) { return null; }
+/** The folder keys of a window root: its own path and, when it differs, its real path. */
+function rootFolderKeys(root) {
+  const keys = [folderKey(projectFolderName(root))];
+  let real = null;
+  try { real = fs.realpathSync.native(root); } catch (_) { /* gone or unreadable: the path as given */ }
+  if (real) {
+    const k = folderKey(projectFolderName(real));
+    if (!keys.includes(k)) keys.push(k);
   }
-  let c = worktreeCache.get(root);
-  if (!c) { c = { at: 0, roots: null, running: false }; worktreeCache.set(root, c); }
-  if (!c.running && Date.now() - c.at > WORKTREE_TTL_MS) {
-    c.running = true;
-    execFile('git', ['-C', root, 'worktree', 'list', '--porcelain', '-z'], {
-      timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024, env: strippedEnv(),
-    }, (err, stdout) => {
-      c.running = false;
-      c.at = Date.now();
-      if (err) { if (!c.roots) c.roots = []; return; }   // not a repository, or git missing: the root alone
-      const NUL = String.fromCharCode(0);
-      c.roots = String(stdout || '').split(NUL).filter((l) => l.startsWith('worktree ')).map((l) => l.slice('worktree '.length));
-    });
-  }
-  return c.roots;
+  return keys;
 }
 
-let folderCache = { at: 0, map: new Map() };
+let folderCache = { at: 0, live: new Map(), stowed: new Map() };
 
-/** The live root's transcripts grouped by folder key, rebuilt at most once per INDEX_TTL_MS. */
+/** Transcripts grouped by folder key, live ones and the board's stowed ones apart; rebuilt at most once per INDEX_TTL_MS. */
 function transcriptsByFolder() {
-  if (Date.now() - folderCache.at < INDEX_TTL_MS) return folderCache.map;
+  if (Date.now() - folderCache.at < INDEX_TTL_MS) return folderCache;
   const liveRoot = transcriptRoots()[0];
-  const map = new Map();
+  const live = new Map();
+  const stowed = new Map();
   for (const f of listTranscripts()) {
-    if (liveRoot && !isInside(f.path, liveRoot)) continue;   // stowed transcripts are board-archived
+    const map = liveRoot && isInside(f.path, liveRoot) ? live : stowed;   // the other root is the board archive
     const key = folderKey(path.basename(path.dirname(f.path)));
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(f);
   }
-  folderCache = { at: Date.now(), map };
-  return map;
+  folderCache = { at: Date.now(), live, stowed };
+  return folderCache;
 }
 
-const headCache = new Map();   // file -> { key, cwd, hasUser }
+/** The JSON string that starts at text[start] (after its opening quote), or undefined when it does not close. */
+function jsonStringAt(text, start) {
+  let i = start;
+  while (i < text.length) {
+    if (text[i] === '\\') { i += 2; continue; }
+    if (text[i] === '"') {
+      try { return JSON.parse('"' + text.slice(start, i) + '"'); } catch (_) { return text.slice(start, i); }
+    }
+    i++;
+  }
+  return undefined;
+}
 
-/** The session's cwd and whether it has a user message, from the first 64 KB; cached until the file changes. */
+/** The first string value of "key" in text ("key":"v" or "key": "v"), as Claude Code reads a head. */
+function firstValue(text, key) {
+  for (const p of ['"' + key + '":"', '"' + key + '": "']) {
+    const at = text.indexOf(p);
+    if (at === -1) continue;
+    const v = jsonStringAt(text, at + p.length);
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+/** The last string value of "key" in text, as Claude Code reads a tail. */
+function lastValue(text, key) {
+  let best;
+  let bestAt = -1;
+  for (const p of ['"' + key + '":"', '"' + key + '": "']) {
+    const at = text.lastIndexOf(p);
+    if (at > bestAt) {
+      const v = jsonStringAt(text, at + p.length);
+      if (v !== undefined) { best = v; bestAt = at; }
+    }
+  }
+  return best;
+}
+
+const HEAD_BYTES = 64 * 1024;
+const PROGRAMMATIC_ENTRYPOINTS = new Set(['sdk-cli', 'sdk-ts', 'sdk-py']);
+const DAEMON_KINDS = new Set(['daemon', 'daemon-worker']);
+
+function readSlice(file, start, length) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(Math.max(0, length));
+    const n = buf.length ? fs.readSync(fd, buf, 0, buf.length, start) : 0;
+    return buf.toString('utf8', 0, n);
+  } finally { fs.closeSync(fd); }
+}
+
+const headCache = new Map();   // file -> { key, cwd, hasUser, programmatic }
+
+/**
+ * The session's cwd, whether it has a user message, and whether Claude Code counts it as
+ * programmatic (its list hides those): an `entrypoint` of sdk-cli, sdk-ts or sdk-py, read from
+ * the head, else the last one in the tail; or a `sessionKind` of daemon or daemon-worker on the
+ * first line that has a parentUuid. Head and tail are 64 KB each; cached until the file changes.
+ */
 function headFacts(file, size, mtime) {
   const key = size + ':' + mtime;
   const hit = headCache.get(file);
   if (hit && hit.key === key) return hit;
-  let text = '';
-  try {
-    const fd = fs.openSync(file, 'r');
-    try {
-      const buf = Buffer.alloc(Math.min(Number(size) || 0, 64 * 1024));
-      const n = buf.length ? fs.readSync(fd, buf, 0, buf.length, 0) : 0;
-      text = buf.toString('utf8', 0, n);
-    } finally { fs.closeSync(fd); }
-  } catch (_) { /* unreadable: no prompt, no cwd */ }
-  let cwd = null;
-  const at = text.indexOf('"cwd":"');
-  if (at !== -1) {
-    const end = text.indexOf('"', at + 7);
-    if (end !== -1) { try { cwd = JSON.parse(text.slice(at + 6, end + 1)); } catch (_) { cwd = null; } }
+  const bytes = Number(size) || 0;
+  let head = '';
+  try { head = readSlice(file, 0, Math.min(bytes, HEAD_BYTES)); } catch (_) { /* unreadable: no prompt, no cwd */ }
+  let entry = firstValue(head, 'entrypoint');
+  if (entry === undefined && bytes > HEAD_BYTES) {
+    try { entry = lastValue(readSlice(file, bytes - HEAD_BYTES, HEAD_BYTES), 'entrypoint'); } catch (_) { /* tail unreadable: not programmatic */ }
   }
-  const rec = { key, cwd, hasUser: text.indexOf('"type":"user"') !== -1 };
+  const first = head.split('\n').find((l) => l.includes('"parentUuid":')) || head;
+  const kind = firstValue(first, 'sessionKind');
+  const cwd = firstValue(head, 'cwd');
+  const rec = {
+    key,
+    cwd: cwd === undefined ? null : cwd,
+    hasUser: head.indexOf('"type":"user"') !== -1,
+    programmatic: PROGRAMMATIC_ENTRYPOINTS.has(entry) || DAEMON_KINDS.has(kind),
+  };
   headCache.set(file, rec);
   return rec;
 }
 
-/** The ended, unarchived sessions of every window with a fresh board heartbeat that names its root. */
-function endedSessions(liveIds, claudeIds, archivedIds) {
+/**
+ * The sessions of every window with a fresh board heartbeat that names its root, as Claude Code
+ * lists them: { ended, archived }. `ended` holds the ones not running and not archived;
+ * `archived` (only with opts.withArchived) the ones archived in Claude Code or on the board,
+ * stowed transcripts included. Programmatic sessions are skipped unless opts.includeProgrammatic
+ * (Claude Code shows them when claudeCode.claudeProcessWrapper is set).
+ */
+function listedSessions(liveIds, claudeIds, boardIds, opts) {
+  const withArchived = Boolean(opts && opts.withArchived);
+  const includeProgrammatic = Boolean(opts && opts.includeProgrammatic);
   const windows = [];
   const seen = new Set();
   for (const { rec } of readHeartbeats()) {
@@ -613,48 +667,51 @@ function endedSessions(liveIds, claudeIds, archivedIds) {
     const windowId = windowIdForExthost(Number(rec.pid));
     if (!windowId || seen.has(windowId)) continue;
     seen.add(windowId);
-    const roots = worktreesOf(rec.root) || [];
-    const rootKey = folderKey(projectFolderName(rec.root));
-    const mainKey = roots.length ? folderKey(projectFolderName(roots[0])) : rootKey;
-    const keys = new Set([rootKey].concat(roots.map((r) => folderKey(projectFolderName(r)))));
     const name = typeof rec.name === 'string' && rec.name && !/^Untitled\b/.test(rec.name) ? rec.name : path.basename(rec.root);
-    windows.push({ windowId, exthostPid: Number(rec.pid), label: name, rootKey, mainKey, keys });
+    windows.push({ windowId, exthostPid: Number(rec.pid), label: name, keys: rootFolderKeys(rec.root) });
   }
-  if (!windows.length) return [];
+  if (!windows.length) return { ended: [], archived: [] };
   windows.sort((a, b) => a.windowId - b.windowId);
-  const owner = (key) => windows.find((w) => w.rootKey === key)
-    || windows.find((w) => w.keys.has(key) && w.rootKey === w.mainKey)
-    || windows.find((w) => w.keys.has(key));
+  const owner = new Map();   // folder key -> window; a folder two windows share goes to the lower id
+  for (const w of windows) for (const k of w.keys) if (!owner.has(k)) owner.set(k, w);
   const folders = transcriptsByFolder();
-  const keys = new Set();
-  for (const w of windows) for (const k of w.keys) keys.add(k);
-  const best = new Map();   // sessionId -> { f, w }; one id in two folders: the newest file
-  for (const key of keys) {
-    const w = owner(key);
-    for (const f of folders.get(key) || []) {
-      const id = path.basename(f.path, '.jsonl');
-      if (!UUID_RE.test(id) || liveIds.has(id) || claudeIds.has(id) || archivedIds.has(id)) continue;
-      const prev = best.get(id);
-      if (!prev || f.mtime > prev.f.mtime) best.set(id, { f, w });
+  const best = new Map();   // sessionId -> { f, w, stowed }; one id in two places: the newest file
+  for (const [key, w] of owner) {
+    for (const [list, stowed] of [[folders.live.get(key), false], [folders.stowed.get(key), true]]) {
+      for (const f of list || []) {
+        const id = path.basename(f.path, '.jsonl');
+        if (!UUID_RE.test(id) || liveIds.has(id)) continue;
+        const prev = best.get(id);
+        if (!prev || f.mtime > prev.f.mtime) best.set(id, { f, w, stowed });
+      }
     }
   }
   const now = Date.now();
-  const out = [];
-  for (const [id, { f, w }] of best) {
+  const ended = [];
+  const archived = [];
+  for (const [id, { f, w, stowed }] of best) {
+    const onBoard = boardIds.has(id) || stowed;
+    const inClaude = claudeIds.has(id);
+    const isArchived = onBoard || inClaude;
+    if (isArchived && !withArchived) continue;                 // decided before any read
     const head = headFacts(f.path, f.size, f.mtime);
+    if (head.programmatic && !includeProgrammatic) continue;
     const facts = transcriptFacts(id, f.path);
     if (!head.hasUser && !facts.title && !facts.customTitle && !facts.lastPrompt) continue;
-    out.push({
+    const row = {
       sessionId: id, status: 'ended', live: false,
       window: { id: w.windowId, exthostPid: w.exthostPid, label: w.label },
       title: facts.customTitle || facts.title || null, renamedTitle: facts.customTitle || null, generatedTitle: facts.title || null,
       lastPrompt: facts.lastPrompt, cwd: head.cwd || '', transcriptPath: f.path, path: f.path,
       folder: path.basename(path.dirname(f.path)), ageMinutes: Math.max(0, Math.round((now - f.mtime) / 60000)),
-      hasTranscript: true, archived: false,
-    });
+      hasTranscript: true,
+      archived: isArchived, archivedBy: onBoard && inClaude ? 'both' : onBoard ? 'board' : inClaude ? 'claude-code' : null,
+    };
+    (isArchived ? archived : ended).push(row);
   }
-  out.sort((a, b) => a.ageMinutes - b.ageMinutes);
-  return out;
+  ended.sort((a, b) => a.ageMinutes - b.ageMinutes);
+  archived.sort((a, b) => a.ageMinutes - b.ageMinutes);
+  return { ended, archived };
 }
 
 let installedCache = { at: 0, ids: null };
@@ -1034,7 +1091,7 @@ function applyArchive(sessionId, result, archive) {
  * a forced read every CLAUDE_ARCHIVE_TTL_MS in case a rewrite kept both mtime and size. A
  * failed read keeps the previous ids, reports `error`, and retries on the next call.
  */
-let claudeArchive = { key: null, at: 0, ids: new Set(), error: null };
+let claudeArchive = { key: null, at: 0, ids: new Set(), error: null, known: false };   // known: one read has succeeded
 let sqliteModule;   // undefined until tried, null when this Node has no node:sqlite
 
 function loadSqlite() {
@@ -1052,33 +1109,33 @@ function hiddenIdsFromBlob(value) {
   return ids;
 }
 
-/** Claude Code's archived ids: { ids: Set, error: string|null }. Never throws. */
+/** Claude Code's archived ids: { ids: Set, error: string|null, known: boolean }; known is false until one read succeeded. Never throws. */
 function readClaudeArchived() {
   const now = Date.now();
   let st;
   try { st = fs.statSync(CLAUDE_CODE_STATE_DB); } catch (_) {
-    claudeArchive = { key: null, at: now, ids: new Set(), error: null };   // no VS Code state here: nothing archived
-    return { ids: claudeArchive.ids, error: null };
+    claudeArchive = { key: null, at: now, ids: new Set(), error: null, known: true };   // no VS Code state here: nothing archived
+    return { ids: claudeArchive.ids, error: null, known: true };
   }
   const key = st.mtimeMs + ':' + st.size;
-  if (claudeArchive.key === key && now - claudeArchive.at < CLAUDE_ARCHIVE_TTL_MS) return { ids: claudeArchive.ids, error: claudeArchive.error };
+  if (claudeArchive.key === key && now - claudeArchive.at < CLAUDE_ARCHIVE_TTL_MS) return { ids: claudeArchive.ids, error: claudeArchive.error, known: claudeArchive.known };
   const sqlite = loadSqlite();
   if (!sqlite) {
-    claudeArchive = { key, at: now, ids: claudeArchive.ids, error: 'node:sqlite unavailable (Node ' + process.versions.node + ')' };
-    return { ids: claudeArchive.ids, error: claudeArchive.error };
+    claudeArchive = { key, at: now, ids: claudeArchive.ids, error: 'node:sqlite unavailable (Node ' + process.versions.node + ')', known: claudeArchive.known };
+    return { ids: claudeArchive.ids, error: claudeArchive.error, known: claudeArchive.known };
   }
   let db = null;
   try {
     db = new sqlite.DatabaseSync(CLAUDE_CODE_STATE_DB, { readOnly: true });
     db.exec('PRAGMA busy_timeout = 100');
     const row = db.prepare('SELECT value FROM ItemTable WHERE key IN (?, ?) LIMIT 1').get(CLAUDE_CODE_STATE_KEYS[0], CLAUDE_CODE_STATE_KEYS[1]);
-    claudeArchive = { key, at: now, ids: row ? hiddenIdsFromBlob(row.value) : new Set(), error: null };
+    claudeArchive = { key, at: now, ids: row ? hiddenIdsFromBlob(row.value) : new Set(), error: null, known: true };
   } catch (e) {
-    claudeArchive = { key: null, at: now, ids: claudeArchive.ids, error: String((e && e.message) || e) };   // key null: the next call retries
+    claudeArchive = { key: null, at: now, ids: claudeArchive.ids, error: String((e && e.message) || e), known: claudeArchive.known };   // key null: the next call retries
   } finally {
     if (db) { try { db.close(); } catch (_) { /* already closed */ } }
   }
-  return { ids: claudeArchive.ids, error: claudeArchive.error };
+  return { ids: claudeArchive.ids, error: claudeArchive.error, known: claudeArchive.known };
 }
 
 /** The union flag of a row and where it comes from: board, claude-code, both or null. */
@@ -1272,25 +1329,29 @@ function setSortMode(mode) {
 }
 
 /*
- * The header's "all | running" switch: all shows the ended, unarchived sessions of each window
- * under its running ones (Claude Code's list); running hides them. Board-wide like the order,
- * in DATA_DIR/show.json (tmp then rename); a missing or unreadable file means all.
+ * The header's "running | open | all" switch, board-wide like the order, in DATA_DIR/show.json
+ * (tmp then rename): running shows only the running sessions; open adds the ended ones Claude
+ * Code still lists (not archived); all adds the archived ones too. A missing or unreadable file
+ * means open. 0.11.2 wrote { show } without a version and had two modes, all and running; its
+ * "all" is today's "open". Boards of 0.11.2 read every value but "running" as their all.
  */
 const SHOW_FILE = path.join(DATA_DIR, 'show.json');
-const SHOW_MODES = ['all', 'running'];
+const SHOW_MODES = ['running', 'open', 'all'];
+const SHOW_VERSION = 2;
 
 function readShowMode() {
   try {
     const rec = JSON.parse(fs.readFileSync(SHOW_FILE, 'utf8'));
-    return rec && rec.show === 'running' ? 'running' : 'all';
-  } catch (_) { return 'all'; }
+    if (rec && rec.v === SHOW_VERSION && SHOW_MODES.includes(rec.show)) return rec.show;
+    return rec && rec.show === 'running' ? 'running' : 'open';
+  } catch (_) { return 'open'; }
 }
 
 function setShowMode(show) {
   if (!SHOW_MODES.includes(show)) throw new Error('unknown show mode: ' + String(show));
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = SHOW_FILE + '.tmp.' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify({ show, at: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ show, v: SHOW_VERSION, at: Date.now() }));
   fs.renameSync(tmp, SHOW_FILE);
   return show;
 }
@@ -1977,7 +2038,8 @@ let lastSnapshot = null;  // last enriched snapshot, used by search for the live
 function lastGoodRows() { return (lastGood && lastGood.rows) || []; }
 function lastSnapshotRows() { return (lastSnapshot && lastSnapshot.sessions) || []; }
 
-async function snapshot() {
+async function snapshot(opts) {
+  const includeProgrammatic = Boolean(opts && opts.includeProgrammatic);   // the host reads Claude Code's setting
   const limits = thresholds();
   let rows;
   let stale = false;
@@ -2078,8 +2140,14 @@ async function snapshot() {
   });
 
   if (!stale) lastGood = { rows, at: now };
-  const ended = endedSessions(liveIds, claude.ids, archived);
-  lastSnapshot = { at: now, stale, error, limits, platform: process.platform, sessions, ended, order: { mode: sortMode, show: showMode }, usage: safeUsage(), claudeArchiveError: claude.error };
+  // Until Claude Code's archive has been read once, every session it archived would look ended: list none.
+  const listed = claude.known === false ? { ended: [], archived: [] }
+    : listedSessions(liveIds, claude.ids, archived, { withArchived: showMode === 'all', includeProgrammatic });
+  lastSnapshot = {
+    at: now, stale, error, limits, platform: process.platform, sessions,
+    ended: listed.ended, archivedEnded: listed.archived,
+    order: { mode: sortMode, show: showMode }, usage: safeUsage(), claudeArchiveError: claude.error,
+  };
   return lastSnapshot;
 }
 
@@ -2550,9 +2618,10 @@ module.exports = {
   readSortMode,
   setSortMode,
   SHOW_FILE,
+  SHOW_MODES,
   readShowMode,
   setShowMode,
-  endedSessions,
+  listedSessions,
   projectFolderName,
   archivePast,
   CODE_USER_DIR,

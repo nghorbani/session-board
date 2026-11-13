@@ -138,9 +138,12 @@ installed.
 - `order.test.cjs`: the order store (`setOrder()` checks the whole list before the first
   write, `readOrder()`), the sort-mode file, pruning shared with the muted store, and
   `rank` and `order.mode` on the snapshot.
-- `order-host.test.cjs`: the `order`, `sortMode`, `showMode` and `archivePast` messages and their replies.
-- `ended.test.cjs`: `endedSessions()` (folders from the heartbeat root and its worktrees, what is
-  left out, which window owns a session, a root without git), the show store, `archivePast()`.
+- `order-host.test.cjs`: the `order`, `sortMode`, `showMode` and `archivePast` messages and their
+  replies, and `claudeCode.claudeProcessWrapper` reaching `snapshot()`.
+- `ended.test.cjs`: `listedSessions()` (the root's folder and its real path's, no worktree
+  folders, programmatic and daemon sessions left out, archived and stowed rows apart, which
+  window owns a session), an unreadable Claude Code archive, the show store and its 0.11.2
+  file, `archivePast()`.
 - `server-order.test.cjs`: `server.cjs` as a child process answering the order, show and archive routes.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
@@ -204,7 +207,7 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   honoured by moving the file back, and one that goes after that last check leaves the file
   stowed until the next open restores it, since restoration keys on the stowed file, not the
   marker). ⤒, a click on a live archived row,
-  `openPast` and ⧉ go through `unarchiveSession()`: it awaits a pending end of the id, runs
+  and `openPast` go through `unarchiveSession()`: it awaits a pending end of the id, runs
   `restoreTranscript()` (`linkMove` back by slug, or `copyMove` through a `.part` file across
   volumes) and unlinks the marker only after; a restore onto a different file throws with
   both paths and keeps the marker, so ⤒ can retry. `snapshot()` and `searchSessions()` set
@@ -267,19 +270,33 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   Markers older than two weeks are dropped on read. The page shows those rows with the
   unseen status inside their window's section, counts them on its badge, and flips the flag
   at once on a click.
-- **Ended sessions**: each board writes its window's first workspace folder into its heartbeat
-  (`root`). `endedSessions()` (core.cjs) turns every fresh heartbeat into the folder set Claude
-  Code's own list uses: the root plus the repository's worktrees (`git worktree list --porcelain
-  -z`, refreshed in the background every 60 s; a poll never waits for git), each mapped to its
-  folder under `~/.claude/projects` (`projectFolderName()`: every character outside
-  `[A-Za-z0-9]` becomes `-`; compared case-insensitively on Windows). It returns the transcripts
-  there that are not running, not in Claude Code's `hiddenSessionIds`, not board-archived and
-  have a user message, newest first, as `snapshot().ended`; badges, counts and notifications read
-  `sessions` only. A session two windows would list goes to the window whose root is its folder,
-  else the window of the repository's main folder, else the lower window id. The header switch
-  "all | running" lives in `show.json` (`setShowMode()`); ⤓ on an ended row is `archivePast()`:
-  the archive marker, then `stowTranscript()`. Typing in the search box filters the sections and,
-  after 400 ms without a key, runs the title search (`startSearch(false)`); Enter adds content.
+- **Ended and archived sessions**: each board writes its window's first workspace folder into
+  its heartbeat (`root`). Claude Code (2.1.322, 2.1.323) builds its Local list from the root's
+  folder only (`sessionListOptions()` passes `includeWorktrees: false`; `candidateProjectDirs`
+  with the worktrees only serves single-session lookups), plus the folder of the root's real
+  path, and hides programmatic sessions: an `entrypoint` of `sdk-cli`, `sdk-ts` or `sdk-py`
+  (head, else tail) or a `sessionKind` of `daemon` or `daemon-worker`, unless
+  `claudeCode.claudeProcessWrapper` is set. `listedSessions()` (core.cjs) follows that: every
+  fresh heartbeat becomes those folder keys (`projectFolderName()`: every character outside
+  `[A-Za-z0-9]` becomes `-`; compared case-insensitively on Windows), and each transcript there
+  is sorted once: running, programmatic or without a user message is skipped; archived in
+  Claude Code, on the board or stowed goes to `archived` (only asked for with "all", so the
+  other modes read no extra heads); the rest to `ended`. The snapshot carries them as `ended`
+  and `archivedEnded`; badges, counts and notifications read `sessions` only. A folder two
+  heartbeats share goes to the lower window id, and an id in two places shows once, from its
+  newest file. The host passes the wrapper setting as `snapshot({ includeProgrammatic })`; the
+  browser server has no VS Code settings and always leaves them out. Until Claude Code's archive
+  has been read once (`readClaudeArchived().known`), the snapshot lists no ended rows, since
+  every archived session would look ended. The header switch "running | open | all" lives in
+  `show.json` as `{ show, v: 2 }` (`setShowMode()`); a file without `v` is from 0.11.2, whose
+  "all" reads as "open" (a 0.11.2 window that writes "all" therefore shows "open" in 0.11.3
+  windows until it reloads). ⤓ on an ended row is `archivePast()`: the archive marker, then
+  `stowTranscript()`. Typing in the search box filters the sections and, after 400 ms without a
+  key, runs the title search (`startSearch(false)`); Enter adds content.
+- **Ids copy on click**: the agent name and "Session <8>" on a row, and every value in the
+  details line (ⓘ), are `copyval` buttons; the page sends `copyText` to the host or uses
+  `navigator.clipboard` on the browser page. The resume command is copied only where a click
+  cannot open the session (no mapped window, the browser page, a folder that is not open).
 - **Sections and Muted**: the page groups live rows with `groupSessions()` (index.html):
   one section per `window.id` (`Elsewhere` for rows without one), this window first
   (`thisWindowId`, set by the host from `windowIdForExthost(process.pid)`), then by waiting

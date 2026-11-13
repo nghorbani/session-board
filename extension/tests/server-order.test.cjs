@@ -95,14 +95,17 @@ test('POST /api/order/mode?mode= writes sort.json; an unknown or missing mode is
   assert.equal(r.status, 404);
 });
 
-test('POST /api/order/show?show= writes show.json; an unknown show is 400', async () => {
+test('POST /api/order/show?show= writes show.json for running, open or all; an unknown show is 400', async () => {
   let r = await call('POST', '/api/order/show?show=running');
   assert.deepEqual([r.status, r.body], [200, { ok: true, show: 'running' }]);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dataDir, 'show.json'), 'utf8')).show, 'running');
   r = await call('POST', '/api/order/show?show=all');
   assert.deepEqual([r.status, r.body], [200, { ok: true, show: 'all' }]);
+  r = await call('POST', '/api/order/show?show=open');
+  assert.deepEqual([r.status, r.body], [200, { ok: true, show: 'open' }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dataDir, 'show.json'), 'utf8')).v, 2, 'the versioned file');
   r = await call('POST', '/api/order/show?show=some');
-  assert.equal(r.status, 400);
+  assert.deepEqual([r.status, r.body.error], [400, 'show must be one of running, open, all']);
   r = await call('POST', '/api/order/show?show=all', false);
   assert.equal(r.status, 403);
 });

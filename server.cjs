@@ -135,9 +135,9 @@ async function handle(req, res) {
   }
 
   if (route === '/api/order/show' && req.method === 'POST') {
-    // The header's "all | running" switch: the board-wide file every window reads.
+    // The header's "running | open | all" switch: the board-wide file every window reads.
     const show = parsed.searchParams.get('show') || '';
-    if (show !== 'all' && show !== 'running') return sendJson(res, 400, { ok: false, error: 'show must be all or running' });
+    if (!core.SHOW_MODES.includes(show)) return sendJson(res, 400, { ok: false, error: 'show must be one of ' + core.SHOW_MODES.join(', ') });
     try { core.setShowMode(show); return sendJson(res, 200, { ok: true, show }); }
     catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
   }

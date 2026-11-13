@@ -136,7 +136,8 @@
   .chip.muted { color: var(--faint); border-style: dotted; }
   .filterline { color: var(--busy); font-size: 11.5px; margin: 0 2px 10px; }
   .filterline button { margin-left: 8px; font-size: 11px; padding: 0 6px; }
-  .row .agent { color: var(--dim); margin-right: 6px; }
+  .row .agent { background: none; border: none; padding: 0; margin: 0 6px 0 0; color: var(--dim); font: inherit; cursor: copy; }
+  .row .agent:hover { color: var(--text); text-decoration: underline; border: none; background: none; }
   .row.muted .main, .row.muted .status { opacity: .6; }   /* silent and uncounted, still in its place */
   .subhead {
     display: flex; align-items: center; gap: 7px; margin: 10px 0 6px 2px;
@@ -176,12 +177,13 @@
   .sub { color: var(--faint); font-size: 11.5px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sub .nm { color: var(--dim); }
   .chip { color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-right: 6px; font-size: 10.5px; }
-  .sid { background: none; border: none; padding: 0; margin: 0 6px 0 0; color: var(--faint); font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; }
+  .sid { background: none; border: none; padding: 0; margin: 0 6px 0 0; color: var(--faint); font: inherit; font-variant-numeric: tabular-nums; cursor: copy; }
   .sid:hover { color: var(--text); text-decoration: underline; border: none; background: none; }
   .details { color: var(--faint); font-size: 11px; margin-top: 4px; line-height: 1.6; }
   .details div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .details .k { color: var(--dim); margin-right: 4px; }
-  .details .iconbtn { font-size: 11px; padding: 0 3px; }
+  .details .copyval { background: none; border: none; padding: 0; margin: 0; color: inherit; font: inherit; cursor: copy; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+  .details .copyval:hover { color: var(--text); text-decoration: underline; border: none; background: none; }
   .chip.live { color: var(--ok); border-color: var(--ok); }
   .snips { grid-column: 1 / -1; color: var(--dim); font-size: 11.5px; margin-top: 2px; }
   .snips div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -235,9 +237,10 @@
       <button type="button" data-act="mode" data-mode="activity" aria-pressed="true">by activity</button>
       <button type="button" data-act="mode" data-mode="manual" aria-pressed="false">manual</button>
     </div>
-    <div class="order" id="showMode" role="group" aria-label="Which sessions" style="display:none" title="all: the running sessions and the ended ones Claude Code still lists (not archived); running: only the running ones">
-      <button type="button" data-act="show" data-show="all" aria-pressed="true">all</button>
-      <button type="button" data-act="show" data-show="running" aria-pressed="false">running</button>
+    <div class="order" id="showMode" role="group" aria-label="Which sessions" style="display:none">
+      <button type="button" data-act="show" data-show="running" aria-pressed="false" title="only the running sessions">running</button>
+      <button type="button" data-act="show" data-show="open" aria-pressed="true" title="what Claude Code lists: the running sessions and the ended ones that are not archived">open</button>
+      <button type="button" data-act="show" data-show="all" aria-pressed="false" title="also the archived sessions">all</button>
     </div>
   </header>
 
@@ -289,7 +292,7 @@ var state = {
   details: Object.create(null),             // sessionId -> true while its details line is folded out (memory only)
   pendingOrder: Object.create(null),        // group key -> { ids, until } from a move until a snapshot agrees
   pendingMode: null,                        // { mode, until } from the header switch until a snapshot agrees
-  pendingShow: null,                        // { show, until } from the all | running switch until a snapshot agrees
+  pendingShow: null,                        // { show, until } from the running | open | all switch until a snapshot agrees
   pendingArchive: Object.create(null),      // sessionId -> until: an ended row archived with ⤓ leaves at once
   searchTimer: null,                        // the pause before typing runs the title search over every session
   drag: null,                               // { sid, key, over } while a handle is dragged; renders wait for dragend
@@ -336,7 +339,7 @@ function shortCwd(p) {
 function heading(s) {
   if (s.title) return { text: s.title, cls: 'title' };
   if (s.lastPrompt) return { text: s.lastPrompt.length > 70 ? s.lastPrompt.slice(0, 70) + '…' : s.lastPrompt, cls: 'title untitled' };
-  return { text: s.name || s.sessionId, cls: 'title untitled' };
+  return { text: 'Untitled', cls: 'title untitled' };   // ids are not headings: they sit on the sub line, where a click copies them
 }
 function markQuery(text, q) {
   var e = esc(text);
@@ -499,7 +502,7 @@ function actionsHtml(s, opts) {
   var flash = state.flashes[s.sessionId];
   var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
   var html = '<span class="age">' + esc(age) + '</span>';
-  html += '<button class="iconbtn copy" title="copy: claude --resume …' + (boardArchived(s) ? ' (brings the transcript back first)' : '') + '" data-act="copy">⧉</button>';
+  html += '<button class="iconbtn info" data-act="details" aria-expanded="' + (state.details[s.sessionId] ? 'true' : 'false') + '" title="details: full id, start, process, window, transcript">ⓘ</button>';
   if (opts.endable || (opts.past && !s.live)) {
     html += state.retitling[s.sessionId]
       ? '<button class="iconbtn retitle" disabled title="asking for a title…">…</button>'
@@ -512,7 +515,7 @@ function actionsHtml(s, opts) {
       ? '<button class="iconbtn unmute" data-act="unmute"' + dis + ' title="Unmute: notify and count this session again"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.6 11h10.8L12 8.5V5.8a4 4 0 0 0-4-4zM6.4 12.6a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.2 2.2l11.6 11.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>'
       : '<button class="iconbtn mute" data-act="mute"' + dis + ' title="Mute: no notifications and no count for this session"><svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8a4 4 0 0 0-4 4v2.7L2.6 11h10.8L12 8.5V5.8a4 4 0 0 0-4-4zM6.4 12.6a1.6 1.6 0 0 0 3.2 0" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></button>';
   }
-  if (opts.ended) html += '<button class="iconbtn archive" data-act="archivepast" title="Archive: off the board, and the transcript moves to the board\'s archive, so Claude Code\'s list drops it too (⤒ in the search brings it back)">⤓</button>';
+  if (opts.ended && !s.archived) html += '<button class="iconbtn archive" data-act="archivepast" title="Archive: off the board, and the transcript moves to the board\'s archive, so Claude Code\'s list drops it too (⤒ in the search brings it back)">⤓</button>';
   if (boardArchived(s)) html += '<button class="iconbtn unarchive" data-act="unarchive" title="Unarchive: bring the transcript back and show this session on the board again">⤒</button>';
   if (opts.endable) {
     if (pe && pe.kind === 'pending') html += '<button class="iconbtn end" disabled title="' + (pe.archive ? 'archiving' : 'ending') + '">…</button>';
@@ -542,12 +545,16 @@ function fmtStarted(ms) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
-/** The folded-out details of a row: full id, start, process, window, transcript; id and path copy. */
+/** A value that copies itself on click (an id, a path). */
+function copyHtml(v, what, cls) {
+  return '<button class="copyval' + (cls ? ' ' + cls : '') + '" data-act="copyval" data-copy="' + esc(v) + '" title="click to copy the ' + what + '">' + esc(v) + '</button>';
+}
+
+/** The folded-out details of a row: full id, start, process, window, transcript; a click on a value copies it. */
 function detailsHtml(s, opts) {
   if (!state.details[s.sessionId]) return '';
-  var copy = function (v, what) { return '<button class="iconbtn copyval" data-act="copyval" data-copy="' + esc(v) + '" title="copy the ' + what + '">⧉</button>'; };
-  var lines = ['<div><span class="k">id</span>' + esc(s.sessionId) + copy(s.sessionId, 'session id') + '</div>'];
-  if (s.name && s.name !== String(s.sessionId).slice(0, 8)) lines.push('<div><span class="k">agent</span>' + esc(s.name) + copy(s.name, 'agent name') + '</div>');
+  var lines = ['<div><span class="k">id</span>' + copyHtml(s.sessionId, 'session id') + '</div>'];
+  if (s.name && s.name !== String(s.sessionId).slice(0, 8)) lines.push('<div><span class="k">agent</span>' + copyHtml(s.name, 'agent name') + '</div>');
   var started = fmtStarted(s.startedAt);
   var facts = [];
   if (started) facts.push('<span class="k">started</span>' + esc(started));
@@ -556,7 +563,7 @@ function detailsHtml(s, opts) {
   if (s.kind && s.kind !== 'interactive') facts.push('<span class="k">kind</span>' + esc(s.kind));
   if (facts.length) lines.push('<div>' + facts.join(' · ') + '</div>');
   var file = s.transcriptPath || s.path || '';
-  if (file) lines.push('<div title="' + esc(file) + '"><span class="k">transcript</span>' + esc(file) + copy(file, 'transcript path') + '</div>');
+  if (file) lines.push('<div title="' + esc(file) + '"><span class="k">transcript</span>' + copyHtml(file, 'transcript path') + '</div>');
   return '<div class="details">' + lines.join('') + '</div>';
 }
 
@@ -610,8 +617,9 @@ function rowHtml(s, limits, opts) {
   else if (by === 'board') chips += '<span class="chip archived" title="archived on the board; ⤒ or a click brings it back">archived</span>';
   if (opts.past && !opts.ended && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
   if (!opts.past && isMuted(s)) chips += '<span class="chip muted" title="muted: no notifications, not counted">muted</span>';
-  var agent = s.name && s.title && s.name !== s.title && s.name !== String(s.sessionId).slice(0, 8) ? '<span class="agent" title="the agent name other Claude sessions use for this one">' + esc(s.name) + '</span>' : '';
-  var sub = chips + agent + '<button class="sid" data-act="details" title="' + esc(s.sessionId) + ' (click for details)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // one name per row: the heading; the agent name lives in the tooltip
+  var agent = s.name && s.name !== s.title && s.name !== String(s.sessionId).slice(0, 8)
+    ? '<button class="agent" data-act="copyval" data-copy="' + esc(s.name) + '" title="the agent name other Claude sessions use for this one; click to copy">' + esc(s.name) + '</button>' : '';
+  var sub = chips + agent + '<button class="sid" data-act="copyval" data-copy="' + esc(s.sessionId) + '" title="' + esc(s.sessionId) + ' (click to copy)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // a click on an id copies it
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
   var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
@@ -693,11 +701,6 @@ function openPast(el, sid) {
   copyResume(sid, 'copied · resume in a terminal');
 }
 
-/** ⧉: the same rule; the host brings a stowed transcript back on its own. */
-function copyBack(el, sid) {
-  if (!vsapi && el.getAttribute('data-board-archived') === '1') { requestUnarchive(sid, function (r) { if (r.ok) copyResume(sid); }); return; }
-  copyResume(sid);
-}
 
 /*
  * ✕ and ⤓ share one two-step path:
@@ -887,17 +890,23 @@ function applyMode(mode) {
 }
 
 /*
- * The all | running switch: click ──▶ state.pendingShow = { show, until: now + 10 s } ──▶ render at once
+ * The running | open | all switch: click ──▶ state.pendingShow = { show, until: now + 10 s } ──▶ render at once
  *    ──▶ host or POST /api/order/show?show= ──▶ the next snapshot carries it; a failure drops it with a notice.
  */
+/** The modes the switch offers, read from its buttons: the one list on the page. */
+function showModes() {
+  return Array.prototype.map.call(document.querySelectorAll('#showMode button[data-show]'), function (b) { return b.getAttribute('data-show'); });
+}
+
 function currentShow() {
   var p = state.pendingShow;
   if (p && p.until > Date.now()) return p.show;
-  return state.data && state.data.order && state.data.order.show === 'running' ? 'running' : 'all';
+  var show = state.data && state.data.order && state.data.order.show;
+  return showModes().indexOf(show) !== -1 ? show : 'open';
 }
 
 function applyShow(show) {
-  if ((show !== 'all' && show !== 'running') || show === currentShow()) return;
+  if (showModes().indexOf(show) === -1 || show === currentShow()) return;
   state.pendingShow = { show: show, until: Date.now() + ORDER_PENDING_MS };
   render();
   setTimeout(render, ORDER_PENDING_MS + 50);
@@ -917,8 +926,14 @@ function onShowModeResult(r) {
 
 /** The ended rows the sections show: none with "running", none while ⤓ on them is pending. */
 function endedRows() {
-  if (currentShow() !== 'all') return [];
+  if (currentShow() === 'running') return [];
   return ((state.data && state.data.ended) || []).filter(function (s) { var p = state.pendingArchive[s.sessionId]; return !(p && p > Date.now()); });
+}
+
+/** The archived sessions that are not running: only with "all". */
+function archivedEndedRows() {
+  if (currentShow() !== 'all') return [];
+  return (state.data && state.data.archivedEnded) || [];
 }
 
 /*
@@ -965,7 +980,7 @@ function renderSwitch(data) {
   var sh = document.getElementById('showMode');
   var hasShow = Boolean(data && data.order && data.order.show);   // an older server has no ended rows
   sh.style.display = hasShow ? '' : 'none';
-  var show = hasShow ? currentShow() : 'all';
+  var show = hasShow ? currentShow() : 'open';
   Array.prototype.forEach.call(sh.querySelectorAll('button[data-show]'), function (b) {
     var on = b.getAttribute('data-show') === show;
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -1083,7 +1098,6 @@ function onRowClick(ev) {
   if (btn) {
     ev.stopPropagation();
     var act = btn.getAttribute('data-act');
-    if (act === 'copy') { copyBack(el, sid); return; }
     if (act === 'archivepast') { requestArchivePast(sid); return; }
     if (act === 'details') { state.details[sid] = !state.details[sid]; render(); return; }
     if (act === 'copyval') { copyText(sid, btn.getAttribute('data-copy') || ''); return; }
@@ -1175,20 +1189,23 @@ function rowOrder(a, b) {
   return (ra === null ? 0 : ra - rb) || byAge(a, b);
 }
 
-function groupSessions(rows, thisWindowId, ended) {
+function groupSessions(rows, thisWindowId, ended, archivedEnded) {
   var filter = Boolean(state.filter);
+  var showAll = currentShow() === 'all';
   var byKey = Object.create(null), archived = [];
   var section = function (s) {
     var key = sectionKey(s);
-    if (!byKey[key]) byKey[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [], ended: [] };
+    if (!byKey[key]) byKey[key] = { key: key, label: sectionLabel(s), thisWindow: thisWindowId != null && Boolean(s.window) && s.window.id === thisWindowId, rows: [], ended: [], archived: [] };
     return byKey[key];
   };
   var add = function (s) { section(s).rows.push(s); };
   (ended || []).forEach(function (s) { if (matchesFilter(s)) section(s).ended.push(s); });
+  (archivedEnded || []).forEach(function (s) { if (matchesFilter(s)) section(s).archived.push(s); });
   rows.forEach(function (s) {
     if (!matchesFilter(s)) return;
     var pe = state.pendingEnd[s.sessionId];
     if (pe && pe.kind === 'ended') return;
+    if (putAway(s) && showAll) { section(s).archived.push(s); return; }   // "all": archived running rows sit in their section, not movable
     if (putAway(s) && !filter) { archived.push(s); return; }
     add(s);
   });
@@ -1201,6 +1218,7 @@ function groupSessions(rows, thisWindowId, ended) {
   var finish = function (sec) {
     sec.rows.sort(rowOrder);
     sec.ended.sort(byAge);                                 // newest first, after the running rows
+    sec.archived.sort(byAge);                              // then the archived ones ("all" only)
     Object.assign(sec, counts(sec.rows));
     return sec;
   };
@@ -1236,8 +1254,9 @@ function sectionHtml(sec, limits) {
   var folded = isFolded(sec.key) && !state.filter;
   var cls = 'group section' + (folded ? ' folded' : '') + (sec.waiting ? ' waiting' : sec.unseen ? ' unseen' : '') + (sec.thisWindow ? ' here' : '');
   var body = sec.rows.map(function (s) { return rowHtml(s, limits); }).join('')   // every running row that is not archived, idle or not
-    + sec.ended.map(function (s) { return rowHtml(s, limits, { past: true, ended: true }); }).join('');   // then the ended ones Claude Code still lists
-  var count = sec.rows.length + (sec.ended.length ? ' + ' + sec.ended.length + ' ended' : '');
+    + sec.ended.map(function (s) { return rowHtml(s, limits, { past: true, ended: true }); }).join('')   // then the ended ones Claude Code still lists
+    + sec.archived.map(function (s) { return s.status === 'ended' ? rowHtml(s, limits, { past: true, ended: true }) : rowHtml(s, limits); }).join('');   // then the archived ones ("all")
+  var count = sec.rows.length + (sec.ended.length ? ' + ' + sec.ended.length + ' ended' : '') + (sec.archived.length ? ' + ' + sec.archived.length + ' archived' : '');
   return '<div class="' + cls + '" data-section="' + esc(sec.key) + '">' + sectionHead(sec, sec.label, count, sec.thisWindow) + '<div class="section-body">' + body + '</div></div>';
 }
 
@@ -1250,18 +1269,19 @@ function render() {
   // a typed filter hides rows; say so, with the count and a way out
   var fl = document.getElementById('filterline');
   var ended = endedRows();
+  var archivedEnded = archivedEndedRows();
   if (state.filter) {
     var matched = all.filter(function (s) { var pe = state.pendingEnd[s.sessionId]; return matchesFilter(s) && !(pe && pe.kind === 'ended'); }).length
-      + ended.filter(matchesFilter).length;
-    var total = all.length + ended.length;
+      + ended.filter(matchesFilter).length + archivedEnded.filter(matchesFilter).length;
+    var total = all.length + ended.length + archivedEnded.length;
     fl.innerHTML = 'Filter “' + esc(state.filter) + '”: ' + matched + ' of ' + total + ' session' + (total === 1 ? '' : 's')
       + '<button data-act="clearfilter" title="clear the filter (Esc)">clear</button>';
     fl.style.display = '';
   } else { fl.style.display = 'none'; fl.innerHTML = ''; }
 
-  var g = groupSessions(all, data ? data.thisWindowId : null, ended);
+  var g = groupSessions(all, data ? data.thisWindowId : null, ended, archivedEnded);
   var onBoard = Object.create(null);                       // the search results skip what the sections already show
-  g.sections.forEach(function (sec) { sec.rows.concat(sec.ended).forEach(function (s) { onBoard[s.sessionId] = true; }); });
+  g.sections.forEach(function (sec) { sec.rows.concat(sec.ended, sec.archived).forEach(function (s) { onBoard[s.sessionId] = true; }); });
 
   // search results block
   var gr = document.getElementById('g-results');
