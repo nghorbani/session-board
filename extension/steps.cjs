@@ -809,16 +809,23 @@ function buildSections(stepsArr, bodyFn) {
   let decisions = 0;
   for (const sec of filtered) {
     if (sec.kind === 'you' || sec.kind === 'question' || sec.kind === 'approve') decisions++;
+    // The facts line under a section: how many tool and subagent calls it made, and how many
+    // distinct files it edited or wrote.
+    const filesChangedHere = new Set();
+    sec.toolCalls = 0;
     for (const row of sec.body) {
       if (row.kind !== 'work') continue;
       for (const id of row.items) {
         const st = byId.get(id);
-        if (st && st.kind === 'tool' && (st.title === 'Edit' || st.title === 'Write')) {
+        if (!st || (st.kind !== 'tool' && st.kind !== 'subagent')) continue;
+        sec.toolCalls++;
+        if (st.kind === 'tool' && (st.title === 'Edit' || st.title === 'Write')) {
           const b = bodyFn(id);
-          if (b && b.path) filesChangedAll.add(b.path);
+          if (b && b.path) { filesChangedAll.add(b.path); filesChangedHere.add(b.path); }
         }
       }
     }
+    sec.filesChanged = filesChangedHere.size;
   }
   function sectionStepIds(sec) {
     const ids = sec.openerId ? [sec.openerId] : [];

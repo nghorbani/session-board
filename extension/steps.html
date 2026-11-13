@@ -1021,7 +1021,21 @@ function buildSectionNode(sec, i, secs) {
     wrap.appendChild(leadHead);
   }
   (sec.body || []).forEach(function (row) { wrap.appendChild(buildBodyRow(row, sec)); });
+  var facts = sectionFacts(sec);
+  if (facts) { var fl = document.createElement('div'); fl.className = 'facts'; fl.textContent = facts; wrap.appendChild(fl); }
   return wrap;
+}
+
+/** The line that closes a section that did work: its active time (from a minute up), its tool
+    calls and the files it changed. Empty for a section without tool calls. */
+function sectionFacts(sec) {
+  var calls = Number(sec.toolCalls) || 0, files = Number(sec.filesChanged) || 0;
+  if (!calls) return '';
+  var parts = [];
+  if ((Number(sec.activeTimeMs) || 0) >= 30000) parts.push(fmtDuration(sec.activeTimeMs));
+  parts.push(calls + (calls === 1 ? ' tool call' : ' tool calls'));
+  if (files) parts.push(files + (files === 1 ? ' file changed' : ' files changed'));
+  return parts.join(' · ');
 }
 
 function stepKindClass(k) {

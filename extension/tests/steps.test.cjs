@@ -479,6 +479,31 @@ test('sections and the strip counts; a you step is never doubled', async () => {
   assert.equal(strip.sections, sections.length);
 });
 
+test('each section carries its tool call count and its changed files, for the facts line', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'change the file twice and list the folder'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: 'C:/proj/a.txt' } }]),
+    toolResultLine(uuid(3), uuid(2), 'e1', 'ok'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'ls' } }]),
+    toolResultLine(uuid(5), uuid(4), 'b1', 'a.txt'),
+    assistantLine(uuid(6), uuid(5), 'm3', [{ type: 'tool_use', id: 'e2', name: 'Edit', input: { file_path: 'C:/proj/a.txt' } }]),
+    toolResultLine(uuid(7), uuid(6), 'e2', 'ok'),
+    assistantLine(uuid(8), uuid(7), 'm4', [{ type: 'text', text: 'done' }]),
+    userLine(uuid(9), uuid(8), 'thanks, what did you change?'),
+    assistantLine(uuid(10), uuid(9), 'm5', [{ type: 'text', text: 'one file, twice' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const { sections } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  const worked = sections.find((s) => s.heading.indexOf('change the file twice') !== -1);
+  const talked = sections.find((s) => s.heading.indexOf('thanks') !== -1);
+  assert.equal(worked.toolCalls, 3, 'two edits and one command');
+  assert.equal(worked.filesChanged, 1, 'the same file edited twice counts once');
+  assert.equal(talked.toolCalls, 0);
+  assert.equal(talked.filesChanged, 0);
+});
+
 test('active time sums the gaps between steps, each one capped at 10 minutes: a session left open overnight does not read as hours', async () => {
   const file = newFile();
   const t0 = new Date(2026, 0, 1, 9, 0, 0);

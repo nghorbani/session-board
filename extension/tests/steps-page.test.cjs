@@ -234,6 +234,7 @@ const SAMPLE = `(function () {
     openLinkCalls: window.__openLinkCalls || 0,
     lnkCount: q('a.lnk').length,
     workSums: q('.worksum').map(function (e) { return e.textContent; }),
+    facts: q('.facts').map(function (e) { return e.textContent; }),
     restateCount: q('.row.k-you .restate').length,
     youMsgCount: q('.row.k-you .you-msg').length,
     youMsgOpen: !!document.querySelector('.row.k-you .you-msg.open'),
@@ -465,6 +466,27 @@ test('page: a Work line says in words what was done, never "N tool calls: Bash, 
   assert.ok(/edited/i.test(s.workSums[0]), 'names the edit in words: ' + s.workSums[0]);
   assert.ok(/ran 2 commands/i.test(s.workSums[0]), 'names the commands in words: ' + s.workSums[0]);
   assert.equal(/\d+ tool calls?:/i.test(s.workSums[0]), false, 'never the bare "N tool calls: Bash, Edit" phrasing: ' + s.workSums[0]);
+  await page.close();
+});
+
+test('page: a section that did work ends in a facts line with its time, tool calls and files changed; one without work has none', opts, async () => {
+  fake.open = () => openReply({
+    steps: [
+      step('u1:0', 'you'), step('t1:0', 'tool', { title: 'Edit' }), step('t2:0', 'tool', { title: 'Bash' }), step('t3:0', 'tool', { title: 'Bash' }),
+      step('u2:0', 'you'), step('x1:0', 'text'),
+      step('u3:0', 'you'), step('t4:0', 'tool', { title: 'Bash' }),
+    ],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'fix the bug', 'u1:0', [{ kind: 'work', items: ['t1:0', 't2:0', 't3:0'] }], { activeTimeMs: 4 * 60000, toolCalls: 3, filesChanged: 1 }),
+      section('you', 'explain it', 'u2:0', [{ kind: 'text', stepId: 'x1:0' }], { activeTimeMs: 2 * 60000, toolCalls: 0, filesChanged: 0 }),
+      section('you', 'list the folder', 'u3:0', [{ kind: 'work', items: ['t4:0'] }], { activeTimeMs: 5000, toolCalls: 1, filesChanged: 0 }),
+    ],
+    strip: { activeTimeMs: 6 * 60000, sections: 4, decisions: 3, filesChanged: 1 },
+  });
+  const page = await openPage(A);
+  const s = await page.until((x) => x.facts.length === 2, 'a facts line under each of the two sections that did work');
+  assert.deepEqual(s.facts, ['4m · 3 tool calls · 1 file changed', '1 tool call'], 'time is left out under a minute, files when none changed');
   await page.close();
 });
 
