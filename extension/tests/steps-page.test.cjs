@@ -204,6 +204,8 @@ const SAMPLE = `(function () {
     imgCount: q('img').length,
     drawerVisible: (function () { var el = document.getElementById('railToggle'); return getComputedStyle(el).display !== 'none'; })(),
     railOpen: document.getElementById('rail').classList.contains('open'),
+    jumpToStartButtons: q('button').filter(function (b) { return b.textContent === 'Jump to the start'; }).length,
+    jumpToStartInRail: q('#rail button').filter(function (b) { return b.textContent === 'Jump to the start'; }).length,
     domRowCount: q('.row, .sec-stub').length,
     openLinkCalls: window.__openLinkCalls || 0,
     lnkCount: q('a.lnk').length,
@@ -280,6 +282,8 @@ test('page: first paint from an open reply shows the title and the strip', opts,
   const s = await page.until((x) => x.title === 'My plan session', 'the title to render');
   assert.ok(s.stripNums.some((n) => n.indexOf('Sections=2') !== -1));
   assert.ok(s.sectionHeadings.some((h) => h.indexOf('please build the thing') !== -1));
+  assert.equal(s.jumpToStartButtons, 1, 'one "Jump to the start" control, no floating pill over the search box');
+  assert.equal(s.jumpToStartInRail, 1, 'it lives in the outline');
   await page.close();
 });
 
@@ -589,7 +593,7 @@ test('page: a 3,000-step fake session stays responsive with a bounded DOM node c
 
 // -- narrow layout -------------------------------------------------------------------------
 
-test('page: the narrow layout shows the outline drawer toggle', opts, async () => {
+test('page: the narrow layout (520px) shows the outline drawer toggle, and "Jump to the start" lives inside the drawer', opts, async () => {
   fake.open = () => openReply({
     steps: [step('u1:0', 'you')],
     sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [])],
@@ -597,7 +601,7 @@ test('page: the narrow layout shows the outline drawer toggle', opts, async () =
   const { targetId } = await cdp.send('Target.createTarget', { url: 'http://127.0.0.1:' + PORT + '/steps?session=' + A });
   const { sessionId: cdpSessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Runtime.enable', {}, cdpSessionId);
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 800, deviceScaleFactor: 1, mobile: true }, cdpSessionId);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 520, height: 800, deviceScaleFactor: 1, mobile: true }, cdpSessionId);
   const ev = async (expr) => {
     const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, cdpSessionId);
     if (r.exceptionDetails) throw new Error('page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
@@ -606,11 +610,13 @@ test('page: the narrow layout shows the outline drawer toggle', opts, async () =
   let sample = null;
   const start = Date.now();
   while (Date.now() - start < 20000) {
-    try { sample = await ev(SAMPLE); if (sample.drawerVisible) break; } catch (_) { /* page still loading */ }
+    try { sample = await ev(SAMPLE); if (sample.drawerVisible && sample.jumpToStartButtons > 0) break; } catch (_) { /* page still loading */ }
     await sleep(150);
   }
   assert.ok(sample, 'the page rendered within the timeout');
   assert.equal(sample.drawerVisible, true, 'the rail-toggle bar is visible at a narrow width');
+  assert.equal(sample.jumpToStartButtons, 1, 'exactly one "Jump to the start" control, no floating pill');
+  assert.equal(sample.jumpToStartInRail, 1, 'it lives inside the outline drawer');
   await cdp.send('Target.closeTarget', { targetId });
 });
 

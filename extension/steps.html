@@ -169,10 +169,8 @@
   .new-marker::before, .new-marker::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--new); opacity: .5; }
 
   .edgebar { position: fixed; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; pointer-events: none; }
-  .edgebar.top { top: 50px; }
   .edgebar.bottom { bottom: 0; padding-bottom: 10px; }
   .pill { pointer-events: auto; background: var(--accent); color: #fff; border-radius: 999px; padding: 7px 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(0,0,0,.25); border: none; }
-  .edgebar.top .pill { background: var(--panel); color: var(--fg); border: 1px solid var(--line); box-shadow: 0 4px 14px rgba(0,0,0,.18); }
 
   .files-view { padding: 4px 0; }
   .fsec { margin-bottom: 16px; }
@@ -212,7 +210,6 @@
     }
     .rail.open { display: block; }
     .reader { padding: 4px 12px 90px; }
-    .edgebar.top { top: 112px; }
   }
 </style>
 </head>
@@ -238,7 +235,6 @@
   <nav class="rail" id="rail"></nav>
   <main class="reader" id="reader"><div class="reader-inner" id="readerInner"></div></main>
 </div>
-<div class="edgebar top" id="topBar" style="display:none"><button class="pill" id="toStart">Jump to the start</button></div>
 <div class="edgebar bottom" id="endBar" style="display:none"><button class="pill" id="endPill"></button></div>
 <div class="allnotes-bar" id="allNotesBar"><span class="n" id="allNotesN"></span><button class="primary" id="sendAllNotes">Send all notes</button></div>
 
@@ -1829,7 +1825,6 @@ function updateEdgeBars() {
   var atBottom = reader.scrollTop + reader.clientHeight >= reader.scrollHeight - 20;
   state.atTop = atTop;
   state.atBottom = atBottom;
-  document.getElementById('topBar').style.display = atTop || state.lens === 'files' ? 'none' : '';
   var endBar = document.getElementById('endBar');
   if (state.lens === 'files') { endBar.style.display = 'none'; return; }
   endBar.style.display = '';
@@ -1843,7 +1838,6 @@ function updateEdgeBars() {
   }
 }
 
-document.getElementById('toStart').addEventListener('click', function () { document.getElementById('reader').scrollTo({ top: 0, behavior: 'smooth' }); });
 document.getElementById('endPill').addEventListener('click', function () {
   var reader = document.getElementById('reader');
   if (state.atBottom) reader.scrollTo({ top: 0, behavior: 'smooth' });
