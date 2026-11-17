@@ -284,6 +284,8 @@ var state = {
   noteBoxFor: null,            // stepId whose note box is currently open, or null
   bodies: Object.create(null), // stepId -> body record (text/truncated/size/... or the typed shapes)
   bodiesPending: Object.create(null),
+  invalidatedAt: Object.create(null), // stepId -> invalidateSeq when a push named the step as updated
+  invalidateSeq: 0,
   lens: 'all',                 // 'all' | 'decisions' | 'files'
   showAllTools: false,
   follow: true,
@@ -413,11 +415,29 @@ if (vsapi) {
 
 // -- push handling (follow, indexing progress) ---------------------------------------------
 
+/* What a push says about the bodies the page holds. A new generation (the transcript was
+   replaced or cut) makes every one of them a text of the old file. A step named as updated got
+   its result after it was first shown (the answer to a question, a plan's approval, a tool's
+   output), so its body is asked for again when it is next in view. */
+function adoptPush(msg) {
+  if (msg.generation !== undefined && msg.generation !== state.generation) {
+    state.generation = msg.generation;
+    state.bodies = Object.create(null);
+    state.bodiesPending = Object.create(null);
+  }
+  (msg.updated || []).forEach(function (id) {
+    delete state.bodies[id];
+    delete state.bodiesPending[id];
+    state.invalidatedAt[id] = ++state.invalidateSeq;
+  });
+}
+
 function onPush(msg) {
   if (!msg || msg.sessionId !== SESSION_ID) return;
   if (msg.type === 'stepsProgress') {
     state.indexing = !msg.done;
     if (msg.error) { showStatus('indexing stopped: ' + msg.error); return; }
+    adoptPush(msg);
     foldCompact(msg.steps);
     if (msg.sections) mergeSections(msg.sections, msg.strip);
     renderIndexNote();
@@ -427,6 +447,7 @@ function onPush(msg) {
   }
   if (msg.type === 'stepsChanged') {
     if (msg.error) { showStatus(msg.error); return; }
+    adoptPush(msg);
     foldCompact(msg.steps);
     if (msg.reset !== undefined && msg.reset !== null) {
       // the active path changed further back than the tail (a retry, an edited message): the
@@ -494,6 +515,7 @@ function mergeSections(sections, strip, isReset) {
   state.sections = sections || [];
   if (strip) state.strip = strip;
   if (isReset) state.bodies = Object.create(null); // a reset may reuse ids under a new generation
+  rebuildCompactIndex();
 }
 
 function showStatus(text) {
@@ -507,13 +529,18 @@ function showStatus(text) {
 
 // -- open ------------------------------------------------------------------------------------
 
+/* The open reply carries the sections, the strip, the notes and the flat compact list of the
+   steps (kind, time, preview per step, also the ones a Work line only names by id), so rows,
+   Work summaries and times can be drawn before any body text has loaded. */
 function openSession() {
+  state.compactById = Object.create(null);
   if (!SESSION_ID) { showError('no session to show'); return; }
   startPolling();
   call({ type: 'open' }).then(function (reply) {
     if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
     state.loaded = true;
     state.title = reply.title || 'Session ' + SESSION_ID.slice(0, 8);
+    (reply.steps || []).forEach(function (s) { state.compactById[s.id] = s; });
     state.sections = reply.sections || [];
     state.strip = reply.strip || null;
     state.generation = reply.generation || 0;
@@ -522,8 +549,11 @@ function openSession() {
     state.notes = reply.notes || [];
     document.getElementById('title').textContent = state.title;
     document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
+    rebuildCompactIndex();
     renderIndexNote();
+    renderStrip();
     renderAll();
+    renderNotesJumpLabel();
     scrollToEndOnLoad();
   });
 }
@@ -862,7 +892,21 @@ function jumpToNote(delta) {
 }
 
 function toggleLens(key) {
+  // The anchor is an index into the sections the current view shows, so it means another
+  // section, or none, in the next view. Keep the place instead: the section that was the
+  // anchor, or the nearest one before it that the new view still shows.
+  var before = visibleSections();
+  var cur = before.length ? before[Math.min(anchorIndex, before.length - 1)] : null;
   state.lens = state.lens === key ? 'all' : key;
+  var place = cur ? state.sections.indexOf(cur) : -1;
+  var position = new Map();
+  state.sections.forEach(function (sec, i) { position.set(sec, i); });
+  var after = visibleSections();
+  var idx = 0;
+  for (var i = 0; i < after.length; i++) {
+    if (position.get(after[i]) <= place) idx = i; else break;
+  }
+  anchorIndex = idx;
   renderAll();
   renderStrip();
 }
@@ -992,6 +1036,8 @@ function renderReader() {
   // div each, never one per hidden section), so the DOM a 5,000-step session holds stays
   // bounded by RENDER_WINDOW regardless of how many sections sit off screen; only the window
   // itself, plus these two spacers, is ever in the tree at once.
+  // the list may have shrunk under the anchor (a reset, a note deleted in the Notes view)
+  anchorIndex = Math.max(0, Math.min(anchorIndex, secs.length - 1));
   var lo = Math.max(0, anchorIndex - RENDER_WINDOW);
   var hi = Math.min(secs.length, anchorIndex + RENDER_WINDOW);
   var SEC_HEIGHT_ESTIMATE = 70;
@@ -1178,7 +1224,10 @@ function buildNoteBox(stepId, existing) {
   var keep = document.createElement('button'); keep.type = 'button'; keep.textContent = 'Keep note';
   var send = document.createElement('button'); send.type = 'button'; send.className = 'primary';
   send.textContent = 'Send to session';
-  send.title = 'Your click is the consent to send.';
+  // what the click does, said before it: in VS Code the note fills the session's chat box
+  // (Claude Code 2.1.322 or newer) and is sent from there; a browser can only copy it
+  send.title = vsapi ? 'Puts the note into the session\'s chat box, for you to send, and on the clipboard.'
+    : 'Copies the note for you to paste into the session.';
   var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
   branch.disabled = true; branch.title = 'Arrives with 0.13.0';
 
@@ -1191,6 +1240,8 @@ function buildNoteBox(stepId, existing) {
     var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
     return req.then(function (reply) {
       if (reply && reply.ok && reply.note) { applyNoteLocally(reply.note); return reply.note.id; }
+      // not kept: the box stays open with what was typed, and the reason is on screen
+      flashNotice('The note was not kept: ' + ((reply && reply.message) || 'no answer from the board'));
       return null;
     });
   }
@@ -1198,14 +1249,14 @@ function buildNoteBox(stepId, existing) {
   keep.addEventListener('click', function () {
     var text = ta.value.trim();
     if (!text) return;
-    saveThenGetNoteId(text).then(afterSave);
+    saveThenGetNoteId(text).then(function (noteId) { if (noteId) afterSave(); });
   });
   send.addEventListener('click', function () {
     var text = ta.value.trim();
     if (!text) return;
     send.disabled = true;
     saveThenGetNoteId(text).then(function (noteId) {
-      if (!noteId) { send.disabled = false; flashNotice('could not keep the note, so nothing was sent'); return; }
+      if (!noteId) { send.disabled = false; return; }   // nothing is sent without a kept note
       return call({ type: 'noteSend', noteId: noteId }).then(function (reply) {
         if (reply && reply.message) flashNotice(reply.message);
         if (reply && !reply.ok && reply.message === 'On the clipboard. Paste it into the session.' && reply.text) copyToClipboard(reply.text);
@@ -1222,8 +1273,8 @@ function buildNoteBox(stepId, existing) {
     del.textContent = 'Delete';
     del.addEventListener('click', function () {
       call({ type: 'noteDelete', noteId: existing.id }).then(function (reply) {
-        if (reply && reply.ok) removeNoteLocally(existing.id);
-        afterSave();
+        if (reply && reply.ok) { removeNoteLocally(existing.id); afterSave(); return; }
+        flashNotice('The note was not deleted: ' + ((reply && reply.message) || 'no answer from the board'));
       });
     });
     row2.appendChild(del);
@@ -1707,14 +1758,9 @@ function renderFilesView() {
   }
   reader.appendChild(view);
   if (missing.length) {
-    missing.forEach(function (id) { state.bodiesPending[id] = true; });
-    call({ type: 'bodies', stepIds: missing, generation: state.generation }).then(function (reply) {
-      ((reply && reply.items) || []).forEach(function (item) {
-        delete state.bodiesPending[item.stepId];
-        if (!item.stale) state.bodies[item.stepId] = item;
-      });
-      if (state.lens === 'files') renderFilesView();
-    });
+    // redrawn only when something came back: a reply without bodies (a failed request, a
+    // transcript that moved on) would otherwise ask again at once, and again
+    requestBodies(missing).then(function (stored) { if (stored && state.lens === 'files') renderFilesView(); });
   }
 }
 
@@ -1757,18 +1803,42 @@ function flushBodyBatch() {
   var ids = Object.keys(state.bodyBatchWanted || {});
   state.bodyBatchWanted = Object.create(null);
   if (!ids.length) return;
-  ids.forEach(function (id) { state.bodiesPending[id] = true; });
-  call({ type: 'bodies', stepIds: ids, generation: state.generation }).then(function (reply) {
-    if (!reply || !Array.isArray(reply.items)) return;
-    reply.items.forEach(function (item) {
-      delete state.bodiesPending[item.stepId];
-      if (!item.stale) state.bodies[item.stepId] = item;
-    });
+  requestBodies(ids).then(function (stored) {
+    if (!stored) return;
     // the lens may have switched to files while this batch was in flight; the reader then
     // holds no [data-step-body] nodes for renderVisibleBodiesOnly to refresh, so the files
     // view would stay without a path it was only waiting on, never asking again
     if (state.lens === 'files') renderFilesView();
     else renderVisibleBodiesOnly();
+  });
+}
+
+/* Asks for the bodies of these steps and keeps what comes back; resolves true when at least
+   one was kept. Every id leaves the pending set whatever the outcome, so a request that failed
+   does not stop a later one for the same step. A body is dropped when the transcript started a
+   new generation, or its step was named as updated, while the request was on its way: it
+   describes the step as it was. A request that failed outright is tried again a little later,
+   since nothing else would ask while the reader stands still. */
+var BODY_RETRY_MS = 2000;
+function requestBodies(ids) {
+  var generation = state.generation;
+  var mark = state.invalidateSeq;
+  ids.forEach(function (id) { state.bodiesPending[id] = true; });
+  return call({ type: 'bodies', stepIds: ids, generation: generation }).then(function (reply) {
+    ids.forEach(function (id) { delete state.bodiesPending[id]; });
+    if (!reply || !Array.isArray(reply.items)) {
+      clearTimeout(state.bodyRetryTimer);
+      state.bodyRetryTimer = setTimeout(queueVisibleBodies, BODY_RETRY_MS);
+      return false;
+    }
+    if (generation !== state.generation) return false;
+    var stored = false;
+    reply.items.forEach(function (item) {
+      if (item.stale || (state.invalidatedAt[item.stepId] || 0) > mark) return;
+      state.bodies[item.stepId] = item;
+      stored = true;
+    });
+    return stored;
   });
 }
 
@@ -1813,10 +1883,16 @@ function rebuildCompactIndex() {
 
 function runSearch(q) {
   state.query = q;
-  if (!q) { state.hits = []; state.curHit = -1; renderAll(); updateSearchCount(); return; }
+  // every change of the query, an emptied box too, outdates the replies still on their way
   var requestId = ++state.searchRequestId;
+  if (!q) {
+    state.hits = []; state.curHit = -1;
+    call({ type: 'cancelSearch' });
+    renderAll(); updateSearchCount();
+    return;
+  }
   call({ type: 'search', query: q }).then(function (reply) {
-    if (!reply || reply.requestId !== undefined && state.searchRequestId !== requestId) return;
+    if (!reply || state.searchRequestId !== requestId) return;
     state.hits = reply.stepIds || [];
     state.curHit = state.hits.length ? 0 : -1;
     state.hitsCapped = Boolean(reply.capped);
@@ -1845,10 +1921,7 @@ function jumpToHit() {
   var stepId = state.hits[state.curHit];
   if (!stepId) return;
   if (!state.bodies[stepId]) {
-    call({ type: 'bodies', stepIds: [stepId], generation: state.generation }).then(function (reply) {
-      ((reply && reply.items) || []).forEach(function (item) { if (!item.stale) state.bodies[item.stepId] = item; });
-      scrollToStepId(stepId);
-    });
+    requestBodies([stepId]).then(function () { scrollToStepId(stepId); });
   } else {
     scrollToStepId(stepId);
   }
@@ -1886,7 +1959,13 @@ qInput.addEventListener('input', function () {
   state.searchTimer = setTimeout(function () { runSearch(val.trim()); }, SEARCH_DEBOUNCE_MS);
 });
 qInput.addEventListener('keydown', function (ev) {
-  if (ev.key === 'Enter') { clearTimeout(state.searchTimer); moveHit(ev.shiftKey ? -1 : 1); }
+  if (ev.key !== 'Enter') return;
+  clearTimeout(state.searchTimer);
+  // Enter before the pause after typing is over: what is in the box has not been searched
+  // yet, so search it; only a query already searched moves between its hits
+  var typed = qInput.value.trim();
+  if (typed !== state.query) runSearch(typed);
+  else moveHit(ev.shiftKey ? -1 : 1);
 });
 document.getElementById('next').addEventListener('click', function () { moveHit(1); });
 document.getElementById('prev').addEventListener('click', function () { moveHit(-1); });
@@ -2029,45 +2108,6 @@ function scheduleSeenUpdate() {
   }, SEEN_DEBOUNCE_MS);
 }
 document.addEventListener('visibilitychange', function () { if (!document.hidden) scheduleSeenUpdate(); });
-
-// -- compact index maintenance on open / pushes ----------------------------------------------
-
-var _mergeSections = mergeSections;
-mergeSections = function (sections, strip, isReset) {
-  _mergeSections(sections, strip, isReset);
-  rebuildCompactIndex();
-};
-
-// a fresh open() reply also carries the flat "steps" compact list (kind/time/preview per step,
-// including ones bundled into Work rows that section bodies only reference by id); fold it into
-// compactById once up front so work-line summaries and timestamps have something to read before
-// any body text has loaded.
-var _openSession = openSession;
-openSession = function () {
-  state.compactById = Object.create(null);
-  startPolling();
-  if (!SESSION_ID) { showError('no session to show'); return; }
-  call({ type: 'open' }).then(function (reply) {
-    if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
-    state.loaded = true;
-    state.title = reply.title || 'Session ' + SESSION_ID.slice(0, 8);
-    (reply.steps || []).forEach(function (s) { state.compactById[s.id] = s; });
-    state.sections = reply.sections || [];
-    state.strip = reply.strip || null;
-    state.generation = reply.generation || 0;
-    state.indexing = Boolean(reply.indexing);
-    state.seenStepId = reply.seenStepId || null;
-    state.notes = reply.notes || [];
-    document.getElementById('title').textContent = state.title;
-    document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
-    rebuildCompactIndex();
-    renderIndexNote();
-    renderStrip();
-    renderAll();
-    renderNotesJumpLabel();
-    scrollToEndOnLoad();
-  });
-};
 
 // -- narrow layout: outline drawer -----------------------------------------------------------
 

@@ -24,20 +24,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-stepsvc-'));
 let fileCounter = 0;
 function newFile() { return path.join(tmp, 'tr-' + (++fileCounter) + '.jsonl'); }
 
-function uuid(n) {
-  const s = String(n).padStart(12, '0');
-  return '00000000-0000-4000-8000-' + s;
-}
-function line(obj) { return JSON.stringify(obj) + '\n'; }
-function writeLines(file, objs) { fs.writeFileSync(file, objs.map(line).join('')); }
-function userLine(u, parent, text, extra) {
-  return Object.assign({ type: 'user', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 0, Number(u.slice(-2)) || 0).toISOString(),
-    message: { role: 'user', content: text } }, extra);
-}
-function assistantLine(u, parent, msgId, content, extra) {
-  return Object.assign({ type: 'assistant', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 2, Number(u.slice(-2)) || 0).toISOString(),
-    message: { id: msgId, role: 'assistant', content } }, extra);
-}
+const { uuid, line, writeLines, userLine, toolResultLine, assistantLine } = require('./shim/transcript.cjs');
 
 /* a fake timer: setInterval/clearInterval replaced with handles the test fires by hand */
 function fakeTimer() {
@@ -415,6 +402,72 @@ test('follow: appended steps and a reset are pushed as stepsChanged', async () =
   const changed = pushes.filter((m) => m.type === 'stepsChanged');
   assert.ok(changed.length >= 1);
   assert.ok(changed[changed.length - 1].sections);
+});
+
+test('follow: an answer that arrives for a question already shown is pushed on its own, naming the question as updated and carrying the section it opens', async () => {
+  const file = newFile();
+  const ask = { questions: [{ header: 'Way', question: 'Which way?', multiSelect: false, options: [{ label: 'Left', description: 'the short way' }, { label: 'Right', description: 'the long way' }] }] };
+  writeLines(file, [
+    userLine(uuid(1), null, 'go'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: ask }]),
+  ]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  svc.subscribe(A, (msg) => pushes.push(msg));
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const question = opened.steps.find((s) => s.kind === 'question');
+  assert.equal(opened.sections.some((sec) => sec.kind === 'question'), false, 'no answer yet, so no question section');
+
+  fs.appendFileSync(file, line(toolResultLine(uuid(3), uuid(2), 'q1', 'Your questions have been answered: "Which way?"="Right". You can now continue.')));
+  await deps.__timer.fireAll();
+  const changed = pushes.filter((m) => m.type === 'stepsChanged');
+  assert.equal(changed.length, 1, 'the answer alone is worth a push');
+  assert.deepEqual(changed[0].updated, [question.id]);
+  assert.deepEqual(changed[0].appended, []);
+  assert.ok(changed[0].sections.some((sec) => sec.kind === 'question' && sec.heading === 'Right'), 'the section the answer opens');
+  assert.equal(changed[0].generation, opened.generation, 'a push says which generation its steps belong to');
+
+  // nothing new in the file: no further push
+  await deps.__timer.fireAll();
+  assert.equal(pushes.filter((m) => m.type === 'stepsChanged').length, 1);
+});
+
+test('follow: after the transcript is replaced, the reset push carries the new generation', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'first life'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'one' }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  svc.subscribe(A, (msg) => pushes.push(msg));
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  fs.unlinkSync(file);
+  writeLines(file, [userLine(uuid(1), null, 'second life')]);
+  await deps.__timer.fireAll();
+  const reset = pushes.filter((m) => m.type === 'stepsChanged' && m.reset !== undefined && m.reset !== null).pop();
+  assert.ok(reset, 'a reset push');
+  assert.equal(typeof reset.generation, typeof opened.generation, 'the push names its generation');
+  assert.notEqual(reset.generation, opened.generation);
+  const stale = await svc.handle({ type: 'bodies', sessionId: A, stepIds: [reset.steps[0].id], generation: opened.generation });
+  assert.equal(stale.items[0].stale, true, 'the generation of the open no longer answers');
+  const b = await svc.handle({ type: 'bodies', sessionId: A, stepIds: [reset.steps[0].id], generation: reset.generation });
+  assert.equal(b.items[0].text, 'second life', 'a body asked for with the generation of the push is served');
+});
+
+test('a viewer that closes while its open is still reading leaves no follow timer behind', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const unsubscribe = svc.subscribe(A, () => {});
+  const opening = svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  unsubscribe();   // the panel is closed before the first reply
+  const opened = await opening;
+  assert.equal(deps.__timer.size(), 0, 'no timer for a session nobody watches');
+  assert.equal(opened.ok, false);
 });
 
 // every step id a section list names: its opener, its own rows and the items of its Work lines

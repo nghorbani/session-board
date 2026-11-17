@@ -69,6 +69,8 @@ const fake = {
    reply and notesChanged carrying the full list), without touching a real data directory. */
 function noteList() { return [...fake.notes.values()].sort((a, b) => a.at - b.at); }
 function handleNoteMessage(msg) {
+  // a scripted refusal of a save, with the reason the real store would give
+  if (fake.noteReject && (msg.type === 'noteAdd' || msg.type === 'noteEdit')) return { type: msg.type + 'Result', ok: false, message: fake.noteReject };
   if (msg.type === 'noteAdd') {
     const id = 'note-' + (++noteSeq);
     const note = { id, stepId: msg.stepId, at: Date.now(), text: msg.text, sent: [] };
@@ -181,7 +183,7 @@ async function serve(req, res) {
     }
     if (msg.type === 'body') return json(res, 200, Object.assign({ type: 'bodyResult', sessionId: msg.sessionId, stepId: msg.stepId }, fake.body(msg.stepId)));
     if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: fake.bodies(msg.stepIds || []) });
-    if (msg.type === 'search') return json(res, 200, Object.assign({ type: 'searchResult', requestId: msg.requestId, query: msg.query }, fake.search(msg.query)));
+    if (msg.type === 'search') return json(res, 200, Object.assign({ type: 'searchResult', requestId: msg.requestId, query: msg.query }, await fake.search(msg.query)));
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return json(res, 200, { type: 'openTextResult', notAvailable: true });
@@ -346,6 +348,7 @@ test.beforeEach(() => {
   fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
   fake.notes.clear();
   fake.dropOnce = null;
+  fake.noteReject = null;
 });
 
 // -- transport ------------------------------------------------------------------------------
@@ -517,6 +520,25 @@ test('page: a step that arrives while following is drawn with its time and its W
     const s = await page.until((x) => x.rowTimes.length === 3 && x.workSums.length === 1, 'the appended Work line and text (two text rows and the Work line carry a time)');
     assert.ok(s.rowTimes.every((t) => /^\d\d:\d\d:\d\d$/.test(t)), 'the new text row carries its time: ' + JSON.stringify(s.rowTimes));
     assert.ok(s.workSums[0].indexOf('run the tests') !== -1, 'the new Work line says what was done: ' + JSON.stringify(s.workSums));
+    await page.close();
+  } finally { real.done(); }
+});
+
+test('page: an answer that arrives for a question already on screen is marked on its card, without a reload (real reader)', opts, async () => {
+  const ask = { type: 'assistant', uuid: ru(2), parentUuid: ru(1), timestamp: rat(2), message: { id: 'm2', role: 'assistant', content: [{ type: 'tool_use', id: 'ask1', name: 'AskUserQuestion',
+    input: { questions: [{ header: 'Approach', question: 'Which way should we go?', multiSelect: false, options: [{ label: 'Option A', description: 'the simple route' }, { label: 'Option B', description: 'the thorough route' }] }] } }] } };
+  const answer = { type: 'user', uuid: ru(3), parentUuid: ru(2), timestamp: rat(3), toolUseResult: {}, sourceToolAssistantUUID: ru(2),
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'ask1', content: 'Your questions have been answered: "Which way should we go?"="Option B". You can now continue.' }] } };
+  const real = realService([rUser(1, 'start'), ask]);
+  try {
+    const page = await openPage(A);
+    let s = await page.until((x) => x.qOptions.length === 2, 'the open question with both options');
+    assert.equal(s.qOptions.some((o) => o.chosen), false, 'nothing is chosen while the question waits');
+    fs.appendFileSync(real.file, JSON.stringify(answer) + '\n');
+    await real.tick();
+    s = await page.until((x) => x.qOptions.some((o) => o.label === 'Option B' && o.chosen), 'the answer marked on the card');
+    assert.ok(s.secLabels.some((l) => l.indexOf('Question and answer') === 0), 'the answer opens its section: ' + JSON.stringify(s.secLabels));
+    assert.ok(s.stripNums.indexOf('Decisions=2') !== -1, 'and counts as a decision: ' + JSON.stringify(s.stripNums));
     await page.close();
   } finally { real.done(); }
 });
@@ -897,6 +919,45 @@ test('page: search next and previous land on a hit inside a folded Work line', o
   await page.close();
 });
 
+function searchFixture() {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'tool', { title: 'Bash' })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'run a command', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
+    ],
+  });
+  fake.body = (stepId) => {
+    if (stepId === 't1:0') return { title: 'Bash', input: '$ grep needle file.txt', result: 'needle found here', path: '' };
+    return { text: 'body of ' + stepId, truncated: false, size: 10 };
+  };
+}
+
+test('page: Enter pressed right after typing runs that search, it does not drop it', opts, async () => {
+  searchFixture();
+  fake.search = (q) => (q === 'needle' ? { stepIds: ['t1:0'], capped: false } : { stepIds: [], capped: false });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'the page to render');
+  await page.eval('(function () { var i = document.getElementById("q"); i.value = "needle"; i.dispatchEvent(new Event("input")); i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); return true; })()');
+  await page.until((x) => x.searchCount === '1 of 1', 'the search typed before Enter to run');
+  await page.close();
+});
+
+test('page: a search reply that arrives after the box was cleared is dropped', opts, async () => {
+  searchFixture();
+  fake.search = (q) => new Promise((resolve) => setTimeout(() => resolve(q === 'needle' ? { stepIds: ['t1:0'], capped: false } : { stepIds: [], capped: false }), 700));
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'the page to render');
+  await page.search('needle');
+  await sleep(250);   // past the debounce: the search is on its way
+  await page.search('');
+  await sleep(1100);  // the slow reply has landed by now
+  const s = await page.sample();
+  assert.equal(s.searchCount, '', 'no count for an empty box');
+  assert.equal(s.curHitId, null, 'and no jump to a hit of the old search');
+  await page.close();
+});
+
 // -- follow / live push -------------------------------------------------------------------
 
 test('page: a follow push appends steps without jumping when scrolled up', opts, async () => {
@@ -1070,6 +1131,47 @@ test('page: an open note box keeps what was typed, and stays open, when pushes r
   const s = await page.until((x) => x.sectionHeadings.length === 4 && x.notesTileNum === '1', 'both pushes to land');
   assert.equal(s.noteBoxOpen, true, 'the box on a step without a note stays open');
   assert.equal(s.noteBoxText, 'half a thought', 'and keeps what was typed');
+  await page.close();
+});
+
+test('page: a note that cannot be kept stays in its box with the reason shown, and is kept on the next try', opts, async () => {
+  const sections = [section('lead', 'Session start', null, []), section('you', 'first message', 'u1:0', [])];
+  fake.open = () => openReply({ steps: [step('u1:0', 'you')], sections });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
+  await page.eval('(function () { document.getElementById("step-u1:0").querySelector(".add-note").click(); })()');
+  await page.until((x) => x.noteBoxOpen, 'the note box to open');
+  await page.eval('(function () { var ta = document.querySelector(".notebox textarea"); ta.value = "a long thought"; ta.dispatchEvent(new Event("input", { bubbles: true })); })()');
+  fake.noteReject = 'a note is 16 KB at most';
+  await page.click('.notebox .row2 button:first-child');
+  let s = await page.until((x) => x.notices.some((n) => n.indexOf('16 KB') !== -1), 'the reason the note was not kept');
+  assert.equal(s.noteBoxOpen, true, 'the box stays open');
+  assert.equal(s.noteBoxText, 'a long thought', 'with what was typed');
+  assert.equal(s.notesTileNum, '0', 'nothing was kept');
+  fake.noteReject = null;
+  await page.click('.notebox .row2 button:first-child');
+  s = await page.until((x) => !x.noteBoxOpen && x.savedNoteText && x.savedNoteText.indexOf('a long thought') !== -1, 'the note kept on the second try');
+  await page.close();
+});
+
+test('page: switching to Notes from the end of a long session shows the noted section, not an empty reader', opts, async () => {
+  const steps = [];
+  const sections = [section('lead', 'Session start', null, [])];
+  for (let i = 0; i < 300; i++) {
+    const id = 'u' + i + ':0';
+    steps.push(step(id, 'you'));
+    sections.push(section('you', 'turn ' + i, id, []));
+  }
+  fake.notes.set('n1', { id: 'n1', stepId: 'u5:0', at: 1, text: 'look here', sent: [] });
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 600000, sections: 300, decisions: 300, filesChanged: 0 } });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length > 0 && x.notesTileNum === '1', 'first paint, at the end of the story');
+  // read in the same turn as the click: the first draw must hold the note, not a spacer that
+  // only a later scroll event turns into rows
+  const drawnAtOnce = await page.eval('(function () { document.querySelector(".strip .item:nth-child(5)").click(); return !!document.querySelector(".saved-note"); })()');
+  assert.equal(drawnAtOnce, true, 'the noted section is drawn by the switch itself');
+  const s = await page.until((x) => x.notesTileOn && x.savedNoteText && x.savedNoteText.indexOf('look here') !== -1, 'the noted section in the Notes view');
+  assert.deepEqual(s.sectionHeadings, ['turn 5'], 'the outline holds the one section with a note');
   await page.close();
 });
 

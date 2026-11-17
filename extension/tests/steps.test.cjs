@@ -18,26 +18,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-'));
 let fileCounter = 0;
 function newFile() { return path.join(tmp, 'tr-' + (++fileCounter) + '.jsonl'); }
 
-function uuid(n) {
-  const s = String(n).padStart(12, '0');
-  return '00000000-0000-4000-8000-' + s;
-}
-function line(obj) { return JSON.stringify(obj) + '\n'; }
-function writeLines(file, objs) { fs.writeFileSync(file, objs.map(line).join('')); }
-
-function userLine(u, parent, text, extra) {
-  return Object.assign({ type: 'user', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 0, Number(u.slice(-2)) || 0).toISOString(),
-    message: { role: 'user', content: text } }, extra);
-}
-function toolResultLine(u, parent, toolUseId, resultContent, extra) {
-  return Object.assign({ type: 'user', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 1, Number(u.slice(-2)) || 0).toISOString(),
-    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: resultContent }] },
-    toolUseResult: {}, sourceToolAssistantUUID: parent }, extra);
-}
-function assistantLine(u, parent, msgId, content, extra) {
-  return Object.assign({ type: 'assistant', uuid: u, parentUuid: parent, timestamp: new Date(2026, 0, 1, 0, 2, Number(u.slice(-2)) || 0).toISOString(),
-    message: { id: msgId, role: 'assistant', content } }, extra);
-}
+const { uuid, line, writeLines, userLine, toolResultLine, assistantLine } = require('./shim/transcript.cjs');
 
 test('split API response: two assistant lines sharing one message id both contribute steps', async () => {
   const file = newFile();
@@ -420,6 +401,45 @@ test('a path change (retry after the fact) reports a reset point', async () => {
   const bodies = idx.steps().map((s) => (s.kind === 'you' || s.kind === 'text') ? idx.body(s.id).text : null);
   assert.equal(bodies.includes('first reply'), false);
   assert.equal(bodies.includes('second reply'), true);
+});
+
+test('a result that arrives for a step already on the path is reported as updated: the answer to a question, a tool result, a plan approval', async () => {
+  const file = newFile();
+  const ask = { questions: [{ header: 'Way', question: 'Which way?', multiSelect: false, options: [{ label: 'Left', description: 'the short way' }, { label: 'Right', description: 'the long way' }] }] };
+  writeLines(file, [
+    userLine(uuid(1), null, 'go'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: ask }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const question = idx.steps().find((s) => s.kind === 'question');
+  assert.equal(idx.body(question.id).questions[0].answered, false, 'no answer yet');
+
+  // the answer alone: no new step, but the question step now reads differently
+  fs.appendFileSync(file, line(toolResultLine(uuid(3), uuid(2), 'q1', 'Your questions have been answered: "Which way?"="Right". You can now continue.')));
+  let res = await idx.poll();
+  assert.deepEqual(res.appended.map((s) => s.kind), [], 'an answer adds no step');
+  assert.deepEqual(res.updated.map((s) => s.id), [question.id], 'the question step is named as updated');
+  assert.equal(idx.body(question.id).questions[0].options.find((o) => o.label === 'Right').chosen, true);
+
+  // a tool call, then its result in a later poll
+  fs.appendFileSync(file, line(assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test', description: 'run the tests' } }])));
+  res = await idx.poll();
+  assert.deepEqual(res.appended.map((s) => s.kind), ['tool']);
+  assert.deepEqual(res.updated, [], 'a step that is new in this poll is not also listed as updated');
+  const tool = res.appended[0];
+  fs.appendFileSync(file, line(toolResultLine(uuid(5), uuid(4), 't1', '12 passed')));
+  res = await idx.poll();
+  assert.deepEqual(res.updated.map((s) => s.id), [tool.id]);
+  assert.equal(idx.body(tool.id).result, '12 passed');
+
+  // a call and its result in one poll: appended only
+  fs.appendFileSync(file, line(assistantLine(uuid(6), uuid(5), 'm3', [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: { plan: 'the plan' } }]))
+    + line(toolResultLine(uuid(7), uuid(6), 'p1', 'User has approved your plan.')));
+  res = await idx.poll();
+  assert.deepEqual(res.appended.map((s) => s.kind), ['plan']);
+  assert.deepEqual(res.updated, []);
+  assert.equal(res.appended[0].approved, true);
 });
 
 test('file shrink starts a new generation with a fresh index', async () => {

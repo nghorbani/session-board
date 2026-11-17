@@ -170,14 +170,14 @@ function createStepsService(deps) {
         if (sameSlot() && (lastProgressAt === null || now() - lastProgressAt >= progressIntervalMs)) {
           lastProgressAt = now();
           const { sections, strip } = buildSections(idx.steps(), idx.body);
-          push(sessionId, { type: 'stepsProgress', sessionId, fraction: frac, done: false, sections, strip, steps: freshCompact(s, idx.steps()) });
+          push(sessionId, { type: 'stepsProgress', sessionId, generation: idx.generation(), fraction: frac, done: false, sections, strip, steps: freshCompact(s, idx.steps()) });
         }
       }).then(() => {
         takeFirstPaint();   // settling is always a cue too, however small the file or short the pass
         if (sameSlot()) {
           s.indexing = false;
           const { sections, strip } = buildSections(idx.steps(), idx.body);
-          push(sessionId, { type: 'stepsProgress', sessionId, fraction: 1, done: true, sections, strip, steps: freshCompact(s, idx.steps()) });
+          push(sessionId, { type: 'stepsProgress', sessionId, generation: idx.generation(), fraction: 1, done: true, sections, strip, steps: freshCompact(s, idx.steps()) });
         }
       }, (e) => {
         takeFirstPaint();
@@ -193,20 +193,30 @@ function createStepsService(deps) {
     if (s.timer != null) return;
     s.timer = setIntervalFn(async () => {
       try {
+        // a slot released while a tick was waiting (the last viewer closed) has nobody to tell
+        if (sessions.get(sessionId) !== s) { stopFollow(s); return; }
         if (s.indexing) return;   // the backward pass still owns sizeSeen; wait for it to finish once
         const res = await s.index.poll();
         if (!fs.existsSync(s.file)) {
           push(sessionId, { type: 'stepsChanged', sessionId, error: 'transcript moved or removed' });
           return;
         }
-        if (!res.appended.length && res.reset === null) return;
+        // A result that came in for a step already shown (an answer, an approval, a tool's
+        // output) adds no step, but it changes what that step says and can open a section.
+        const updated = res.updated || [];
+        if (!res.appended.length && !updated.length && res.reset === null) return;
         const { sections, strip } = buildSections(s.index.steps(), s.index.body);
+        const generation = s.index.generation();
         if (res.reset !== null && res.reset !== undefined) {
           // the path changed further back: ids may answer to other steps now, so send them all
           s.pushedIds = new Set();
-          push(sessionId, { type: 'stepsChanged', sessionId, reset: res.reset, sections, strip, steps: freshCompact(s, s.index.steps()) });
+          push(sessionId, { type: 'stepsChanged', sessionId, generation, reset: res.reset, sections, strip, steps: freshCompact(s, s.index.steps()) });
         } else {
-          push(sessionId, { type: 'stepsChanged', sessionId, appended: res.appended.map((st) => st.id), sections, strip, steps: freshCompact(s, res.appended) });
+          push(sessionId, {
+            type: 'stepsChanged', sessionId, generation,
+            appended: res.appended.map((st) => st.id), updated: updated.map((st) => st.id),
+            sections, strip, steps: freshCompact(s, res.appended).concat(compactSteps(updated)),
+          });
         }
       } catch (e) {
         push(sessionId, { type: 'stepsChanged', sessionId, error: errorMessage(e) });
@@ -257,6 +267,9 @@ function createStepsService(deps) {
       return Object.assign(reply, { ok: false, message: errorMessage(e) });
     }
     if (!s) return Object.assign(reply, { ok: false, message: 'no transcript found for this session' });
+    // The viewer may have closed while the first pass was reading: its slot is gone then, and a
+    // timer started now would poll the file for nobody until the host exits.
+    if (sessions.get(sessionId) !== s) return Object.assign(reply, { ok: false, message: 'the viewer closed before the transcript was read' });
     startFollow(sessionId, s);
     const stepsArr = s.index.steps();
     const { sections, strip } = buildSections(stepsArr, s.index.body);

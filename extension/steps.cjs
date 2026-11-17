@@ -238,6 +238,10 @@ function createStepIndex(file, deps) {
   let path = [];        // step records along the active path, in order
   let pathById = new Map();    // step id -> step record of the active path
   let resultFacts = new Map(); // tool_use_id -> what a plan or question step takes from its result
+  // While a poll reads what the file gained: the tool_use ids whose result or report came in.
+  // A result adds no step of its own, but the step of its call reads differently from then on
+  // (a question has its answer, a plan its approval, a tool its output).
+  let touched = null;
 
   function fileIdentity() {
     try {
@@ -288,6 +292,7 @@ function createStepIndex(file, deps) {
           if (!b || b.type !== 'tool_result') continue;
           const t = resultText(b.content);
           toolResults.set(b.tool_use_id, { offset, length });
+          if (touched) touched.add(b.tool_use_id);
           const agMatch = /agentId:\s*([^\s).]+)/.exec(t);
           if (agMatch) agentIdOfToolUse.set(b.tool_use_id, agMatch[1]);
         }
@@ -301,7 +306,10 @@ function createStepIndex(file, deps) {
     if (raw.indexOf('<task-notification>') !== -1) {
       const id = between(raw, '<tool-use-id>', '</tool-use-id>').trim();
       const r = between(raw, '<result>', '</result>').trim();
-      if (id && r && r.indexOf('was delivered to you as a message') === -1) reportsByToolUse.set(id, r);
+      if (id && r && r.indexOf('was delivered to you as a message') === -1) {
+        reportsByToolUse.set(id, r);
+        if (touched) touched.add(id);
+      }
     }
     if (raw.indexOf('<agent-message from="') !== -1) {
       const ag = between(raw, '<agent-message from="', '"');
@@ -309,7 +317,10 @@ function createStepIndex(file, deps) {
       const mark = r.indexOf('The report follows:');
       if (mark !== -1) r = r.slice(mark + 19);
       r = r.split('\n').map((l) => (l.startsWith('  ') ? l.slice(2) : l)).join('\n').trim();
-      if (ag && r) reportsByAgentId.set(ag, r);
+      if (ag && r) {
+        reportsByAgentId.set(ag, r);
+        if (touched) for (const [toolUseId, agentId] of agentIdOfToolUse) if (agentId === ag) touched.add(toolUseId);
+      }
     }
   }
 
@@ -422,21 +433,27 @@ function createStepIndex(file, deps) {
 
   async function poll() {
     const ident = fileIdentity();
-    if (!ident) return { appended: [], reset: undefined, unreadable, generation };
+    if (!ident) return { appended: [], updated: [], reset: undefined, unreadable, generation };
     if (!sameIdentity(ident, identity) || ident.size < sizeSeen) {
       const prevPathIds = path.map((s) => s.id);
       await open();
-      return { appended: path.slice(), reset: prevPathIds.length ? (path[0] ? path[0].id : null) : null, unreadable, generation };
+      return { appended: path.slice(), updated: [], reset: prevPathIds.length ? (path[0] ? path[0].id : null) : null, unreadable, generation };
     }
-    if (ident.size === sizeSeen) return { appended: [], reset: null, unreadable, generation };
+    if (ident.size === sizeSeen) return { appended: [], updated: [], reset: null, unreadable, generation };
     const buf = readRange(sizeSeen, ident.size);
     const { records, consumedBytes } = splitLines(buf, sizeSeen);
-    for (const r of records) ingest(r.obj, r.offset, r.length);
+    const gained = new Set();
+    touched = gained;
+    try { for (const r of records) ingest(r.obj, r.offset, r.length); } finally { touched = null; }
     sizeSeen += consumedBytes;
     identity = ident;
     const oldPath = path;
     recomputePath();
-    return diffPath(oldPath, path);
+    const res = diffPath(oldPath, path);
+    // steps that were on the path before this poll and whose result came in with it
+    const fresh = new Set(res.appended.map((s) => s.id));
+    res.updated = gained.size ? path.filter((st) => st.toolUseId && gained.has(st.toolUseId) && !fresh.has(st.id)) : [];
+    return res;
   }
 
   function diffPath(oldPath, newPath) {
