@@ -161,6 +161,8 @@ async function serve(req, res) {
   }
   if (u.pathname === '/api/steps/poll') {
     if (req.headers['x-board-token'] !== TOKEN) return json(res, 403, { error: 'forbidden' });
+    // what server.cjs answers once it has let go of a viewer that stopped asking
+    if (fake.expireOnce) { fake.expireOnce = false; return json(res, 200, { expired: true, seq: 0, pushes: [] }); }
     const after = Number(u.searchParams.get('after') || 0);
     const items = fake.pushes.slice(after);
     return json(res, 200, { seq: fake.pushes.length, pushes: items });
@@ -275,6 +277,11 @@ const SAMPLE = `(function () {
     secLabels: q('.sec-head .lbl').map(function (e) { return e.textContent; }),
     rowTimes: q('.row .meta .time').map(function (e) { return e.textContent; }),
     bodyTexts: q('.row .body.md').map(function (e) { return e.textContent; }),
+    // rows of the story that the reader's viewport shows at least a part of
+    rowsInView: (function () {
+      var r = document.getElementById('reader').getBoundingClientRect();
+      return q('.row[data-step]').filter(function (row) { var b = row.getBoundingClientRect(); return b.bottom > r.top && b.top < r.bottom; }).length;
+    })(),
     // the text rows inside the reader's viewport, and how many of them hold their full text
     textsInView: (function () {
       var r = document.getElementById('reader').getBoundingClientRect();
@@ -350,6 +357,7 @@ test.beforeEach(() => {
   fake.notes.clear();
   fake.dropOnce = null;
   fake.noteReject = null;
+  fake.expireOnce = false;
 });
 
 // -- transport ------------------------------------------------------------------------------
@@ -1059,6 +1067,66 @@ test('page: "Open full text" on a cut text asks for the step, and a browser copi
   assert.deepEqual(sent.map((m) => [m.type, m.stepId]), [['openText', 't1:0'], ['fullText', 't1:0']], 'the step is named, its text is not sent back and forth');
   assert.equal(sent[0].text, undefined, 'the page does not send the cut text as if it were the whole');
   assert.ok(s.notices.length >= 1);
+  await page.close();
+});
+
+test('page: told by its poll that the server let go of it, the page opens the session again and stays where the reader was', opts, async () => {
+  const steps = [];
+  const sections = [section('lead', 'Session start', null, [])];
+  for (let i = 0; i < 200; i++) {
+    const id = 'u' + i + ':0';
+    steps.push(step(id, 'you'));
+    sections.push(section('you', 'turn ' + i, id, []));
+  }
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 600000, sections: 200, decisions: 200, filesChanged: 0 } });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 200, 'first paint');
+  await page.scroll(4000);
+  await page.until((x) => x.scrollTop > 500 && !x.atBottom, 'the reader somewhere in the middle');
+  await sleep(300);   // the window of drawn sections settles around the new place
+  const before = await page.sample();
+  // the row at the top of the reader: the place is that row, not a scroll offset, since the
+  // heights of the sections that are not drawn are estimates
+  const topRow = '(function () { var r = document.getElementById("reader"); var top = r.getBoundingClientRect().top; var rows = r.querySelectorAll("[data-step]");'
+    + ' for (var i = 0; i < rows.length; i++) { if (rows[i].getBoundingClientRect().bottom > top) return rows[i].getAttribute("data-step"); } return null; })()';
+  const rowBefore = await page.eval(topRow);
+  assert.equal(fake.calls.filter((m) => m && m.type === 'open').length, 1);
+  fake.expireOnce = true;
+  await page.until(() => fake.calls.filter((m) => m && m.type === 'open').length === 2, 'the page to open again');
+  await sleep(400);
+  const after = await page.sample();
+  assert.equal(after.error, null);
+  assert.equal(after.sectionHeadings.length, before.sectionHeadings.length, 'the outline is whole again');
+  assert.ok(rowBefore, 'a row was at the top before');
+  assert.equal(await page.eval(topRow), rowBefore, 'the same row is at the top of the reader');
+  assert.equal(after.atBottom, false, 'and the reader did not jump to the end');
+  await page.close();
+});
+
+test('page: a jump with the scrollbar in a long session lands on rows of the story, up as well as down, never on an empty stretch', opts, async () => {
+  const steps = [];
+  const sections = [section('lead', 'Session start', null, [])];
+  for (let i = 0; i < 400; i++) {
+    const id = 'u' + i + ':0';
+    steps.push(step(id, 'you'));
+    sections.push(section('you', 'turn ' + i, id, []));
+  }
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 600000, sections: 400, decisions: 400, filesChanged: 0 } });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 400 && x.rowsInView > 0, 'first paint, at the end');
+  // far up: a place whose sections are not drawn
+  await page.scroll(3000);
+  await sleep(700);
+  let s = await page.sample();
+  assert.ok(s.rowsInView > 0, 'rows are in view after the jump up, at scroll position ' + s.scrollTop);
+  assert.equal(s.atBottom, false);
+  const first = s.youText;
+  // and back down to the very end
+  await page.eval('(function () { var r = document.getElementById("reader"); r.scrollTop = r.scrollHeight; r.dispatchEvent(new Event("scroll")); return true; })()');
+  await sleep(700);
+  s = await page.sample();
+  assert.ok(s.rowsInView > 0, 'rows are in view after the jump down, at scroll position ' + s.scrollTop);
+  assert.notEqual(s.youText, first, 'another part of the story is drawn');
   await page.close();
 });
 

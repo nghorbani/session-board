@@ -57,12 +57,35 @@ const stepsService = createStepsService({
   // text reached a chat box, and a browser copy never does.
   deliver: async () => ({ ok: false, message: 'On the clipboard. Paste it into the session.' }),
 });
-let stepsSubscribed = new Set();
-function ensureStepsSubscription(sessionId) {
-  if (stepsSubscribed.has(sessionId)) return;
-  stepsSubscribed.add(sessionId);
-  stepsService.subscribe(sessionId, (msg) => queuePush(sessionId, msg));
+/*
+ * A browser tab cannot say that it closed, so a viewer is known by its requests: every POST
+ * and every poll for a session marks it as seen, and a session nobody asked about for
+ * STEPS_VIEWER_IDLE_TICKS ticks is released (its subscription, and with the last one the
+ * service's index and follow timer, and its push queue). Idle time is counted in ticks of this
+ * process, not by the clock, so a machine that slept does not wake to find its tabs released.
+ * A tab that comes back (a hidden tab polls rarely) is told so by its poll and opens again.
+ */
+const STEPS_VIEWER_TICK_MS = Number(process.env.SB_STEPS_VIEWER_TICK_MS) || 30000;      // overridable for the tests
+const STEPS_VIEWER_IDLE_TICKS = Number(process.env.SB_STEPS_VIEWER_IDLE_TICKS) || 10;   // 5 minutes at the default tick
+const stepsViewers = new Map();   // sessionId -> { unsubscribe, idleTicks }
+function touchStepsViewer(sessionId) {
+  let v = stepsViewers.get(sessionId);
+  if (!v) {
+    v = { unsubscribe: stepsService.subscribe(sessionId, (msg) => queuePush(sessionId, msg)), idleTicks: 0 };
+    stepsViewers.set(sessionId, v);
+  }
+  v.idleTicks = 0;
 }
+function releaseIdleStepsViewers() {
+  for (const [sessionId, v] of stepsViewers) {
+    v.idleTicks += 1;
+    if (v.idleTicks <= STEPS_VIEWER_IDLE_TICKS) continue;
+    v.unsubscribe();
+    stepsViewers.delete(sessionId);
+    pushQueues.delete(sessionId);
+  }
+}
+setInterval(releaseIdleStepsViewers, STEPS_VIEWER_TICK_MS).unref();
 
 /** Escapes a value for use inside a double-quoted HTML attribute. */
 function escapeAttr(s) {
@@ -303,7 +326,7 @@ async function handle(req, res) {
     // has nowhere to go here, so the page copies it to the clipboard and says so.
     if (msg.type === 'openLink') return sendJson(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return sendJson(res, 200, { type: 'openTextResult', ok: false, notAvailable: true });
-    if (msg.sessionId) ensureStepsSubscription(String(msg.sessionId));
+    if (msg.sessionId && core.UUID_RE.test(String(msg.sessionId))) touchStepsViewer(String(msg.sessionId));
     const reply = await stepsService.handle(msg);
     return sendJson(res, 200, reply);
   }
@@ -311,6 +334,9 @@ async function handle(req, res) {
   if (route === '/api/steps/poll' && req.method === 'GET') {
     const sessionId = String(parsed.searchParams.get('session') || '');
     if (!core.UUID_RE.test(sessionId)) return sendJson(res, 400, { error: 'not a session id' });
+    // a viewer released for being idle: the page opens again, which starts a new queue
+    if (!stepsViewers.has(sessionId)) return sendJson(res, 200, { expired: true, seq: 0, pushes: [] });
+    stepsViewers.get(sessionId).idleTicks = 0;
     const after = Number(parsed.searchParams.get('after') || 0) || 0;
     const q = pushQueues.get(sessionId);
     const items = q ? q.items.filter((it) => it.seq > after) : [];

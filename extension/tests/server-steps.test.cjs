@@ -42,27 +42,35 @@ async function call(method, route, opts) {
   return { status: r.status, body };
 }
 
+/** server.cjs as a child on a free port, with this suite's temp folders; resolves once it
+    listens and has handed out its token. */
+async function startServer(extraEnv) {
+  const p = await freePort();
+  const c = spawn(process.execPath, [path.join(__dirname, '..', '..', 'server.cjs')], {
+    env: Object.assign({}, process.env, { SESSION_DASHBOARD_PORT: String(p), LOCALAPPDATA: tmp, XDG_DATA_HOME: tmp, SB_CODE_USER_DIR: path.join(tmp, 'User'), SB_SESSIONS_DIR: path.join(tmp, 'sessions'), SB_PROJECTS_DIR: projectsDir }, extraEnv),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  await new Promise((res, rej) => {
+    let out = '';
+    c.stdout.on('data', (d) => { out += d; if (/Session Board: http/.test(out)) res(); });
+    c.stderr.on('data', (d) => { out += d; });
+    c.on('exit', (code) => rej(new Error('server exited ' + code + ': ' + out)));
+    setTimeout(() => rej(new Error('server did not start: ' + out)), 15000).unref();
+  });
+  const html = await (await fetch('http://127.0.0.1:' + p + '/')).text();
+  const t = (html.match(/name="board-token" content="([0-9a-f]+)"/) || [])[1] || '';
+  assert.ok(t, 'the page carries the token');
+  return { child: c, port: p, token: t };
+}
+
 test.before(async () => {
   fs.mkdirSync(slugDir, { recursive: true });
   fs.writeFileSync(transcript, [
     { type: 'user', uuid: uuid(1), parentUuid: null, timestamp: new Date().toISOString(), message: { role: 'user', content: 'hello from the fixture transcript' } },
   ].map(line).join(''));
   fs.mkdirSync(path.join(tmp, 'sessions'), { recursive: true });
-  port = await freePort();
-  child = spawn(process.execPath, [path.join(__dirname, '..', '..', 'server.cjs')], {
-    env: Object.assign({}, process.env, { SESSION_DASHBOARD_PORT: String(port), LOCALAPPDATA: tmp, XDG_DATA_HOME: tmp, SB_CODE_USER_DIR: path.join(tmp, 'User'), SB_SESSIONS_DIR: path.join(tmp, 'sessions'), SB_PROJECTS_DIR: projectsDir }),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  await new Promise((res, rej) => {
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; if (/Session Board: http/.test(out)) res(); });
-    child.stderr.on('data', (d) => { out += d; });
-    child.on('exit', (code) => rej(new Error('server exited ' + code + ': ' + out)));
-    setTimeout(() => rej(new Error('server did not start: ' + out)), 15000).unref();
-  });
-  const html = await (await fetch('http://127.0.0.1:' + port + '/')).text();
-  token = (html.match(/name="board-token" content="([0-9a-f]+)"/) || [])[1] || '';
-  assert.ok(token, 'the page carries the token');
+  const s = await startServer();
+  child = s.child; port = s.port; token = s.token;
 });
 
 test.after(async () => {
@@ -218,4 +226,29 @@ test('notesSendAll over the browser transport answers copy-only the same way', a
   assert.equal(result.body.type, 'notesSendAllResult');
   assert.equal(result.body.ok, false);
   assert.equal(result.body.message, 'On the clipboard. Paste it into the session.');
+});
+
+test('a browser viewer that stops polling is released: its next poll says so, and a new open starts over', async () => {
+  // a server of its own with a short idle limit: three ticks of 60 ms without a request
+  const srv = await startServer({ SB_STEPS_VIEWER_TICK_MS: '60', SB_STEPS_VIEWER_IDLE_TICKS: '3' });
+  const base = 'http://127.0.0.1:' + srv.port;
+  const headers = { 'x-board-token': srv.token, 'content-type': 'application/json' };
+  const post = async (msg) => (await fetch(base + '/api/steps', { method: 'POST', headers, body: JSON.stringify(msg) })).json();
+  const poll = async () => (await fetch(base + '/api/steps/poll?session=' + A + '&after=0', { headers })).json();
+  try {
+    const opened = await post({ type: 'open', requestId: 'r1', sessionId: A });
+    assert.equal(opened.ok, true);
+    // a viewer that keeps polling stays, well past the idle limit
+    for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 60)); assert.equal((await poll()).expired, undefined, 'still polling, still served'); }
+    await new Promise((r) => setTimeout(r, 600));   // the tab is closed: no request for ten ticks
+    const late = await poll();
+    assert.equal(late.expired, true, 'the poll of a released viewer says so');
+    const body = await post({ type: 'bodies', sessionId: A, stepIds: [opened.steps[0].id], generation: opened.generation });
+    assert.equal(body.items[0].stale, true, 'the index went with the viewer');
+    const again = await post({ type: 'open', requestId: 'r2', sessionId: A });
+    assert.equal(again.ok, true, 'a new open reads the transcript again');
+    assert.equal((await poll()).expired, undefined);
+  } finally {
+    srv.child.kill();
+  }
 });

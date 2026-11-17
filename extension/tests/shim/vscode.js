@@ -45,6 +45,7 @@ const api = {
   __inputs: [],        // showInputBox options
   __inputAnswer: undefined,   // what showInputBox resolves to (undefined = Escape)
   __executed: [],      // executeCommand calls: [id, ...args]
+  __commandErrors: Object.create(null),   // command id -> message, for a command a test makes fail
   __clipboard: [],     // clipboard writes
   __config: Object.create(null),   // sessionBoard.* settings a test sets; absent keys take the code's default
   __windowState: [],   // onDidChangeWindowState listeners
@@ -67,6 +68,7 @@ const api = {
     api.__inputs.length = 0;
     api.__inputAnswer = undefined;
     api.__executed.length = 0;
+    for (const k of Object.keys(api.__commandErrors)) delete api.__commandErrors[k];
     api.__clipboard.length = 0;
     api.__windowState.length = 0;
     api.__panels.length = 0;
@@ -110,7 +112,11 @@ const api = {
   },
   commands: {
     registerCommand: (id, fn) => { api.__commands[id] = fn; return disposable(); },
-    executeCommand: async (id, ...args) => { api.__executed.push([id, ...args]); return undefined; },
+    executeCommand: async (id, ...args) => {
+      api.__executed.push([id, ...args]);
+      if (api.__commandErrors[id]) throw new Error(api.__commandErrors[id]);
+      return undefined;
+    },
   },
   extensions: {
     getExtension: (id) => api.__extensions[id] || undefined,

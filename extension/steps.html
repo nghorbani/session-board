@@ -392,6 +392,13 @@ function startPolling() {
     fetch('/api/steps/poll?session=' + encodeURIComponent(SESSION_ID) + '&after=' + pollAfter, {
       headers: { 'X-Board-Token': TOKEN }, cache: 'no-store',
     }).then(function (r) { return r.json(); }).then(function (res) {
+      if (res && res.expired) {
+        // The server let go of this viewer: it heard nothing for minutes (a hidden tab polls
+        // rarely). Opening again reads the transcript anew; the reader keeps its place.
+        pollAfter = 0;
+        if (state.loaded && !state.reopening) { state.reopening = true; openSession(true); }
+        return;
+      }
       if (!res || typeof res.seq !== 'number') return;
       pollAfter = res.seq;
       (res.pushes || []).forEach(onPush);
@@ -532,12 +539,16 @@ function showStatus(text) {
 /* The open reply carries the sections, the strip, the notes and the flat compact list of the
    steps (kind, time, preview per step, also the ones a Work line only names by id), so rows,
    Work summaries and times can be drawn before any body text has loaded. */
-function openSession() {
-  state.compactById = Object.create(null);
+function openSession(again) {
   if (!SESSION_ID) { showError('no session to show'); return; }
   startPolling();
   call({ type: 'open' }).then(function (reply) {
+    state.reopening = false;
     if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
+    // a second open answers from a new index: what the page held belongs to the old one
+    state.compactById = Object.create(null);
+    state.bodies = Object.create(null);
+    state.bodiesPending = Object.create(null);
     state.loaded = true;
     state.title = reply.title || 'Session ' + SESSION_ID.slice(0, 8);
     (reply.steps || []).forEach(function (s) { state.compactById[s.id] = s; });
@@ -552,8 +563,9 @@ function openSession() {
     rebuildCompactIndex();
     renderIndexNote();
     renderStrip();
-    renderAll();
     renderNotesJumpLabel();
+    if (again) { renderAllKeepingView(); return; }
+    renderAll();
     scrollToEndOnLoad();
   });
 }
@@ -998,6 +1010,8 @@ function sectionStepIds(sec) {
    keeps the DOM bounded on a large session while the scroll range (and thus the scrollbar and
    jump targets) stays stable. */
 var anchorIndex = 0;
+var renderedLo = 0;   // the sections drawn by the last renderReader: [renderedLo, renderedHi)
+var renderedHi = 0;
 
 /** Notes whose step is not found on any current section: a retry or an edited message moved the
     active path, and the step the note was filed against is gone from it. The note itself is
@@ -1047,6 +1061,8 @@ function renderReader() {
   anchorIndex = Math.max(0, Math.min(anchorIndex, secs.length - 1));
   var lo = Math.max(0, anchorIndex - RENDER_WINDOW);
   var hi = Math.min(secs.length, anchorIndex + RENDER_WINDOW);
+  renderedLo = lo;
+  renderedHi = hi;
   var SEC_HEIGHT_ESTIMATE = 70;
   if (lo > 0) reader.appendChild(buildSpacer('before', lo * SEC_HEIGHT_ESTIMATE));
   for (var i = lo; i < hi; i++) reader.appendChild(buildSectionNode(secs[i], i, secs));
@@ -1062,30 +1078,61 @@ function buildSpacer(which, heightPx) {
   return div;
 }
 
-/* Grows the render window toward the viewport as the reader scrolls near a spacer, shifting
-   anchorIndex and redrawing; cheap to call often since redraw only runs when the window
-   actually needs to move, not on every scroll tick. */
+/* The first row of the story that the reader's viewport shows, with where it sits; null when
+   the viewport shows no row at all (it stands inside a spacer). */
+function topRowInView(reader) {
+  var box = reader.getBoundingClientRect();
+  var rows = reader.querySelectorAll('[data-step]');
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i].getBoundingClientRect();
+    if (r.bottom > box.top) return r.top < box.bottom ? { id: rows[i].getAttribute('data-step'), top: r.top } : null;
+  }
+  return null;
+}
+
+/* Moves the window of drawn sections as the reader comes within a viewport of a spacer; run on
+   every scroll, it redraws only when the window has to move.
+   Scrolling toward a spacer moves the window that way and holds the row at the top of the
+   viewport exactly where it was: the sections that come into the window have their real
+   heights, not the estimate the spacer stood for, so a row can be held and an offset cannot.
+   A jump (the scrollbar, a key) can put the viewport inside a spacer, past everything that is
+   drawn. The spacer stands for the sections it replaced, in order, so the place in it names
+   one of them; the window is drawn around that section, with it at the top. */
 function expandNearbyStubs() {
   var reader = document.getElementById('reader');
   var before = reader.querySelector('[data-spacer="before"]');
   var after = reader.querySelector('[data-spacer="after"]');
+  if (!before && !after) return;
+  var box = reader.getBoundingClientRect();
   var margin = reader.clientHeight;
-  var moved = false;
-  if (before && before.getBoundingClientRect().bottom > -margin) { anchorIndex = Math.max(0, anchorIndex - Math.floor(RENDER_WINDOW / 2)); moved = true; }
-  if (after && after.getBoundingClientRect().top < reader.clientHeight + margin) { anchorIndex = Math.min(visibleSections().length - 1, anchorIndex + Math.floor(RENDER_WINDOW / 2)); moved = true; }
-  if (moved) {
-    // redrawing the window replaces readerInner's children, which resets scrollTop to 0; the
-    // scroll distance from the old before-spacer's height to the new one is what the window
-    // shift actually changed, so restoring scrollTop by that same delta keeps the reader's
-    // viewport over the same content instead of jumping to the top.
-    var oldBefore = before ? before.offsetHeight : 0;
-    var prevScrollTop = reader.scrollTop;
+  var nearBefore = Boolean(before) && before.getBoundingClientRect().bottom > box.top - margin;
+  var nearAfter = Boolean(after) && after.getBoundingClientRect().top < box.bottom + margin;
+  if (!nearBefore && !nearAfter) return;
+  var secs = visibleSections();
+  var ref = topRowInView(reader);
+  if (!ref) {
+    var spacer = nearBefore ? before : after;
+    var sp = spacer.getBoundingClientRect();
+    var frac = Math.max(0, Math.min(1, (box.top - sp.top) / Math.max(1, sp.height)));
+    var first = nearBefore ? 0 : renderedHi;
+    var count = nearBefore ? renderedLo : secs.length - renderedHi;
+    anchorIndex = Math.max(0, Math.min(secs.length - 1, first + Math.floor(frac * count)));
     renderReader();
-    var newBefore = reader.querySelector('[data-spacer="before"]');
-    var newBeforeHeight = newBefore ? newBefore.offsetHeight : 0;
-    reader.scrollTop = prevScrollTop + (newBeforeHeight - oldBefore);
+    var landed = reader.querySelector('[data-sec-index="' + anchorIndex + '"]');
+    if (landed) reader.scrollTop += landed.getBoundingClientRect().top - box.top;
     queueVisibleBodies();
+    return;
   }
+  var step = Math.max(1, Math.floor(RENDER_WINDOW / 2));
+  var moved = anchorIndex;
+  if (nearBefore) moved = Math.max(0, moved - step);
+  if (nearAfter) moved = Math.min(secs.length - 1, moved + step);
+  if (moved === anchorIndex) return;
+  anchorIndex = moved;
+  renderReader();
+  var held = document.getElementById('step-' + ref.id);
+  if (held) reader.scrollTop += held.getBoundingClientRect().top - ref.top;
+  queueVisibleBodies();
 }
 
 function buildSectionNode(sec, i, secs) {

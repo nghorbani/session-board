@@ -349,6 +349,10 @@ class BoardProvider {
    * arguments unchanged (a regression the host suite pins), since `undefined` and an omitted
    * argument are the same thing to `executeCommand` either way, but writing it out keeps that
    * guarantee visible in the source rather than resting on an engine detail.
+   *
+   * Returns true when `editor.open` ran, false when nothing could open the session, and
+   * 'without-prompt' when a prompt was given but only the fallback worked: that command takes no
+   * prompt, so the session is open and the text is not in its chat box.
    */
   async revealHere(sessionId, prompt) {
     const honour = { programmatic: 'honor-preferred-location' };
@@ -366,7 +370,7 @@ class BoardProvider {
     try {
       await vscode.commands.executeCommand('claude-vscode.primaryEditor.open', sessionId);
       this.log.info('revealed ' + sessionId + ' via claude-vscode.primaryEditor.open');
-      return true;
+      return prompt === undefined ? true : 'without-prompt';
     } catch (e) {
       this.log.warn('claude-vscode.primaryEditor.open failed: ' + String((e && e.message) || e));
       return false;
@@ -428,19 +432,27 @@ class BoardProvider {
       this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): no VS Code window, clipboard only');
       return clipboardOnly();
     }
-    const owner = await core.exthostForPid(Number(row.pid));
+    // A running session is placed by its process. An ended one has no process; its row carries
+    // the window whose folder holds it, and opening it there resumes it.
+    const pid = Number(row.pid);
+    const running = Number.isInteger(pid) && pid > 0;
+    const owner = running ? await core.exthostForPid(pid) : (Number(row.window.exthostPid) || null);
     if (owner === process.pid) {
       if (!this.claudeHandOverOk()) {
         this.log.info('send to session ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION + ', clipboard only');
         return clipboardOnly();
       }
       const revealed = await this.revealHere(sessionId, text);
+      if (revealed === 'without-prompt') {
+        this.log.info('send to session ' + sessionId + ': opened by the fallback, which takes no text; clipboard only');
+        return clipboardOnly('The session is open, but the note could not be put into its chat box. It is on the clipboard: paste it there.');
+      }
       if (!revealed) return clipboardOnly();
       this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): delivered in this window');
       return { ok: true, message: 'In the chat box and on the clipboard.' };
     }
-    const win = await core.windowForPid(Number(row.pid));
-    if (!win) return clipboardOnly();
+    const win = running ? await core.windowForPid(pid) : { windowId: row.window.id, exthostPid: Number(row.window.exthostPid) || null };
+    if (!win || !win.exthostPid) return clipboardOnly();
     const board = core.boardAlive(win.exthostPid);
     if (!board || !core.versionAtLeast(core.boardVersion(win.exthostPid), '0.12.0')) {
       this.log.info('send to session ' + sessionId + ': owning window has no current board, clipboard only');
@@ -449,12 +461,23 @@ class BoardProvider {
     const claimId = core.writeSteerClaim(text);
     try {
       await core.steerToWindow(sessionId, win.windowId, board, claimId);
-      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): handed to window ' + win.windowId);
-      return { ok: true, message: 'In the chat box and on the clipboard.' };
     } catch (e) {
       this.log.warn('send to session ' + sessionId + ' failed to reach window ' + win.windowId + ': ' + String((e && e.message) || e));
       return clipboardOnly();
     }
+    // The URI was opened; whether the text reached a chat box is for the window that took the
+    // claim to say (its Claude Code may be too old, or its open may have failed).
+    const ack = await core.waitSteerAck(claimId);
+    if (ack && ack.ok) {
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): window ' + win.windowId + ' confirmed');
+      return { ok: true, message: 'In the chat box and on the clipboard.' };
+    }
+    if (ack) {
+      this.log.info('send to session ' + sessionId + ': window ' + win.windowId + ' could not fill its chat box, clipboard only');
+      return clipboardOnly('The session\'s window could not put the note into its chat box. It is on the clipboard: paste it there.');
+    }
+    this.log.warn('send to session ' + sessionId + ': window ' + win.windowId + ' did not confirm');
+    return clipboardOnly('Handed to the session\'s window, which did not confirm. The note is on the clipboard as well.');
   }
 
   /**
@@ -472,8 +495,16 @@ class BoardProvider {
     const text = core.takeSteerClaim(claimId);
     if (text === null) { this.log.warn('steer ' + sessionId + ': no fresh claim for this URI'); return; }
     await this.restoreStowedForDeliver(sessionId);
-    if (!this.claudeHandOverOk()) { this.log.warn('steer ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION); return; }
-    if (!(await this.revealHere(sessionId, text))) this.log.warn('steer ' + sessionId + ': could not reveal the session in this window');
+    // the sender waits for this answer before it calls its note sent
+    let delivered = false;
+    if (!this.claudeHandOverOk()) {
+      this.log.warn('steer ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION);
+    } else {
+      const revealed = await this.revealHere(sessionId, text);
+      delivered = revealed === true;
+      if (!delivered) this.log.warn('steer ' + sessionId + (revealed ? ': opened by the fallback, which takes no text' : ': could not reveal the session in this window'));
+    }
+    core.writeSteerAck(claimId, delivered);
   }
 
   /** vscode://<this extension id>/open?session=<id>, routed here by windowId. */

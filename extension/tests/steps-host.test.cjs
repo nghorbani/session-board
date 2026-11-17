@@ -462,14 +462,15 @@ test('deliverToSession, same window, Claude Code absent: clipboard only, no hand
   assert.deepEqual(vscode.__clipboard, ['text']);
 });
 
-test('deliverToSession, another window with a current board: a claim is written and the /steer URI is opened', async () => {
+test('deliverToSession, another window with a current board: a claim is written, the /steer URI is opened, and the note counts as sent once that window confirms', async () => {
   const opened = [];
   const h = boot({
     exthostForPid: async () => 999,
     windowForPid: async () => ({ windowId: 3, exthostPid: 4242 }),
     boardAlive: () => 'nima-ghorbani.session-board-vscode',
     boardVersion: () => '0.12.0',
-    steerToWindow: async (sessionId, windowId, board, claimId) => { opened.push({ sessionId, windowId, board, claimId }); },
+    // the other window, which takes the claim and says it put the text into its chat box
+    steerToWindow: async (sessionId, windowId, board, claimId) => { opened.push({ sessionId, windowId, board, claimId }); core.writeSteerAck(claimId, true); },
   }, { last: runningWindow() });
   const result = await h.provider.deliverToSession(A, 'About your step at 09:00 ("x"): a note', { kind: 'single' });
   assert.deepEqual(result, { ok: true, message: 'In the chat box and on the clipboard.' });
@@ -479,6 +480,81 @@ test('deliverToSession, another window with a current board: a claim is written 
   assert.equal(opened[0].board, 'nima-ghorbani.session-board-vscode');
   assert.match(opened[0].claimId, /^[0-9a-f]{32}$/);
   assert.deepEqual(vscode.__clipboard, ['About your step at 09:00 ("x"): a note']);
+});
+
+test('deliverToSession, another window that takes the claim but cannot fill its chat box: clipboard only, not sent', async () => {
+  const h = boot({
+    exthostForPid: async () => 999,
+    windowForPid: async () => ({ windowId: 3, exthostPid: 4242 }),
+    boardAlive: () => 'nima-ghorbani.session-board-vscode',
+    boardVersion: () => '0.12.0',
+    steerToWindow: async (sessionId, windowId, board, claimId) => { core.writeSteerAck(claimId, false); },   // its Claude Code is too old, say
+  }, { last: runningWindow() });
+  const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.equal(result.ok, false, 'a refused hand-over is not a sent note');
+  assert.match(result.message, /could not put the note into its chat box/);
+  assert.match(result.message, /clipboard/);
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession, another window that never answers: reported as not confirmed, not as sent', async () => {
+  const h = boot({
+    exthostForPid: async () => 999,
+    windowForPid: async () => ({ windowId: 3, exthostPid: 4242 }),
+    boardAlive: () => 'nima-ghorbani.session-board-vscode',
+    boardVersion: () => '0.12.0',
+    steerToWindow: async () => {},
+    waitSteerAck: async () => null,   // the wait ran out
+  }, { last: runningWindow() });
+  const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /did not confirm/);
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession, same window: when the command that carries the note fails and only the plain open works, the note is on the clipboard, not sent', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: runningWindow() });
+  setExtensionVersion('2.1.322');
+  vscode.__commandErrors['claude-vscode.editor.open'] = 'command failed';
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.equal(result.ok, false, 'the plain open takes no note, so nothing reached the chat box');
+  assert.match(result.message, /session is open/);
+  assert.match(result.message, /clipboard/);
+  assert.ok(vscode.__executed.some((c) => c[0] === 'claude-vscode.primaryEditor.open'), 'the session was still opened');
+  assert.deepEqual(vscode.__clipboard, ['text']);
+});
+
+test('deliverToSession, same window: when no command can open the session, clipboard only', async () => {
+  const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: runningWindow() });
+  setExtensionVersion('2.1.322');
+  vscode.__commandErrors['claude-vscode.editor.open'] = 'command failed';
+  vscode.__commandErrors['claude-vscode.primaryEditor.open'] = 'command failed';
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: false, message: 'On the clipboard. Paste it into the session.' });
+});
+
+// an ended session has no process: its row carries the window whose folder holds it
+const endedIn = (exthostPid) => ({ sessions: [], ended: [{ sessionId: A, status: 'ended', live: false, title: 'Done one', cwd: 'C:\\x', window: { id: 5, exthostPid, label: 'x' } }], limits: {}, usage: null });
+
+test('deliverToSession, an ended session of this window: it is resumed with the note in its chat box', async () => {
+  const { provider } = boot({ exthostForPid: async () => { throw new Error('an ended row has no pid to look up'); } }, { last: endedIn(process.pid) });
+  setExtensionVersion('2.1.322');
+  const result = await provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.deepEqual(result, { ok: true, message: 'In the chat box and on the clipboard.' });
+  const call = vscode.__executed.find((c) => c[0] === 'claude-vscode.editor.open');
+  assert.deepEqual([call[1], call[2]], [A, 'text']);
+});
+
+test('deliverToSession, an ended session of another window: handed to that window by its own id', async () => {
+  const opened = [];
+  const h = boot({
+    boardAlive: (exthostPid) => (exthostPid === 4242 ? 'nima-ghorbani.session-board-vscode' : null),
+    boardVersion: () => '0.12.0',
+    steerToWindow: async (sessionId, windowId, board, claimId) => { opened.push({ sessionId, windowId }); core.writeSteerAck(claimId, true); },
+  }, { last: endedIn(4242) });
+  const result = await h.provider.deliverToSession(A, 'text', { kind: 'single' });
+  assert.equal(result.ok, true);
+  assert.deepEqual(opened, [{ sessionId: A, windowId: 5 }]);
 });
 
 test('deliverToSession, another window without a current board (old or no board): clipboard only', async () => {
@@ -549,6 +625,28 @@ test('handleSteerUri: a fresh claim is read, the stowed transcript restored firs
   const call = vscode.__executed.find((c) => c[0] === 'claude-vscode.editor.open');
   assert.ok(call, 'the session was revealed');
   assert.equal(call[2], 'About your step at 10:00 ("x"): steer text');
+});
+
+test('handleSteerUri: the window that takes a claim tells the sender how it went', async () => {
+  const h = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: last() });
+  setExtensionVersion('2.1.322');
+  let claimId = core.writeSteerClaim('lands in the chat box');
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  assert.deepEqual(await core.waitSteerAck(claimId, 50), { ok: true });
+
+  setExtensionVersion('2.1.100');   // too old to take a note
+  claimId = core.writeSteerClaim('cannot land');
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  assert.deepEqual(await core.waitSteerAck(claimId, 50), { ok: false });
+
+  setExtensionVersion('2.1.322');
+  vscode.__commandErrors['claude-vscode.editor.open'] = 'command failed';   // only the plain open works
+  claimId = core.writeSteerClaim('opens without the note');
+  await h.provider.handleUri({ path: '/steer', query: 'session=' + A + '&note=' + claimId, toString: () => '' });
+  assert.deepEqual(await core.waitSteerAck(claimId, 50), { ok: false });
+
+  assert.equal(await core.waitSteerAck(claimId, 30), null, 'an answer is read once');
+  assert.equal(await core.waitSteerAck('not-a-claim-id', 30), null);
 });
 
 test('handleSteerUri: a stale claim (past 30 seconds) is ignored, nothing is revealed', async () => {

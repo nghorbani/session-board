@@ -2060,6 +2060,48 @@ function takeSteerClaim(claimId) {
   return rec.text;
 }
 
+/*
+ * The answer to a claim. The window that took a claim writes whether the text reached its chat
+ * box (its Claude Code may be too old, or only the plain open may have worked); the sender
+ * waits for that answer before it calls a note sent. Same folder and id as the claim, read once
+ * and removed, and swept with the claims.
+ */
+const STEER_ACK_WAIT_MS = 8000;
+
+function steerAckFile(claimId) {
+  if (!STEER_CLAIM_ID_RE.test(String(claimId || ''))) throw new Error('not a claim id');
+  return path.join(STEERS_DIR, claimId + '.ack');
+}
+
+function writeSteerAck(claimId, ok) {
+  let file;
+  try { file = steerAckFile(claimId); } catch (_) { return; }
+  try {
+    fs.mkdirSync(STEERS_DIR, { recursive: true });
+    const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
+    fs.writeFileSync(tmp, JSON.stringify({ ok: Boolean(ok), at: Date.now() }));
+    fs.renameSync(tmp, file);
+  } catch (_) { /* the sender then reports the hand-over as not confirmed */ }
+}
+
+/** `{ ok }` once the window that took the claim has answered; null when it has not within
+    `timeoutMs` (STEER_ACK_WAIT_MS when left out). The answer is removed as it is read. */
+async function waitSteerAck(claimId, timeoutMs) {
+  let file;
+  try { file = steerAckFile(claimId); } catch (_) { return null; }
+  const until = Date.now() + (timeoutMs === undefined ? STEER_ACK_WAIT_MS : timeoutMs);
+  for (;;) {
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
+    if (rec && typeof rec === 'object') {
+      try { fs.unlinkSync(file); } catch (_) { /* gone already */ }
+      return { ok: rec.ok === true };
+    }
+    if (Date.now() >= until) return null;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 function xmlEscape(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
@@ -2701,6 +2743,8 @@ module.exports = {
   takeSteerClaim,
   steerUri,
   steerToWindow,
+  writeSteerAck,
+  waitSteerAck,
   toastXml,
   toastScript,
   showSystemToast,
