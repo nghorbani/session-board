@@ -189,8 +189,12 @@ async function serve(req, res) {
     if (msg.type === 'search') return json(res, 200, Object.assign({ type: 'searchResult', requestId: msg.requestId, query: msg.query }, await fake.search(msg.query)));
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
-    if (msg.type === 'openText') return json(res, 200, { type: 'openTextResult', notAvailable: true });
-    if (msg.type === 'fullText') return json(res, 200, Object.assign({ type: 'fullTextResult', stepId: msg.stepId }, fake.fullText(msg.stepId)));
+    if (msg.type === 'openText') {
+      // a test may let something happen between this request and its answer
+      if (fake.beforeOpenTextReply) await fake.beforeOpenTextReply();
+      return json(res, 200, { type: 'openTextResult', notAvailable: true });
+    }
+    if (msg.type === 'fullText') return json(res, 200, Object.assign({ type: 'fullTextResult', stepId: msg.stepId }, fake.fullText(msg.stepId, msg)));
     if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete' || msg.type === 'noteSend' || msg.type === 'notesSendAll') {
       const reply = handleNoteMessage(msg);
       fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
@@ -337,6 +341,7 @@ test.beforeEach(() => {
   fake.dropOnce = null;
   fake.dropAll = null;
   fake.fullText = (stepId) => ({ ok: true, text: 'the whole text of ' + stepId });
+  fake.beforeOpenTextReply = null;
   fake.noteReject = null;
   fake.expireOnce = false;
 });
@@ -974,6 +979,23 @@ test('page: a search reply that arrives after the box was cleared is dropped', o
   await page.close();
 });
 
+test('page: a search without hits takes the mark off the hit of the search before it', opts, async () => {
+  searchFixture();
+  fake.search = (q) => (q === 'needle' ? { stepIds: ['t1:0'], capped: false } : { stepIds: [], capped: false });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'the page to render');
+  await page.search('needle');
+  await page.until((x) => x.searchCount === '1 of 1' && x.curHitText !== null, 'the hit of the first search, marked');
+  await page.search('a word the story does not hold');
+  const s = await page.until((x) => x.searchCount === 'no hits', 'the second search to come back empty');
+  assert.equal(s.curHitText, null, 'no row is marked as the current hit');
+  // and a redraw (every live update makes one) does not bring the old mark back
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: [] });
+  await sleep(400);
+  assert.equal((await page.sample()).curHitText, null, 'still none after a redraw');
+  await page.close();
+});
+
 // -- follow / live push -------------------------------------------------------------------
 
 test('page: a follow push appends steps without jumping when scrolled up', opts, async () => {
@@ -1083,6 +1105,35 @@ test('page: "Open full text" on a cut text asks for the step, and a browser copi
   const failed = await page.until((x) => x.notices.some((n) => n.indexOf('could not be read') !== -1), 'the line that says the full text could not be read');
   assert.ok(failed.notices.some((n) => n.indexOf('no longer in the transcript') !== -1), 'with the reason: ' + JSON.stringify(failed.notices));
   assert.deepEqual(await page.eval('window.__copied'), ['the whole text of t1:0'], 'the cut text is not copied in its place');
+  await page.close();
+});
+
+test('page: "Open full text" asks for the text of the transcript the click was made on, also when that transcript is replaced before the answer', opts, async () => {
+  const story = (generation) => ({
+    steps: [step('u1:0', 'you', { generation }), step('t1:0', 'text', { preview: 'the start of a very long answer', generation })],
+    sections: [section('lead', 'Session start', null, []), section('you', 'tell me everything', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])],
+  });
+  fake.open = () => openReply(story(1));
+  fake.body = (stepId) => (stepId === 't1:0' ? { text: 'the start of a very long answer', truncated: true, size: 300000 } : { text: 'body of ' + stepId, truncated: false, size: 10 });
+  // what the service does once it holds the new transcript: a request that names the old one is
+  // refused, one that names the new one gets the step that now carries that id
+  fake.fullText = (stepId, msg) => (msg.generation === 2 ? { ok: true, text: 'the text of the step that took its place' } : { ok: false, message: 'the transcript was replaced' });
+  const page = await openPage(A);
+  await page.until((x) => x.bodyTexts.some((t) => t.indexOf('Open full text') !== -1), 'the cut text with its button');
+  await page.eval('window.__copied = []; copyToClipboard = function (t) { window.__copied.push(t); }; true');
+  // between the request and its answer the transcript is replaced; the new one has a step of the same id
+  fake.beforeOpenTextReply = async () => {
+    fake.beforeOpenTextReply = null;
+    fake.pushes.push(Object.assign({ type: 'stepsChanged', sessionId: A, generation: 2, strip: { activeTimeMs: 60000, sections: 2, decisions: 1, filesChanged: 0 } }, story(2)));
+    for (let i = 0; i < 100; i++) { if ((await page.eval('state.generation')) === 2) return; await sleep(50); }
+    throw new Error('the page did not take the new generation');
+  };
+  await page.click('.row.k-claude .showall');
+  const s = await page.until((x) => x.notices.some((n) => n.indexOf('could not be read') !== -1 || n.indexOf('text copied') !== -1), 'the answer to the click');
+  const asked = fake.calls.filter((m) => m && m.type === 'fullText');
+  assert.deepEqual(asked.map((m) => [m.stepId, m.generation]), [['t1:0', 1]], 'the full text is asked for with the generation of the click');
+  assert.deepEqual(await page.eval('window.__copied'), [], 'the text of the step that took its place is not copied');
+  assert.ok(s.notices.some((n) => n.indexOf('the transcript was replaced') !== -1), 'the page says why: ' + JSON.stringify(s.notices));
   await page.close();
 });
 
@@ -1205,6 +1256,52 @@ test('page: a session of long sections keeps the number of drawn rows bounded, a
   }
   assert.equal(seen, 6);
   assert.ok(height > 0);
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: under Decisions a session of long sections is measured by what Decisions draws: the reader fills with decisions, and the story is as long as they are', opts, async () => {
+  const steps = [];
+  const sections = [section('lead', 'Session start', null, [])];
+  for (let i = 0; i < 70; i++) {
+    const you = 'u' + i + ':0';
+    steps.push(step(you, 'you'));
+    const body = [];
+    for (let j = 0; j < 110; j++) {
+      const id = 't' + i + 'x' + j + ':0';
+      steps.push(step(id, 'text', { preview: 'text ' + j + ' of turn ' + i }));
+      body.push({ kind: 'text', stepId: id });
+    }
+    sections.push(section('you', 'turn ' + i, you, body));
+  }
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 600000, sections: 70, decisions: 70, filesChanged: 0 } });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 70 && x.rowsInView > 0, 'first paint, at the end');
+  await page.click('#decisions');
+  await page.until((x) => x.decisionsOn === true, 'the decisions view');
+  // what the reader holds and shows: sections drawn, whether a spacer shows inside the viewport, how long the story is
+  const view = '(function () { var r = document.getElementById("reader"); var box = r.getBoundingClientRect();'
+    + ' var spacer = Array.prototype.some.call(r.querySelectorAll(".sec-stub"), function (n) { var b = n.getBoundingClientRect(); return b.bottom > box.top + 1 && b.top < box.bottom - 1; });'
+    + ' var first = r.querySelector(".section");'
+    + ' return { drawn: r.querySelectorAll(".section").length, first: first ? first.getAttribute("data-sec-index") : null, spacerInView: spacer, scrollHeight: r.scrollHeight }; })()';
+  await page.eval('(function () { var b = Array.prototype.filter.call(document.querySelectorAll("#rail button"), function (x) { return x.textContent === "Jump to the start"; })[0]; b.click(); return true; })()');
+  await sleep(400);
+  let s = await page.sample();
+  let v = await page.eval(view);
+  assert.equal(v.first, '0', 'the first decision is drawn');
+  assert.ok(s.rowsInView > 0, 'rows in view at the start');
+  // one row a section here, so the row budget takes in far more than the few sections it
+  // would hold if the 110 texts each of them hides were counted
+  assert.ok(v.drawn >= 30, 'sections drawn at the start: ' + v.drawn);
+  assert.equal(v.spacerInView, false, 'no empty stretch in the viewport');
+  // 70 decisions of one row each: a few thousand pixels, not the height of the 7,700 texts left out
+  assert.ok(v.scrollHeight < 30000, 'the height of the story under Decisions: ' + v.scrollHeight);
+  // a jump to the end lands on decisions as well
+  await page.eval('(function () { var r = document.getElementById("reader"); r.scrollTop = r.scrollHeight; r.dispatchEvent(new Event("scroll")); return true; })()');
+  await sleep(400);
+  s = await page.sample();
+  v = await page.eval(view);
+  assert.ok(s.rowsInView > 0, 'rows in view at the end');
+  assert.equal(v.spacerInView, false, 'no empty stretch in the viewport at the end');
   await page.close();
 }, { timeout: 60000 });
 

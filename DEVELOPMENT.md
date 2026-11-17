@@ -458,7 +458,9 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     nodes and there is no `innerHTML` assignment. Both hosts serve it with a CSP whose
     script source is a per-response nonce. Only the sections around the anchor hold their
     rows: about 400 rows (`ROW_BUDGET`), never fewer than three sections and never more
-    than 60 on each side; two spacers of estimated height stand for the rest. Scrolling
+    than 60 on each side; two spacers of estimated height stand for the rest. Rows and
+    heights are counted as the view in use draws them (`drawnBody`: under Decisions a
+    section is its opening message, its questions and its plans). Scrolling
     toward a spacer draws the window anew around the section at the top of the viewport
     and holds that row where it was; a jump into a spacer draws the window around the
     section that place names. The mark on the current hit or note is state

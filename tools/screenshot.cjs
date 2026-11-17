@@ -198,10 +198,13 @@ async function renderSteps(out, width, height) {
   // no server and no follow timer are left to keep the process alive.
   const chrome = await startChrome(['--hide-scrollbars']);
   const send = chrome.send;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-board-demo-steps-'));
+  // Everything after the browser is up runs inside the try, the folder for the example
+  // transcript too: whatever fails from here on, the browser is closed again.
+  let dir = null;
   let server = null;
   let unsubscribe = null;
   try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-board-demo-steps-'));
     const file = path.join(dir, STEPS_SESSION + '.jsonl');
     fs.writeFileSync(file, stepsTranscript().map((l) => JSON.stringify(l) + '\n').join(''));
     const service = createStepsService({ resolveTranscript: () => file, sessionTitle: () => STEPS_TITLE, dataDir: dir });
@@ -288,7 +291,7 @@ async function renderSteps(out, width, height) {
     await chrome.close();
     if (server) await new Promise((res) => server.close(res));
     if (unsubscribe) unsubscribe();   // the last subscriber gone, the service drops its follow timer and this process can end
-    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* left to the temp cleanup */ }
+    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* left to the temp cleanup */ } }
   }
   console.log('wrote ' + out);
 }

@@ -808,9 +808,12 @@ function openFullText(stepId, title) {
   // host reads the whole one from the transcript. A browser has no editor tab to open, so it
   // fetches the whole text and copies that. When the whole text cannot be read nothing is
   // copied: the cut text passed off as the whole would be worse than a plain "could not".
-  call({ type: 'openText', stepId: stepId, generation: state.generation, title: title || 'Step text' }).then(function (reply) {
+  // Both requests name the transcript the click was made on: when it is replaced in between,
+  // a step of the same id in the new one is another text, and the service refuses the old name.
+  var generation = state.generation;
+  call({ type: 'openText', stepId: stepId, generation: generation, title: title || 'Step text' }).then(function (reply) {
     if (reply && reply.notAvailable) {
-      call({ type: 'fullText', stepId: stepId, generation: state.generation }).then(function (full) {
+      call({ type: 'fullText', stepId: stepId, generation: generation }).then(function (full) {
         if (full && full.ok && typeof full.text === 'string') {
           copyToClipboard(full.text);
           flashNotice('not available in the browser, text copied');
@@ -1049,11 +1052,20 @@ function buildOrphanNotes(reader) {
   });
 }
 
-/* Rows a section draws: its heading and one per entry of its body. */
-function rowsOf(sec) { return 1 + ((sec.body && sec.body.length) || 0); }
+/* The entries of a section's body that the view in use draws. Decisions reduces a section to
+   what you said and decided: its opening message or answer (the heading row), the questions
+   and the plans; texts and Work lines are left out. Every other view draws them all. */
+function drawnBody(sec) {
+  var body = sec.body || [];
+  if (state.lens !== 'decisions') return body;
+  return body.filter(function (row) { return row.kind === 'question' || row.kind === 'plan'; });
+}
+
+/* Rows a section draws: its heading and one per entry of its body that is drawn. */
+function rowsOf(sec) { return 1 + drawnBody(sec).length; }
 
 /* What a section that is not drawn is taken to measure, for the spacers. */
-function estimatedHeight(sec) { return 70 + 44 * ((sec.body && sec.body.length) || 0); }
+function estimatedHeight(sec) { return 70 + 44 * drawnBody(sec).length; }
 
 /* The sections to draw around the anchor: the window grows on both sides in turn until
    ROW_BUDGET rows are in, never with fewer than MIN_SIDE sections on a side (while there
@@ -1200,14 +1212,9 @@ function buildSectionNode(sec, i, secs) {
     leadHead.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
     wrap.appendChild(leadHead);
   }
-  // Decisions reduces a section to what you said and decided: its opening message or answer,
-  // the questions and the plans. Texts, Work lines and the facts line are left out.
-  var reduced = state.lens === 'decisions';
-  (sec.body || []).forEach(function (row) {
-    if (reduced && row.kind !== 'question' && row.kind !== 'plan') return;
-    wrap.appendChild(buildBodyRow(row, sec));
-  });
-  var facts = reduced ? '' : sectionFacts(sec);
+  drawnBody(sec).forEach(function (row) { wrap.appendChild(buildBodyRow(row, sec)); });
+  // the facts line belongs to the work, which Decisions leaves out
+  var facts = state.lens === 'decisions' ? '' : sectionFacts(sec);
   if (facts) { var fl = document.createElement('div'); fl.className = 'facts'; fl.textContent = facts; wrap.appendChild(fl); }
   return wrap;
 }
@@ -1998,6 +2005,7 @@ function runSearch(q) {
     if (!reply || state.searchRequestId !== requestId) return;
     state.hits = reply.stepIds || [];
     state.curHit = state.hits.length ? 0 : -1;
+    state.curHitStep = null;   // the mark of the search before; the jump below sets it on the first hit, if there is one
     state.hitsCapped = Boolean(reply.capped);
     if (state.hits.length) state.showAllTools = true;
     renderAll();
