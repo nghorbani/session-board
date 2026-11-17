@@ -96,6 +96,22 @@ test('messages from the page are routed to service.handle, and pushes reach the 
   assert.ok(panel.__posted.some((m) => m.type === 'stepsChanged'));
 });
 
+test('every reply posted to the panel carries the id of the page request it answers, also when the service left it out', async () => {
+  const service = fakeService({ handle: async (msg) => ({ type: (msg.type || 'unknown') + 'Result', ok: true }) });
+  const { provider } = boot({}, { last: last() });
+  provider.stepsService = service;
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  const panel = vscode.__panels[0];
+  panel.__fireMessage({ type: 'bodies', requestId: 'r1', stepIds: ['x:0'] });
+  panel.__fireMessage({ type: 'openLink', requestId: 'r2', kind: 'url', target: 'https://example.com/' });
+  panel.__fireMessage({ type: 'openText', requestId: 'r3', title: 't', text: 'x' });
+  await new Promise((r) => setTimeout(r, 20));
+  const byType = (t) => panel.__posted.find((m) => m.type === t);
+  assert.equal(byType('bodiesResult').requestId, 'r1');
+  assert.equal(byType('openLinkResult').requestId, 'r2');
+  assert.equal(byType('openTextResult').requestId, 'r3');
+});
+
 test('dispose unsubscribes from the service and sends close, so a later steps message opens a fresh panel', async () => {
   const service = fakeService();
   const { provider } = boot({}, { last: last() });

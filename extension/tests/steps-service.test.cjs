@@ -481,6 +481,37 @@ test('follow: a stepsChanged push carries the compact records of the steps it ap
   assert.equal(changed.steps[0].rawInput, undefined, 'the compact record, not the reader\'s own step object');
 });
 
+test('every reply names the request it answers: the webview matches a reply to its request by that id alone', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hi'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])]);
+  const deps = makeDeps({ deliver: async () => ({ ok: true, message: 'sent' }) });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r-open', sessionId: A });
+  assert.equal(opened.requestId, 'r-open');
+  const stepId = opened.steps[1].id;
+  const added = await svc.handle({ type: 'noteAdd', requestId: 'r-add', sessionId: A, stepId, text: 'a note' });
+  assert.equal(added.ok, true);
+  const requests = [
+    { type: 'body', stepId },
+    { type: 'bodies', stepIds: [stepId] },
+    { type: 'search', query: 'reply' },
+    { type: 'cancelSearch' },
+    { type: 'seen', stepId },
+    { type: 'noteEdit', noteId: added.note.id, text: 'edited' },
+    { type: 'noteSend', noteId: added.note.id },
+    { type: 'notesSendAll' },
+    { type: 'noteDelete', noteId: added.note.id },
+    { type: 'no-such-type' },
+    { type: 'close' },
+  ];
+  assert.equal(added.requestId, 'r-add', 'noteAdd');
+  for (const [i, req] of requests.entries()) {
+    const reply = await svc.handle(Object.assign({ requestId: 'r-' + i, sessionId: A }, req));
+    assert.equal(reply.requestId, 'r-' + i, req.type + ' answers with its request id');
+  }
+});
+
 test('seen: stores and returns the last step the owner had in view', async () => {
   const file = newFile();
   writeLines(file, [userLine(uuid(1), null, 'hi'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])]);

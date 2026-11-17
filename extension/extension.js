@@ -600,6 +600,8 @@ class BoardProvider {
       if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
       else if (msg.type === 'openText') reply = await this.openStepsText(String(msg.title || ''), String(msg.text || ''));
       else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
+      // the page matches a reply to its request by this id and by nothing else
+      if (reply && msg.requestId !== undefined && reply.requestId === undefined) reply = Object.assign({}, reply, { requestId: msg.requestId });
       try { panel.webview.postMessage(reply); } catch (_) { /* panel gone */ }
     });
     panel.onDidDispose(() => {

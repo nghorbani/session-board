@@ -8,6 +8,7 @@
  *   node:test ──▶ fake API (http) ◀── steps.html in headless Chrome ◀── CDP over Node's WebSocket
  *                   scripted /api/steps (open/body/bodies/search/seen) and /api/steps/poll
  */
+const host = require('./shim/host.cjs');   // first: it points `vscode` at the stub before the host loads
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -114,8 +115,35 @@ function readBody(req) {
   });
 }
 
+// The page as VS Code serves it (the panel's own html), with a stand-in for acquireVsCodeApi
+// that carries postMessage both ways over HTTP: what the page posts reaches the panel's
+// message handler in extension.js, and what the host posts to the panel reaches the page.
+// The panel's content policy is left out, since it allows no connection at all.
+const WEBVIEW_BRIDGE = '<script>'
+  + 'window.acquireVsCodeApi = function () { return { postMessage: function (m) { fetch("/api/webview", { method: "POST", body: JSON.stringify(m) }); } }; };'
+  + 'var __wvAfter = 0; setInterval(function () { fetch("/api/webview/poll?after=" + __wvAfter).then(function (r) { return r.json(); }).then(function (res) {'
+  + ' __wvAfter = res.seq; res.messages.forEach(function (m) { window.postMessage(m, "*"); }); }).catch(function () {}); }, 60);'
+  + '</scr' + 'ipt>';
+
 async function serve(req, res) {
   const u = new URL(req.url, 'http://127.0.0.1:' + PORT);
+  if (fake.panel && u.pathname === '/steps-webview') {
+    const html = fake.panel.webview.html
+      .replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, '')
+      .replace('<meta charset="utf-8">', '<meta charset="utf-8">' + WEBVIEW_BRIDGE)
+      .replace('function flashNotice(text) {', 'function flashNotice(text) { (window.__notices = window.__notices || []).push(text);');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(html);
+    return;
+  }
+  if (fake.panel && u.pathname === '/api/webview' && req.method === 'POST') {
+    fake.panel.__fireMessage(await readBody(req));
+    return json(res, 200, {});
+  }
+  if (fake.panel && u.pathname === '/api/webview/poll') {
+    const after = Number(u.searchParams.get('after') || 0);
+    return json(res, 200, { seq: fake.panel.__posted.length, messages: fake.panel.__posted.slice(after) });
+  }
   if (u.pathname === '/steps') {
     const sessionId = u.searchParams.get('session') || '';
     const html = STEPS_HTML
@@ -243,6 +271,8 @@ const SAMPLE = `(function () {
     notices: window.__notices || [],
     secLabels: q('.sec-head .lbl').map(function (e) { return e.textContent; }),
     rowTimes: q('.row .meta .time').map(function (e) { return e.textContent; }),
+    bodyTexts: q('.row .body.md').map(function (e) { return e.textContent; }),
+    mdMarks: q('.row .body.md b, .row .body.md .li').length,
     facts: q('.facts').map(function (e) { return e.textContent; }),
     restateCount: q('.row.k-you .restate').length,
     youMsgCount: q('.row.k-you .you-msg').length,
@@ -477,6 +507,59 @@ test('page: a step that arrives while following is drawn with its time and its W
     assert.ok(s.workSums[0].indexOf('run the tests') !== -1, 'the new Work line says what was done: ' + JSON.stringify(s.workSums));
     await page.close();
   } finally { real.done(); }
+});
+
+// -- the VS Code transport: page, host code, service and reader together --------------------
+
+const LONG_ANSWER = 'Yes. The workflow is running again.\n\n**Done:**\n\n- The classifier spec is written.\n- The detector spec got its fix.\n\n'
+  + 'Still to come: the overview, then the critic. '.repeat(6) + 'That is the end of the answer.';
+
+test('page in the VS Code panel: texts load in full and formatted, question cards fill, a note is kept and sent, and a step that arrives while following loads too', opts, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-webview-'));
+  const file = path.join(dir, A + '.jsonl');
+  const ask = { type: 'assistant', uuid: ru(3), parentUuid: ru(2), timestamp: rat(3), message: { id: 'm3', role: 'assistant', content: [{ type: 'tool_use', id: 'ask1', name: 'AskUserQuestion',
+    input: { questions: [{ header: 'Approach', question: 'Which way should we go?', multiSelect: false, options: [{ label: 'Option A', description: 'the simple route' }, { label: 'Option B', description: 'the thorough route' }] }] } }] } };
+  const answer = { type: 'user', uuid: ru(4), parentUuid: ru(3), timestamp: rat(4), toolUseResult: {}, sourceToolAssistantUUID: ru(3),
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'ask1', content: 'Your questions have been answered: "Which way should we go?"="Option A". You can now continue.' }] } };
+  fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, LONG_ANSWER), ask, answer, rText(5, 'Going with A.')].map((l) => JSON.stringify(l) + '\n').join(''));
+  const { provider } = host.boot({
+    transcriptIndex: () => new Map([[A, file]]),
+    transcriptFacts: () => ({ tokens: null, title: 'Webview session', customTitle: null, lastPrompt: null }),
+  }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  fake.panel = host.vscode.__panels[0];
+  try {
+    assert.ok(LONG_ANSWER.length > 300, 'the answer is longer than a preview');
+    const page = await openPage(A, '/steps-webview');
+    // texts: the whole answer, rendered, not the first 200 characters of its source
+    let s = await page.until((x) => x.bodyTexts.some((t) => t.indexOf('That is the end of the answer.') !== -1), 'the long answer in full');
+    assert.ok(s.mdMarks >= 3, 'bold and list items are rendered: ' + s.mdMarks);
+    assert.equal(s.bodyTexts.some((t) => t.indexOf('**Done:**') !== -1), false, 'no raw Markdown left in the row');
+    // the question as it was asked
+    s = await page.until((x) => x.qOptions.length === 2, 'the question card with both options');
+    assert.equal(s.qOptions.find((o) => o.label === 'Option A').chosen, true);
+    // a note: Keep note closes the box and shows the note
+    const firstText = await page.eval('document.querySelector(".row.k-claude").getAttribute("data-step")');
+    await page.eval('(function () { document.getElementById("step-' + firstText + '").querySelector(".add-note").click(); })()');
+    await page.until((x) => x.noteBoxOpen, 'the note box');
+    await page.eval('(function () { var ta = document.querySelector(".notebox textarea"); ta.value = "check this"; ta.dispatchEvent(new Event("input", { bubbles: true })); })()');
+    await page.click('.notebox .row2 button:first-child');
+    s = await page.until((x) => !x.noteBoxOpen && x.savedNoteText && x.savedNoteText.indexOf('check this') !== -1, 'the kept note under its step');
+    // Send to session: the text reaches the clipboard and the page says what happened
+    await page.eval('(function () { document.getElementById("step-' + firstText + '").querySelector(".add-note").click(); })()');
+    await page.until((x) => x.noteBoxOpen, 'the note box again');
+    await page.click('.notebox .row2 button.primary');
+    s = await page.until((x) => x.notices.length > 0, 'the line that says where the note went');
+    assert.ok(host.vscode.__clipboard.some((t) => t.indexOf('About your step at') === 0 && t.indexOf('check this') !== -1), 'the hand-over text is on the clipboard');
+    // follow: a long answer that arrives now loads in full as well
+    fs.appendFileSync(file, [rUser(6, 'and now?'), rText(7, LONG_ANSWER.replace('That is the end of the answer.', 'That is the end of the second answer.'))].map((l) => JSON.stringify(l) + '\n').join(''));
+    s = await page.until((x) => x.bodyTexts.some((t) => t.indexOf('That is the end of the second answer.') !== -1), 'the answer that arrived while following, in full');
+    await page.close();
+  } finally {
+    fake.panel.dispose();
+    fake.panel = null;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('page: a cancelled-turn marker shows as a quiet line inside its section, not a you row', opts, async () => {

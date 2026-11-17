@@ -601,7 +601,17 @@ function createStepsService(deps) {
     return { type: 'cancelSearchResult', ok: true, sessionId };
   }
 
+  /* Every reply names the request it answers. The webview transport has nothing else to match
+     a reply to its request with: a reply without the id leaves the page waiting for good (no
+     step text, a note that never closes), while the browser transport, where the HTTP
+     response is the reply, would not notice. */
   async function handle(msg) {
+    const reply = await dispatch(msg);
+    if (reply && msg && msg.requestId !== undefined && reply.requestId === undefined) reply.requestId = msg.requestId;
+    return reply;
+  }
+
+  async function dispatch(msg) {
     if (!msg || typeof msg !== 'object') return { type: 'errorResult', message: 'bad message' };
     switch (msg.type) {
       case 'open': return handleOpen(msg);

@@ -171,6 +171,10 @@ installed.
   replies. A few tests set `fake.service` to the real `steps-service.cjs` over a transcript
   written in the test, so the page is checked against what the reader really sends; the
   sampler's `notices` lists every notice the page showed, which names the cause of a timeout.
+  One test covers the VS Code transport end to end: it serves the panel's own html with a
+  stand-in for `acquireVsCodeApi` and passes the page's messages through the panel handler
+  of `extension.js` (booted by the host shim), with the real service and reader behind it.
+  The page matches a reply to its request by `requestId` there, so a reply without it hangs.
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
