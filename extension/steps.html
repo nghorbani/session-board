@@ -1722,13 +1722,16 @@ function queueVisibleBodies() {
   if (state.lens === 'files') return;
   var reader = document.getElementById('reader');
   var nodes = reader.querySelectorAll('[data-step-body]');
-  var top = reader.scrollTop - reader.clientHeight;
-  var bottom = reader.scrollTop + reader.clientHeight * 2;
+  // One viewport above the reader to one below it, in window coordinates. A node is measured
+  // the same way (its bounding box): offsetTop would be relative to the node's own row, which
+  // says nothing about where the row sits in a reader scrolled far from its top.
+  var box = reader.getBoundingClientRect();
+  var top = box.top - reader.clientHeight;
+  var bottom = box.bottom + reader.clientHeight;
+  function near(node) { var b = node.getBoundingClientRect(); return b.top < bottom && b.bottom > top; }
   var wanted = state.bodyBatchWanted || (state.bodyBatchWanted = Object.create(null));
-  var worklistNodes = reader.querySelectorAll('.wl-item .wb, .fkind');
   Array.prototype.forEach.call(nodes, function (node) {
-    var rectTop = node.offsetTop;
-    if (rectTop < bottom && rectTop + node.offsetHeight > top) {
+    if (near(node)) {
       var stepId = node.getAttribute('data-step-body');
       if (stepId && !state.bodies[stepId] && !state.bodiesPending[stepId]) wanted[stepId] = true;
     }
@@ -1736,8 +1739,7 @@ function queueVisibleBodies() {
   // work rows need bodies for every tool/subagent item they bundle, even though the wrapping
   // row itself carries no single data-step-body (it summarizes several steps at once).
   Array.prototype.forEach.call(reader.querySelectorAll('[data-work-key]'), function (node) {
-    var rectTop = node.offsetTop;
-    if (rectTop < bottom && rectTop + node.offsetHeight > top) {
+    if (near(node)) {
       var key = node.getAttribute('data-work-key');
       var ids = state.workItemsByKey ? state.workItemsByKey[key] : null;
       (ids || []).forEach(function (id) { if (!state.bodies[id] && !state.bodiesPending[id]) wanted[id] = true; });

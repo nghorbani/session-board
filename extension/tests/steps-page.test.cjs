@@ -272,6 +272,18 @@ const SAMPLE = `(function () {
     secLabels: q('.sec-head .lbl').map(function (e) { return e.textContent; }),
     rowTimes: q('.row .meta .time').map(function (e) { return e.textContent; }),
     bodyTexts: q('.row .body.md').map(function (e) { return e.textContent; }),
+    // the text rows inside the reader's viewport, and how many of them hold their full text
+    textsInView: (function () {
+      var r = document.getElementById('reader').getBoundingClientRect();
+      var total = 0, loaded = 0;
+      q('.row.k-claude [data-step-body]').forEach(function (node) {
+        var b = node.getBoundingClientRect();
+        if (b.bottom <= r.top || b.top >= r.bottom) return;
+        total++;
+        if (state.bodies[node.getAttribute('data-step-body')]) loaded++;
+      });
+      return { total: total, loaded: loaded };
+    })(),
     mdMarks: q('.row .body.md b, .row .body.md .li').length,
     facts: q('.facts').map(function (e) { return e.textContent; }),
     restateCount: q('.row.k-you .restate').length,
@@ -505,6 +517,26 @@ test('page: a step that arrives while following is drawn with its time and its W
     const s = await page.until((x) => x.rowTimes.length === 3 && x.workSums.length === 1, 'the appended Work line and text (two text rows and the Work line carry a time)');
     assert.ok(s.rowTimes.every((t) => /^\d\d:\d\d:\d\d$/.test(t)), 'the new text row carries its time: ' + JSON.stringify(s.rowTimes));
     assert.ok(s.workSums[0].indexOf('run the tests') !== -1, 'the new Work line says what was done: ' + JSON.stringify(s.workSums));
+    await page.close();
+  } finally { real.done(); }
+});
+
+test('page: scrolled to the middle of a long session, the texts in view load in full (real reader)', opts, async () => {
+  const lines = [];
+  for (let turn = 0; turn < 150; turn++) {
+    const n = turn * 4 + 1;
+    lines.push(rUser(n, 'turn ' + (turn + 1)), rBash(n + 1, 'b' + turn), rResult(n + 2, 'b' + turn),
+      rText(n + 3, '**Answer ' + (turn + 1) + '.** ' + 'More words of this answer, well past a preview. '.repeat(12)));
+  }
+  const real = realService(lines);
+  try {
+    const page = await openPage(A);
+    await page.until((x) => x.sectionHeadings.length === 150, 'the whole outline');
+    const height = await page.eval('document.getElementById("reader").scrollHeight');
+    await page.scroll(Math.floor(height / 2));
+    const s = await page.until((x) => x.textsInView.total > 0 && x.textsInView.loaded === x.textsInView.total, 'every text in view to hold its full text');
+    assert.ok(s.scrollTop > 2000, 'the reader is far from the top: ' + s.scrollTop);
+    assert.ok(s.bodyTexts.some((t) => t.length > 400), 'a text in the page is longer than a preview');
     await page.close();
   } finally { real.done(); }
 });
