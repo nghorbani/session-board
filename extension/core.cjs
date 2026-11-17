@@ -906,6 +906,25 @@ function transcriptsNamed(root, sessionId) {
   return out;
 }
 
+/**
+ * True only when a look at the disk right now finds no transcript of this session in either
+ * root. The filename index is a minute old at most, which is long enough for a session to
+ * start, get a note and end; and a root that cannot be read at this moment (anything but "it
+ * does not exist") says nothing about what is in it. Both cases answer false, so notes are
+ * never deleted on a stale or failed read.
+ */
+function transcriptGone(sessionId) {
+  for (const root of [PROJECTS_DIR, ARCHIVE_TRANSCRIPTS_DIR]) {
+    let dirs;
+    try { dirs = fs.readdirSync(root, { withFileTypes: true }); }
+    catch (e) { if (e && e.code === 'ENOENT') continue; return false; }
+    for (const d of dirs) {
+      if (d.isDirectory() && fs.existsSync(path.join(root, d.name, sessionId + '.jsonl'))) return false;
+    }
+  }
+  return true;
+}
+
 function liveTranscripts(sessionId) { return transcriptsNamed(PROJECTS_DIR, sessionId); }
 function stowedTranscripts(sessionId) { return transcriptsNamed(ARCHIVE_TRANSCRIPTS_DIR, sessionId); }
 
@@ -2162,7 +2181,7 @@ async function snapshot(opts) {
   forgetStatuses(liveIds);
   pruneDead(MUTED_DIR, muted, liveIds, index);
   pruneDead(ORDER_DIR, order, liveIds, index);
-  notesStore.pruneDead(liveIds, index);
+  notesStore.pruneDead(liveIds, index, transcriptGone);
 
   const windows = new Map();
   for (const r of rows) {

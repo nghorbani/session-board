@@ -32,7 +32,11 @@ function createNotesStore(deps) {
   function notesRoot() { return path.join(dataDir, 'notes'); }
   function sessionDir(sessionId) { return path.join(notesRoot(), sessionId); }
   function noteFile(sessionId, noteId) { return path.join(sessionDir(sessionId), noteId + '.json'); }
-  function sentFile(sessionId, noteId, kind, at) { return path.join(sessionDir(sessionId), noteId + '.sent.' + at + '.json'); }
+  // a send is one file of its own; the random tail keeps two sends of one millisecond apart
+  function sentFile(sessionId, noteId, at) { return path.join(sessionDir(sessionId), noteId + '.sent.' + at + '-' + crypto.randomBytes(4).toString('hex') + '.json'); }
+  // left by a delete, so a write of the same note that was already on its way can tell
+  function tombFile(sessionId, noteId) { return path.join(sessionDir(sessionId), noteId + '.deleted'); }
+  const TOMB_KEEP_MS = 60 * 60 * 1000;
 
   function checkSessionId(sessionId) {
     sessionId = String(sessionId || '');
@@ -95,7 +99,10 @@ function createNotesStore(deps) {
   }
 
   /** Last writer wins, and only when the note still exists: a write racing a delete must never
-      bring a deleted note back by recreating its file. */
+      bring a deleted note back by recreating its file. The note is read first; a delete that
+      lands after that read and before the write is caught afterwards by the mark the delete
+      leaves (it writes the mark before it removes the file, so one of the two always sees the
+      other). */
   function edit(sessionId, noteId, text) {
     sessionId = checkSessionId(sessionId);
     noteId = checkNoteId(noteId);
@@ -105,6 +112,10 @@ function createNotesStore(deps) {
     if (!existing || typeof existing !== 'object') return null; // deleted meanwhile, or never existed
     const rec = Object.assign({}, existing, { text: clean });
     writeJsonAtomic(file, rec);
+    if (fs.existsSync(tombFile(sessionId, noteId))) {
+      try { fs.unlinkSync(file); } catch (_) { /* the delete removed it itself */ }
+      return null;
+    }
     return withSent(sessionId, rec);
   }
 
@@ -117,7 +128,15 @@ function createNotesStore(deps) {
     try { names = fs.readdirSync(dir); } catch (_) { names = []; }
     const prefix = noteId + '.';
     let removed = false;
+    // the mark first, then the files: see edit()
+    if (names.length) { try { fs.writeFileSync(tombFile(sessionId, noteId), ''); } catch (_) { /* the removal below still runs */ } }
+    const cutoff = now() - TOMB_KEEP_MS;
     for (const name of names) {
+      if (name.endsWith('.deleted') && name !== noteId + '.deleted') {
+        // marks of earlier deletes have done their job once every write of that time is over
+        try { if (fs.statSync(path.join(dir, name)).mtimeMs < cutoff) fs.unlinkSync(path.join(dir, name)); } catch (_) { /* gone */ }
+        continue;
+      }
       if (name !== noteId + '.json' && !name.startsWith(prefix + 'sent.')) continue;
       try { fs.unlinkSync(path.join(dir, name)); if (name === noteId + '.json') removed = true; } catch (_) { /* already gone */ }
     }
@@ -134,7 +153,19 @@ function createNotesStore(deps) {
     const existing = readJsonSafe(noteFile(sessionId, noteId));
     if (!existing) return null;
     const at = now();
-    writeJsonAtomic(sentFile(sessionId, noteId, kind, at), { kind, at });
+    const file = sentFile(sessionId, noteId, at);
+    try {
+      writeJsonAtomic(file, { kind, at });
+    } catch (e) {
+      // a delete at this moment takes the half-written record with it; that is not an error
+      if (fs.existsSync(tombFile(sessionId, noteId))) return null;
+      throw e;
+    }
+    if (fs.existsSync(tombFile(sessionId, noteId))) {
+      // deleted while this record was written: nothing of the note stays
+      try { fs.unlinkSync(file); } catch (_) { /* the delete removed it itself */ }
+      return null;
+    }
     return withSent(sessionId, existing);
   }
 
@@ -169,7 +200,7 @@ function createNotesStore(deps) {
   /** Removes a whole session's notes once its transcript is gone from both roots, mirroring
       core.cjs's pruneDead shape (liveIds, transcripts) but over directories, not single
       marker files, since a session's notes are several files at once. */
-  function pruneDead(liveIds, transcripts) {
+  function pruneDead(liveIds, transcripts, confirmGone) {
     const root = notesRoot();
     let sessionIds = [];
     try { sessionIds = fs.readdirSync(root); } catch (_) { return; }
@@ -177,6 +208,9 @@ function createNotesStore(deps) {
       if (!SESSION_ID_RE.test(sessionId)) continue;
       if (liveIds && liveIds.has && liveIds.has(sessionId)) continue;
       if (transcripts && transcripts.has && transcripts.has(sessionId)) continue;
+      // `transcripts` may be a list read a while ago. Notes are text someone wrote, so before
+      // they go the caller looks at the disk itself; anything but a clear "gone" keeps them.
+      if (confirmGone && confirmGone(sessionId) !== true) continue;
       try { fs.rmSync(path.join(root, sessionId), { recursive: true, force: true }); } catch (_) { /* leave it for the next pass */ }
     }
   }

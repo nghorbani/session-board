@@ -86,6 +86,48 @@ test('edit: writes only when the note file still exists, so a delete racing an e
   assert.equal(fs.existsSync(path.join(dataDir, 'notes', A, note.id + '.json')), false);
 });
 
+// A store whose file system lets a test act at one exact moment: right before a file is moved
+// into place (the last step of every write here).
+function storeWithHook(dataDir, clock) {
+  const hook = { beforeRename: null };
+  const hookedFs = Object.assign({}, fs, {
+    renameSync: (from, to) => { const h = hook.beforeRename; hook.beforeRename = null; if (h) h(to); return fs.renameSync(from, to); },
+  });
+  return { hook, store: createNotesStore(Object.assign({ dataDir, fs: hookedFs }, clock ? { now: clock } : {})) };
+}
+
+test('edit: a delete that lands between the edit\'s read and its write does not leave the note behind', () => {
+  const { dataDir, store: other } = freshStore();
+  const { hook, store } = storeWithHook(dataDir);
+  const note = store.add(A, 'u1:0', 'first');
+  hook.beforeRename = () => { other.delete(A, note.id); };   // another window deletes it at that moment
+  const result = store.edit(A, note.id, 'second');
+  assert.equal(result, null, 'the edit reports the note as gone');
+  assert.equal(fs.existsSync(path.join(dataDir, 'notes', A, note.id + '.json')), false, 'and the deleted note is not back');
+  assert.deepEqual(store.list(A), []);
+});
+
+test('addSent: a delete that lands while a send is being recorded leaves no record of a note that is gone', () => {
+  const { dataDir, store: other } = freshStore();
+  const { hook, store } = storeWithHook(dataDir);
+  const note = store.add(A, 'u1:0', 'first');
+  hook.beforeRename = () => { other.delete(A, note.id); };
+  assert.equal(store.addSent(A, note.id, 'steer'), null);
+  const left = fs.readdirSync(path.join(dataDir, 'notes', A)).filter((n) => n.indexOf('.sent.') !== -1);
+  assert.deepEqual(left, []);
+});
+
+test('addSent: two sends recorded in the same millisecond are both kept', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-notes-'));
+  const frozen = () => 1700000000000;
+  const one = createNotesStore({ dataDir, now: frozen });
+  const two = createNotesStore({ dataDir, now: frozen });   // a second window
+  const note = one.add(A, 'u1:0', 'ask about this');
+  one.addSent(A, note.id, 'steer');
+  two.addSent(A, note.id, 'steer');
+  assert.equal(one.get(A, note.id).sent.length, 2);
+});
+
 test('edit: rejects empty or too-long text the same way add does', () => {
   const { store } = freshStore();
   const note = store.add(A, 'u1:0', 'first');
@@ -202,6 +244,17 @@ test('pruneDead: a transcript in the stowed root (not live) still keeps the note
   store.add(A, 'u1:0', 'ended but transcript stowed');
   store.pruneDead(new Set(), new Map([[A, '/stowed/path/' + A + '.jsonl']]));
   assert.equal(fs.existsSync(path.join(dataDir, 'notes', A)), true);
+});
+
+test('pruneDead: with a check of the disk given, notes go only when that check agrees the transcript is gone', () => {
+  const { store } = freshStore();
+  store.add(A, 'u1:0', 'the list of transcripts was read before my session wrote its file');
+  store.add(B, 'u1:0', 'my transcript really is gone');
+  const asked = [];
+  store.pruneDead(new Set(), new Map(), (sessionId) => { asked.push(sessionId); return sessionId === B; });
+  assert.equal(store.list(A).length, 1, 'kept: the disk still has the transcript');
+  assert.equal(store.list(B).length, 0, 'removed: the disk has none');
+  assert.deepEqual(asked.sort(), [A, B]);
 });
 
 test('pruneDead: nothing to prune when the notes root does not exist yet', () => {
