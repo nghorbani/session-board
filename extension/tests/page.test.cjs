@@ -935,9 +935,13 @@ const secOf = (s, key) => s.sections.find((sec) => sec.key === key);
 
 test('page: Alt+Down on a focused row posts /api/order with the complete list of its group, the row moves at once and keeps focus; Alt+Up at the top is a no-op', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]), { order: { mode: 'manual' } });
+  // every row has a transcript, so each carries the Steps button: the keyboard order of the
+  // list must be what it was before that button came
+  const withTranscripts = manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]).map((r) => Object.assign(r, { transcriptPath: 'C:\\x\\' + r.sessionId + '.jsonl' }));
+  fake.snapshot = snapshotOf(withTranscripts, { order: { mode: 'manual' } });
   const page = await openPage();
   let s = await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 5, 'manual rows');
+  assert.ok(s.actionKinds.every((k) => k.split('=')[1].split(',')[0] === 'steps'), 'every row carries the Steps button: ' + JSON.stringify(s.actionKinds));
   assert.deepEqual([s.sections[0].rows, s.sections[0].stale], [[D, C, B, A, F], null], 'the row idle for 5 h is shown in its rank');
   await page.key(C, 'ArrowDown');
   s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');

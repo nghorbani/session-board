@@ -87,10 +87,7 @@ function releaseIdleStepsViewers() {
 }
 setInterval(releaseIdleStepsViewers, STEPS_VIEWER_TICK_MS).unref();
 
-/** Escapes a value for use inside a double-quoted HTML attribute. */
-function escapeAttr(s) {
-  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+const escapeAttr = core.escapeAttr;
 
 function sendJson(res, code, obj) {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });

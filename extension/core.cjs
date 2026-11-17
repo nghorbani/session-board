@@ -2102,6 +2102,12 @@ async function waitSteerAck(claimId, timeoutMs) {
   }
 }
 
+/** Escapes a value for use inside a double-quoted HTML attribute: what both hosts put into
+    the meta tags of the pages they serve (the board token, a session id). */
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function xmlEscape(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
@@ -2743,6 +2749,7 @@ module.exports = {
   takeSteerClaim,
   steerUri,
   steerToWindow,
+  escapeAttr,
   writeSteerAck,
   waitSteerAck,
   toastXml,

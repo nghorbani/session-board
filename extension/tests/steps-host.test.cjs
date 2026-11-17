@@ -680,4 +680,11 @@ test('handleSteerUri: a malformed claim id does nothing, never throws', async ()
   assert.equal(vscode.__executed.some((c) => c[0] === 'claude-vscode.editor.open'), false);
 });
 
+test('escapeAttr: the characters that could end an attribute or open markup inside one are escaped, in a value of any type', () => {
+  assert.equal(core.escapeAttr('a"b\'c<d>e&f'), 'a&quot;b&#39;c&lt;d&gt;e&amp;f');
+  assert.equal(core.escapeAttr('"><script>alert(1)</script>'), '&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
+  assert.equal(core.escapeAttr(null), '');
+  assert.equal(core.escapeAttr(42), '42');
+});
+
 test.after(() => cleanup());
