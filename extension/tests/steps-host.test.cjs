@@ -351,10 +351,14 @@ test('openText opens an untitled document with the given text', async () => {
 
 test('openText for a step opens the whole text of that step, read through the service, not the cut text the page holds', async () => {
   const whole = 'the start' + ' and more'.repeat(10) + ', to the very end';
+  const asked = [];
   const service = fakeService({
-    handle: async (msg) => (msg.type === 'fullText' && msg.stepId === 'x:0'
-      ? { type: 'fullTextResult', ok: true, text: whole }
-      : { type: 'fullTextResult', ok: false, message: 'that step is no longer in the transcript' }),
+    handle: async (msg) => {
+      asked.push(msg);
+      return msg.type === 'fullText' && msg.stepId === 'x:0'
+        ? { type: 'fullTextResult', ok: true, text: whole }
+        : { type: 'fullTextResult', ok: false, message: 'that step is no longer in the transcript' };
+    },
   });
   const { provider } = boot({}, { last: last() });
   provider.stepsService = service;
@@ -364,8 +368,10 @@ test('openText for a step opens the whole text of that step, read through the se
     for (let i = 0; i < 20 && !panel.__posted.some((m) => m.requestId === requestId); i++) await new Promise((r) => setTimeout(r, 5));
     return panel.__posted.find((m) => m.requestId === requestId);
   };
-  panel.__fireMessage({ type: 'openText', requestId: 'r1', stepId: 'x:0', title: 'Step text' });
+  panel.__fireMessage({ type: 'openText', requestId: 'r1', stepId: 'x:0', generation: 7, title: 'Step text' });
   assert.equal((await answer('r1')).ok, true);
+  const fullAsk = asked.find((m) => m.type === 'fullText');
+  assert.deepEqual([fullAsk.sessionId, fullAsk.stepId, fullAsk.generation], [A, 'x:0', 7], 'the generation the page shows the step under goes along');
   assert.equal(vscode.__openedDocs.length, 1);
   assert.equal(vscode.__openedDocs[0].content, whole);
 

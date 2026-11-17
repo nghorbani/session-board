@@ -466,7 +466,10 @@ function createStepsService(deps) {
     const s = sessions.get(sessionId);
     const reply = { type: 'fullTextResult', sessionId, stepId: msg.stepId };
     if (!s || !s.index) return Object.assign(reply, { ok: false, message: 'session not open' });
-    const full = s.index.fullText(String(msg.stepId || ''));
+    // named with the generation the page shows the step under, like a body, so a step held
+    // across a replaced transcript is not answered with the text of another
+    const stepId = String(msg.stepId || '');
+    const full = s.index.fullText(msg.generation !== undefined ? { id: stepId, generation: msg.generation } : stepId);
     if (full.stale) return Object.assign(reply, { ok: false, message: 'that step is no longer in the transcript' });
     return Object.assign(reply, { ok: true, text: full.text });
   }

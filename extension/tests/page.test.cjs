@@ -2,7 +2,7 @@
 /*
  * The page's archive, section and Mute flows, driven in a headless Chromium over the
  * DevTools protocol against an in-test HTTP server that serves index.html and plays scripted
- * /api answers. Skipped with a reason when no Chromium is found (tools/screenshot.cjs knows
+ * /api answers. Skipped with a reason when no Chromium is found (tools/chrome.cjs knows
  * the usual paths).
  *
  *   node:test ──▶ fake API (http) ◀── index.html in headless Chrome ◀── CDP over Node's WebSocket
@@ -12,12 +12,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const http = require('http');
-const net = require('net');
-const { spawn, execFileSync } = require('child_process');
-const { browser } = require('../../tools/screenshot.cjs');
+const { browser, freePort, startChrome } = require('../../tools/chrome.cjs');
 const chromeLock = require('./shim/chrome-lock.cjs');
 
 let CHROME = null;
@@ -79,21 +76,11 @@ function serve(req, res) {
   }
   return json(res, 404, { error: 'not found' });
 }
-function freePort() { return new Promise((res) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); }); }
 
 // -- Chrome over the DevTools protocol ----------------------------------------------------
 
-class CDP {
-  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.id && this.pending.has(m.id)) { const p = this.pending.get(m.id); this.pending.delete(m.id); if (m.error) p.reject(new Error(JSON.stringify(m.error))); else p.resolve(m.result); } }; }
-  send(method, params, sessionId) { const id = ++this.id; return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params: params || {}, sessionId })); }); }
-}
-const getJson = (url) => new Promise((res, rej) => http.get(url, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }).on('error', rej));
-const kill = (pid) => { if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch (_) { /* gone */ } } else { try { process.kill(pid); } catch (_) { /* gone */ } } };
-
 let server = null;
-let chrome = null;
-let cdp = null;
-let userDataDir = null;
+let cdp = null;   // { send, close } of the browser started by tools/chrome.cjs
 
 test.before(async () => {
   if (!CHROME) return;
@@ -101,34 +88,12 @@ test.before(async () => {
   PORT = await freePort();
   server = http.createServer(serve);
   await new Promise((res) => server.listen(PORT, '127.0.0.1', res));
-  const cdpPort = await freePort();
-  userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-page-chrome-'));
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + userDataDir, '--no-first-run', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
-  // Chrome's own output, so a start that fails (seen on the release runner) says why
-  let chromeErr = '';
-  let chromeExit = null;
-  chrome.stderr.on('data', (d) => { chromeErr = (chromeErr + d.toString('utf8')).slice(-4000); });
-  chrome.on('exit', (code, signal) => { chromeExit = signal || code; });
-  chrome.on('error', (e) => { chromeErr += '\nspawn failed: ' + e.message; });
-  let info = null;
-  for (let i = 0; i < 100 && !info; i++) { try { info = await getJson('http://127.0.0.1:' + cdpPort + '/json/version'); } catch (_) { await sleep(200); } }
-  if (!info) {
-    throw new Error('Chrome (' + CHROME + ') did not open its debugging port within 20 s'
-      + (chromeExit !== null ? '; it exited with ' + chromeExit : '; it is still running')
-      + '. Its last output:\n' + (chromeErr.trim().split(/\r?\n/).slice(-15).join('\n') || '(nothing)'));
-  }
-  const ws = new WebSocket(info.webSocketDebuggerUrl);
-  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-  cdp = new CDP(ws);
+  cdp = await startChrome();
 });
 
 test.after(async () => {
-  if (chrome) kill(chrome.pid);
+  if (cdp) await cdp.close();
   if (server) await new Promise((res) => server.close(res));
-  if (userDataDir) {   // Chrome's crash handler may hold a file for a moment; a leftover temp profile is not a failure
-    await sleep(300);
-    try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* leave it to the OS temp cleanup */ }
-  }
   if (CHROME) chromeLock.release();
 });
 

@@ -68,6 +68,8 @@ const stepsService = createStepsService({
 const STEPS_VIEWER_TICK_MS = Number(process.env.SB_STEPS_VIEWER_TICK_MS) || 30000;      // overridable for the tests
 const STEPS_VIEWER_IDLE_TICKS = Number(process.env.SB_STEPS_VIEWER_IDLE_TICKS) || 10;   // 5 minutes at the default tick
 const stepsViewers = new Map();   // sessionId -> { unsubscribe, idleTicks }
+// the messages that read the transcript; notes and the seen mark are kept without one
+const NEEDS_STEPS_VIEWER = new Set(['body', 'bodies', 'fullText', 'search', 'noteSend', 'notesSendAll']);
 function touchStepsViewer(sessionId) {
   let v = stepsViewers.get(sessionId);
   if (!v) {
@@ -323,7 +325,17 @@ async function handle(req, res) {
     // has nowhere to go here, so the page copies it to the clipboard and says so.
     if (msg.type === 'openLink') return sendJson(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return sendJson(res, 200, { type: 'openTextResult', ok: false, notAvailable: true });
-    if (msg.sessionId && core.UUID_RE.test(String(msg.sessionId))) touchStepsViewer(String(msg.sessionId));
+    const sid = msg.sessionId && core.UUID_RE.test(String(msg.sessionId)) ? String(msg.sessionId) : '';
+    if (sid) {
+      // Only an open starts a viewer. A request that needs the transcript and finds its
+      // viewer released says so, and the page opens again. Served from a slot without an
+      // index it would bring a dead viewer to life, and no poll would ever say "released".
+      if (msg.type === 'open') touchStepsViewer(sid);
+      else if (stepsViewers.has(sid)) stepsViewers.get(sid).idleTicks = 0;
+      else if (NEEDS_STEPS_VIEWER.has(msg.type)) {
+        return sendJson(res, 200, { type: String(msg.type) + 'Result', requestId: msg.requestId, ok: false, expired: true, message: 'this viewer was released; the page opens the session again' });
+      }
+    }
     const reply = await stepsService.handle(msg);
     return sendJson(res, 200, reply);
   }

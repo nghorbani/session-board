@@ -786,7 +786,9 @@ class BoardProvider {
   async openStepsFullText(sessionId, msg) {
     const title = String(msg.title || '');
     if (msg.stepId === undefined) return this.openStepsText(title, String(msg.text || ''));
-    const full = await this.stepsService.handle({ type: 'fullText', sessionId, stepId: String(msg.stepId) });
+    const ask = { type: 'fullText', sessionId, stepId: String(msg.stepId) };
+    if (msg.generation !== undefined) ask.generation = msg.generation;
+    const full = await this.stepsService.handle(ask);
     if (!full || !full.ok) return { type: 'openTextResult', ok: false, message: (full && full.message) || 'the text of that step could not be read' };
     return this.openStepsText(title, String(full.text || ''));
   }

@@ -11,16 +11,17 @@
  * (extension/steps-service.cjs) reading an example transcript written to a temp folder, so
  * the picture shows what the reader makes of a transcript, not a reply written by hand.
  *
- * Set SCREENSHOT_BROWSER to a Chromium executable when none of the usual paths exist.
+ * Set SCREENSHOT_BROWSER to a Chromium executable when none of the usual paths exist
+ * (tools/chrome.cjs holds them).
  */
 'use strict';
 
 const fs = require('fs');
 const http = require('http');
-const net = require('net');
 const os = require('os');
 const path = require('path');
-const { execFileSync, spawn } = require('child_process');
+const { execFileSync } = require('child_process');
+const { browser, freePort, startChrome } = require('./chrome.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const INDEX = path.join(ROOT, 'extension', 'index.html');
@@ -28,21 +29,6 @@ const STEPS = path.join(ROOT, 'extension', 'steps.html');
 const OUT_DIR = path.join(ROOT, 'extension', 'media');
 const WIDTH = 440;
 const STEPS_WIDTH = 1100;
-
-function browser() {
-  const candidates = [
-    process.env.SCREENSHOT_BROWSER,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ].filter(Boolean);
-  const hit = candidates.find((p) => fs.existsSync(p));
-  if (!hit) throw new Error('no Chromium browser found; set SCREENSHOT_BROWSER');
-  return hit;
-}
 
 // -- fixtures ----------------------------------------------------------------------------
 
@@ -203,70 +189,61 @@ function render(mode, out, height) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const freePort = () => new Promise((res) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
-const getJson = (url) => new Promise((res, rej) => http.get(url, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }).on('error', rej));
 
 /** The Steps page over the real steps service, the way server.cjs serves it (without the
     content policy, so the page can be given the VS Code colours). */
 async function renderSteps(out, width, height) {
   const { createStepsService } = require(path.join(ROOT, 'extension', 'steps-service.cjs'));
+  // The browser first: when none is found this throws before anything else is started, so
+  // no server and no follow timer are left to keep the process alive.
+  const chrome = await startChrome(['--hide-scrollbars']);
+  const send = chrome.send;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-board-demo-steps-'));
-  const file = path.join(dir, STEPS_SESSION + '.jsonl');
-  fs.writeFileSync(file, stepsTranscript().map((l) => JSON.stringify(l) + '\n').join(''));
-  const service = createStepsService({ resolveTranscript: () => file, sessionTitle: () => STEPS_TITLE, dataDir: dir });
-  const pushes = [];
-  const unsubscribe = service.subscribe(STEPS_SESSION, (msg) => pushes.push(msg));
-
-  // what the owner did before the picture: read up to the first answer, and kept a note there
-  const opened = await service.handle({ type: 'open', sessionId: STEPS_SESSION });
-  const fixed = opened.steps.find((s) => s.kind === 'text' && s.preview.indexOf('Fixed.') !== -1);
-  await service.handle({ type: 'noteAdd', sessionId: STEPS_SESSION, stepId: fixed.id, text: NOTE_TEXT });
-  await service.handle({ type: 'seen', sessionId: STEPS_SESSION, stepId: fixed.id });
-
-  const token = 'example';
-  const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
-  const server = http.createServer((req, res) => {
-    const u = new URL(req.url, 'http://127.0.0.1');
-    if (u.pathname === '/steps') {
-      const html = fs.readFileSync(STEPS, 'utf8')
-        .replace('<meta charset="utf-8">', () => '<meta charset="utf-8"><meta name="board-token" content="' + token + '"><meta name="steps-session" content="' + STEPS_SESSION + '">')
-        .replace('<script>', () => '<script>document.body.classList.add("vscode");</script>\n<script>');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(html);
-    } else if (u.pathname === '/api/steps' && req.method === 'POST') {
-      const chunks = [];
-      req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
-        let msg = null;
-        try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { /* answered below */ }
-        if (!msg) return json(res, 400, { error: 'invalid JSON' });
-        if (msg.type === 'seen') return json(res, 200, { type: 'seenResult', ok: true });   // the picture keeps the marker where the fixture put it
-        service.handle(msg).then((reply) => json(res, 200, reply), (e) => json(res, 500, { error: String(e) }));
-      });
-    } else if (u.pathname === '/api/steps/poll') {
-      const after = Number(u.searchParams.get('after') || 0) || 0;
-      json(res, 200, { seq: pushes.length, pushes: pushes.slice(after) });
-    } else {
-      json(res, 404, { error: 'not found' });
-    }
-  });
-  const port = await freePort();
-  await new Promise((res) => server.listen(port, '127.0.0.1', res));
-
-  const cdpPort = await freePort();
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'session-board-demo-chrome-'));
-  const chrome = spawn(browser(), ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
-    '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + profile, 'about:blank'], { stdio: 'ignore' });
+  let server = null;
+  let unsubscribe = null;
   try {
-    let info = null;
-    for (let i = 0; i < 100 && !info; i++) { try { info = await getJson('http://127.0.0.1:' + cdpPort + '/json/version'); } catch (_) { await sleep(200); } }
-    if (!info) throw new Error('the browser did not open its debugging port');
-    const ws = new WebSocket(info.webSocketDebuggerUrl);
-    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-    let seq = 0;
-    const pending = new Map();
-    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); const p = pending.get(m.id); if (!p) return; pending.delete(m.id); if (m.error) p.reject(new Error(JSON.stringify(m.error))); else p.resolve(m.result); };
-    const send = (method, params, sessionId) => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params: params || {}, sessionId })); });
+    const file = path.join(dir, STEPS_SESSION + '.jsonl');
+    fs.writeFileSync(file, stepsTranscript().map((l) => JSON.stringify(l) + '\n').join(''));
+    const service = createStepsService({ resolveTranscript: () => file, sessionTitle: () => STEPS_TITLE, dataDir: dir });
+    const pushes = [];
+    unsubscribe = service.subscribe(STEPS_SESSION, (msg) => pushes.push(msg));
+
+    // what the owner did before the picture: read up to the first answer, and kept a note there
+    const opened = await service.handle({ type: 'open', sessionId: STEPS_SESSION });
+    const fixed = opened.steps.find((s) => s.kind === 'text' && s.preview.indexOf('Fixed.') !== -1);
+    await service.handle({ type: 'noteAdd', sessionId: STEPS_SESSION, stepId: fixed.id, text: NOTE_TEXT });
+    await service.handle({ type: 'seen', sessionId: STEPS_SESSION, stepId: fixed.id });
+
+    const token = 'example';
+    const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    server = http.createServer((req, res) => {
+      const u = new URL(req.url, 'http://127.0.0.1');
+      if (u.pathname === '/steps') {
+        const html = fs.readFileSync(STEPS, 'utf8')
+          .replace('<meta charset="utf-8">', () => '<meta charset="utf-8"><meta name="board-token" content="' + token + '"><meta name="steps-session" content="' + STEPS_SESSION + '">')
+          .replace('<script>', () => '<script>document.body.classList.add("vscode");</script>\n<script>');
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } else if (u.pathname === '/api/steps' && req.method === 'POST') {
+        const chunks = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          let msg = null;
+          try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { /* answered below */ }
+          if (!msg) return json(res, 400, { error: 'invalid JSON' });
+          if (msg.type === 'seen') return json(res, 200, { type: 'seenResult', ok: true });   // the picture keeps the marker where the fixture put it
+          service.handle(msg).then((reply) => json(res, 200, reply), (e) => json(res, 500, { error: String(e) }));
+        });
+      } else if (u.pathname === '/api/steps/poll') {
+        const after = Number(u.searchParams.get('after') || 0) || 0;
+        json(res, 200, { seq: pushes.length, pushes: pushes.slice(after) });
+      } else {
+        json(res, 404, { error: 'not found' });
+      }
+    });
+    const port = await freePort();
+    await new Promise((res) => server.listen(port, '127.0.0.1', res));
+
     const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
     const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
     await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: false }, sessionId);
@@ -297,21 +274,24 @@ async function renderSteps(out, width, height) {
     await send('Emulation.setDeviceMetricsOverride', { width, height: fitted, deviceScaleFactor: 2, mobile: false }, sessionId);
     await evaluate(toEnd);
     await until(drawn, 'the whole example story at its final size');
-    await sleep(400);
+    // Scrolling by script can leave the Follow switch either way. At the end of the story it
+    // is on, as it is for someone who opens the tab; set here so every run draws the same.
+    await evaluate('(function () { var f = document.getElementById("follow"); if (!f.checked) f.click(); return true; })()');
+    await until(drawn, 'the whole example story with Follow on');
+    // Two frames and a pause, so the picture is taken of the final layout: a browser that
+    // has just started can still be showing the frame from before the window was resized.
+    await send('Runtime.evaluate', { expression: 'new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(function () { r(true); }); }); })', awaitPromise: true }, sessionId);
+    await sleep(800);
     const shot = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
     fs.writeFileSync(out, Buffer.from(shot.data, 'base64'));
-    ws.close();
   } finally {
-    if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(chrome.pid), '/T', '/F'], { stdio: 'ignore' }); } catch (_) { /* gone */ } } else { try { chrome.kill(); } catch (_) { /* gone */ } }
-    await new Promise((res) => server.close(res));
-    unsubscribe();   // the last subscriber gone, the service drops its follow timer and this process can end
-    await sleep(300);
-    for (const d of [dir, profile]) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* left to the temp cleanup */ } }
+    await chrome.close();
+    if (server) await new Promise((res) => server.close(res));
+    if (unsubscribe) unsubscribe();   // the last subscriber gone, the service drops its follow timer and this process can end
+    try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* left to the temp cleanup */ }
   }
   console.log('wrote ' + out);
 }
-
-module.exports = { browser };   // tests/page.test.cjs reuses the browser discovery
 
 if (require.main === module) {
   const known = ['board', 'search', 'steps'];

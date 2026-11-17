@@ -15,9 +15,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
-const net = require('net');
-const { spawn, execFileSync } = require('child_process');
-const { browser } = require('../../tools/screenshot.cjs');
+const { browser, freePort, startChrome } = require('../../tools/chrome.cjs');
 const chromeLock = require('./shim/chrome-lock.cjs');
 const { createStepsService } = require('../steps-service.cjs');
 
@@ -153,6 +151,7 @@ async function serve(req, res) {
       .replace('var POLL_MS = 1200;', 'var POLL_MS = 120;')
       .replace('var SEEN_DEBOUNCE_MS = 1500;', 'var SEEN_DEBOUNCE_MS = 200;')
       .replace('var SEARCH_DEBOUNCE_MS = 150;', 'var SEARCH_DEBOUNCE_MS = 30;')
+      .replace('var BODY_RETRY_MS = 2000;', 'var BODY_RETRY_MS = 250;')
       // every notice the page showed, kept for the sampler: a timeout then says what the page saw
       .replace('function flashNotice(text) {', 'function flashNotice(text) { (window.__notices = window.__notices || []).push(text);');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -175,6 +174,8 @@ async function serve(req, res) {
     // a connection that dies under a request: what a browser sees when it reuses an idle
     // socket the server is closing at that moment
     if (fake.dropOnce && fake.dropOnce === msg.type) { fake.dropOnce = null; req.socket.destroy(); return; }
+    // the same, for as long as a test leaves it set: a server that is away for a while
+    if (fake.dropAll && fake.dropAll === msg.type) { req.socket.destroy(); return; }
     // a test may put the real steps service behind this transport, so the page is fed by the
     // real reader and not by a scripted reply
     if (fake.service) return json(res, 200, await fake.service.handle(msg));
@@ -189,7 +190,7 @@ async function serve(req, res) {
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return json(res, 200, { type: 'openTextResult', notAvailable: true });
-    if (msg.type === 'fullText') return json(res, 200, { type: 'fullTextResult', ok: true, stepId: msg.stepId, text: 'the whole text of ' + msg.stepId });
+    if (msg.type === 'fullText') return json(res, 200, Object.assign({ type: 'fullTextResult', stepId: msg.stepId }, fake.fullText(msg.stepId)));
     if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete' || msg.type === 'noteSend' || msg.type === 'notesSendAll') {
       const reply = handleNoteMessage(msg);
       fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
@@ -199,21 +200,11 @@ async function serve(req, res) {
   }
   return json(res, 404, { error: 'not found' });
 }
-function freePort() { return new Promise((res) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); }); }
 
 // -- Chrome over the DevTools protocol (same harness as page.test.cjs) ---------------------
 
-class CDP {
-  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.id && this.pending.has(m.id)) { const p = this.pending.get(m.id); this.pending.delete(m.id); if (m.error) p.reject(new Error(JSON.stringify(m.error))); else p.resolve(m.result); } }; }
-  send(method, params, sessionId) { const id = ++this.id; return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params: params || {}, sessionId })); }); }
-}
-const getJson = (url) => new Promise((res, rej) => http.get(url, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }).on('error', rej));
-const kill = (pid) => { if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch (_) { /* gone */ } } else { try { process.kill(pid); } catch (_) { /* gone */ } } };
-
 let server = null;
-let chrome = null;
-let cdp = null;
-let userDataDir = null;
+let cdp = null;   // { send, close } of the browser started by tools/chrome.cjs
 
 test.before(async () => {
   if (!CHROME) return;
@@ -221,24 +212,12 @@ test.before(async () => {
   PORT = await freePort();
   server = http.createServer((req, res) => { serve(req, res).catch((e) => json(res, 500, { error: String(e) })); });
   await new Promise((res) => server.listen(PORT, '127.0.0.1', res));
-  const cdpPort = await freePort();
-  userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-page-chrome-'));
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + userDataDir, '--no-first-run', 'about:blank'], { stdio: 'ignore' });
-  let info = null;
-  for (let i = 0; i < 100 && !info; i++) { try { info = await getJson('http://127.0.0.1:' + cdpPort + '/json/version'); } catch (_) { await sleep(200); } }
-  if (!info) throw new Error('Chrome did not open its debugging port');
-  const ws = new WebSocket(info.webSocketDebuggerUrl);
-  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-  cdp = new CDP(ws);
+  cdp = await startChrome();
 });
 
 test.after(async () => {
-  if (chrome) kill(chrome.pid);
+  if (cdp) await cdp.close();
   if (server) await new Promise((res) => server.close(res));
-  if (userDataDir) {
-    await sleep(300);
-    try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* leave it to the OS temp cleanup */ }
-  }
   if (CHROME) chromeLock.release();
 });
 
@@ -356,6 +335,8 @@ test.beforeEach(() => {
   fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
   fake.notes.clear();
   fake.dropOnce = null;
+  fake.dropAll = null;
+  fake.fullText = (stepId) => ({ ok: true, text: 'the whole text of ' + stepId });
   fake.noteReject = null;
   fake.expireOnce = false;
 });
@@ -752,6 +733,32 @@ test('page: the Files changed tile shows clickable names that send openLink', op
   await page.close();
 });
 
+test('page: with Files changed open, a request for the file names that failed is made again, and the names appear without leaving the view', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'tool', { title: 'Edit' })],
+    sections: [
+      section('lead', 'Session start', null, []),
+      section('you', 'edit the file', 'u1:0', [{ kind: 'work', items: ['t1:0'] }]),
+    ],
+    strip: { activeTimeMs: 1000, sections: 2, decisions: 1, filesChanged: 1 },
+  });
+  fake.body = (stepId) => {
+    if (stepId === 't1:0') return { title: 'Edit', input: 'C:\\\\proj\\\\foo.py', result: 'ok', path: 'C:\\\\proj\\\\foo.py' };
+    return { text: 'body of ' + stepId, truncated: false, size: 10 };
+  };
+  fake.dropAll = 'bodies';   // the server does not answer any request for bodies
+  const page = await openPage(A);
+  await page.until((x) => x.filesTileNum === '1', 'the files tile to carry the count');
+  await page.click('.strip .item:nth-child(4)');
+  await sleep(900);   // several failed requests and pauses
+  let s = await page.sample();
+  assert.equal(s.fileLinks.length, 0, 'no names while the requests fail');
+  fake.dropAll = null;       // the server is back
+  s = await page.until((x) => x.fileLinks.length === 1, 'the file name to appear by itself');
+  assert.ok(s.fileLinks[0].indexOf('foo.py') !== -1);
+  await page.close();
+});
+
 test('page: a Work line says in words what was done, never "N tool calls: Bash, Edit"', opts, async () => {
   fake.open = () => openReply({
     steps: [
@@ -1061,12 +1068,21 @@ test('page: "Open full text" on a cut text asks for the step, and a browser copi
   fake.body = (stepId) => (stepId === 't1:0' ? { text: 'the start of a very long answer', truncated: true, size: 300000 } : { text: 'body of ' + stepId, truncated: false, size: 10 });
   const page = await openPage(A);
   await page.until((x) => x.bodyTexts.some((t) => t.indexOf('Open full text') !== -1), 'the cut text with its button');
+  // what the page hands to the clipboard, kept for the assertions
+  await page.eval('window.__copied = []; copyToClipboard = function (t) { window.__copied.push(t); }; true');
   await page.click('.row.k-claude .showall');
   const s = await page.until((x) => x.notices.some((n) => n.indexOf('text copied') !== -1), 'the line that says the text was copied');
   const sent = fake.calls.filter((m) => m && (m.type === 'openText' || m.type === 'fullText'));
   assert.deepEqual(sent.map((m) => [m.type, m.stepId]), [['openText', 't1:0'], ['fullText', 't1:0']], 'the step is named, its text is not sent back and forth');
   assert.equal(sent[0].text, undefined, 'the page does not send the cut text as if it were the whole');
   assert.ok(s.notices.length >= 1);
+  assert.deepEqual(await page.eval('window.__copied'), ['the whole text of t1:0'], 'the whole text is what was copied');
+  // the whole text cannot be read: nothing is copied, and the page says so
+  fake.fullText = () => ({ ok: false, message: 'that step is no longer in the transcript' });
+  await page.click('.row.k-claude .showall');
+  const failed = await page.until((x) => x.notices.some((n) => n.indexOf('could not be read') !== -1), 'the line that says the full text could not be read');
+  assert.ok(failed.notices.some((n) => n.indexOf('no longer in the transcript') !== -1), 'with the reason: ' + JSON.stringify(failed.notices));
+  assert.deepEqual(await page.eval('window.__copied'), ['the whole text of t1:0'], 'the cut text is not copied in its place');
   await page.close();
 });
 
@@ -1446,6 +1462,11 @@ test('page: the notes counter in the header jumps between notes', opts, async ()
   await page.click('#notesJump');
   const first = await page.until((x) => x.curHitId === 'step-u1:0' || x.curHitId === 'step-u2:0', 'the jump to land on one of the noted steps');
   const scrolledOnce = first.curHitId;
+  // a push redraws the reader (here: the list of notes again, as from another window); the
+  // mark on the current note has to be there afterwards
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: noteList() });
+  await sleep(500);
+  assert.equal((await page.sample()).curHitId, scrolledOnce, 'the mark survives a redraw');
   await page.click('#notesJump');
   const second = await page.until((x) => x.curHitId !== null && x.curHitId !== scrolledOnce, 'a second click to move to the other note');
   assert.notEqual(second.curHitId, scrolledOnce, 'a second click moves to the other note');

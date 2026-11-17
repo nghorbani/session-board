@@ -759,14 +759,6 @@ function createStepIndex(file, deps) {
     return { byKind, unreadable };
   }
 
-  /* The byte range of the tree line a node was read from, for callers (search) that map a raw
-     byte offset in the file back to the step(s) built from that line. undefined when the node
-     is not currently held (a different generation, or never ingested). */
-  function nodeRange(nodeUuid) {
-    const node = nodes.get(nodeUuid);
-    return node ? { offset: node.offset, length: node.length } : undefined;
-  }
-
   /* Every stretch of the file that a step's visible text comes from: its own line, the line
      that carries the result of its call, and the line a subagent's report arrived in. Search
      maps the byte offset of a hit back to steps through these, so text that only a result or
@@ -792,7 +784,6 @@ function createStepIndex(file, deps) {
     body(stepId) { return body(stepId); },   // callers get the cut body; the whole text is fullText's
     fullText,
     counts,
-    nodeRange,
     sourceRanges,
     generation() { return generation; },
   };

@@ -286,6 +286,7 @@ var state = {
   bodiesPending: Object.create(null),
   invalidatedAt: Object.create(null), // stepId -> invalidateSeq when a push named the step as updated
   invalidateSeq: 0,
+  curHitStep: null,            // the step the search or the notes counter last jumped to; its row carries the mark
   lens: 'all',                 // 'all' | 'decisions' | 'files'
   showAllTools: false,
   follow: true,
@@ -368,7 +369,18 @@ function send(msg) {
     return new Promise(function (res) { setTimeout(res, RETRY_AFTER_MS); }).then(function () { return post(msg); });
   }).catch(function (e) {
     return { type: (msg.type || 'unknown') + 'Result', ok: false, message: 'server not reachable: ' + e.message };
+  }).then(function (reply) {
+    if (reply && reply.expired) reopenAfterExpiry();
+    return reply;
   });
+}
+
+/* The browser server let go of this viewer: it heard nothing from it for minutes (a hidden
+   tab polls rarely). A poll says so, and so does the reply to a request that needs the
+   transcript. Opening again reads the transcript anew; the reader keeps its place. */
+function reopenAfterExpiry() {
+  pollAfter = 0;
+  if (state.loaded && !state.reopening) { state.reopening = true; openSession(true); }
 }
 
 /* A request/reply call: sends msg with a fresh requestId and resolves when the matching reply
@@ -392,13 +404,7 @@ function startPolling() {
     fetch('/api/steps/poll?session=' + encodeURIComponent(SESSION_ID) + '&after=' + pollAfter, {
       headers: { 'X-Board-Token': TOKEN }, cache: 'no-store',
     }).then(function (r) { return r.json(); }).then(function (res) {
-      if (res && res.expired) {
-        // The server let go of this viewer: it heard nothing for minutes (a hidden tab polls
-        // rarely). Opening again reads the transcript anew; the reader keeps its place.
-        pollAfter = 0;
-        if (state.loaded && !state.reopening) { state.reopening = true; openSession(true); }
-        return;
-      }
+      if (res && res.expired) { reopenAfterExpiry(); return; }
       if (!res || typeof res.seq !== 'number') return;
       pollAfter = res.seq;
       (res.pushes || []).forEach(onPush);
@@ -796,16 +802,19 @@ function dispatchLink(kind, target) {
 }
 
 function openFullText(stepId, title) {
-  var b = state.bodies[stepId];
-  var text = (b && b.text) || '';
   // The step is named, not its text: what the page holds is the text cut at 200 KB, and the
   // host reads the whole one from the transcript. A browser has no editor tab to open, so it
-  // fetches the whole text and copies it instead.
-  call({ type: 'openText', stepId: stepId, title: title || 'Step text' }).then(function (reply) {
+  // fetches the whole text and copies that. When the whole text cannot be read nothing is
+  // copied: the cut text passed off as the whole would be worse than a plain "could not".
+  call({ type: 'openText', stepId: stepId, generation: state.generation, title: title || 'Step text' }).then(function (reply) {
     if (reply && reply.notAvailable) {
-      call({ type: 'fullText', stepId: stepId }).then(function (full) {
-        copyToClipboard(full && full.ok && typeof full.text === 'string' ? full.text : text);
-        flashNotice('not available in the browser, text copied');
+      call({ type: 'fullText', stepId: stepId, generation: state.generation }).then(function (full) {
+        if (full && full.ok && typeof full.text === 'string') {
+          copyToClipboard(full.text);
+          flashNotice('not available in the browser, text copied');
+        } else {
+          flashNotice('The full text could not be read' + (full && full.message ? ': ' + full.message : '') + '.');
+        }
       });
     } else if (reply && reply.ok === false && reply.message) flashNotice(reply.message);
   });
@@ -1068,6 +1077,7 @@ function renderReader() {
   for (var i = lo; i < hi; i++) reader.appendChild(buildSectionNode(secs[i], i, secs));
   if (hi < secs.length) reader.appendChild(buildSpacer('after', (secs.length - hi) * SEC_HEIGHT_ESTIMATE));
   insertNewSinceMarker(reader, secs);
+  markCurrentHit();
 }
 
 function buildSpacer(which, heightPx) {
@@ -1882,7 +1892,11 @@ function requestBodies(ids) {
     ids.forEach(function (id) { delete state.bodiesPending[id]; });
     if (!reply || !Array.isArray(reply.items)) {
       clearTimeout(state.bodyRetryTimer);
-      state.bodyRetryTimer = setTimeout(queueVisibleBodies, BODY_RETRY_MS);
+      state.bodyRetryTimer = setTimeout(function () {
+        // the Files changed view asks for what it misses when it is drawn; the story asks
+        // for the texts in view
+        if (state.lens === 'files') renderFilesView(); else queueVisibleBodies();
+      }, BODY_RETRY_MS);
       return false;
     }
     if (generation !== state.generation) return false;
@@ -1940,7 +1954,7 @@ function runSearch(q) {
   // every change of the query, an emptied box too, outdates the replies still on their way
   var requestId = ++state.searchRequestId;
   if (!q) {
-    state.hits = []; state.curHit = -1;
+    state.hits = []; state.curHit = -1; state.curHitStep = null;
     call({ type: 'cancelSearch' });
     renderAll(); updateSearchCount();
     return;
@@ -1989,21 +2003,39 @@ function scrollToStepId(stepId) {
   secs.forEach(function (sec, i) { if (sectionStepIds(sec).indexOf(stepId) !== -1) idx = i; });
   if (idx !== -1) anchorIndex = idx;
   renderReader();
-  var target = document.getElementById('step-' + stepId);
-  if (!target) {
+  if (!document.getElementById('step-' + stepId)) {
     // the id may be bundled inside a Work line's group; open that line's detail list.
     Object.keys(state.workItemsByKey || {}).forEach(function (key) {
       if (state.workItemsByKey[key].indexOf(stepId) !== -1) {
         state.openWork[key] = true;
         var node = document.querySelector('[data-work-key="' + key + '"] .worklist');
         if (node) node.classList.add('open');
+      }
+    });
+  }
+  state.curHitStep = stepId;
+  var marked = markCurrentHit();
+  if (marked) marked.scrollIntoView({ block: 'center' });
+  renderRail();
+}
+
+/* The row of the current hit or note carries a mark. It is drawn from the state after every
+   redraw of the reader, so a push that redraws (every live update does) leaves it in place.
+   A step bundled into a Work line is marked on that line. Returns the marked row. */
+function markCurrentHit() {
+  Array.prototype.forEach.call(document.querySelectorAll('.cur-hit'), function (n) { n.classList.remove('cur-hit'); });
+  var stepId = state.curHitStep;
+  if (!stepId) return null;
+  var target = document.getElementById('step-' + stepId);
+  if (!target) {
+    Object.keys(state.workItemsByKey || {}).forEach(function (key) {
+      if (!target && state.workItemsByKey[key].indexOf(stepId) !== -1) {
         target = document.getElementById(key.replace(/^g-/, 'step-')) || document.querySelector('[data-work-key="' + key + '"]');
       }
     });
   }
-  Array.prototype.forEach.call(document.querySelectorAll('.cur-hit'), function (n) { n.classList.remove('cur-hit'); });
-  if (target) { target.classList.add('cur-hit'); target.scrollIntoView({ block: 'center' }); }
-  renderRail();
+  if (target) target.classList.add('cur-hit');
+  return target;
 }
 
 var qInput = document.getElementById('q');

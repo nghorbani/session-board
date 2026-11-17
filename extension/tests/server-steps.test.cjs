@@ -241,10 +241,16 @@ test('a browser viewer that stops polling is released: its next poll says so, an
     // a viewer that keeps polling stays, well past the idle limit
     for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 60)); assert.equal((await poll()).expired, undefined, 'still polling, still served'); }
     await new Promise((r) => setTimeout(r, 600));   // the tab is closed: no request for ten ticks
+    // the tab comes back and asks for a text before its next poll: that request must not
+    // bring a viewer without an index to life, or no poll would ever say "released"
+    const body = await post({ type: 'bodies', requestId: 'b1', sessionId: A, stepIds: [opened.steps[0].id], generation: opened.generation });
+    assert.deepEqual([body.type, body.ok, body.expired, body.requestId], ['bodiesResult', false, true, 'b1'], 'a request that needs the transcript says the viewer was released');
     const late = await poll();
-    assert.equal(late.expired, true, 'the poll of a released viewer says so');
-    const body = await post({ type: 'bodies', sessionId: A, stepIds: [opened.steps[0].id], generation: opened.generation });
-    assert.equal(body.items[0].stale, true, 'the index went with the viewer');
+    assert.equal(late.expired, true, 'and the poll after it still says so');
+    // a note needs no transcript and is kept all the same
+    const kept = await post({ type: 'noteAdd', sessionId: A, stepId: opened.steps[0].id, text: 'written while released' });
+    assert.equal(kept.ok, true);
+    assert.equal((await poll()).expired, true, 'a note does not start a viewer either');
     const again = await post({ type: 'open', requestId: 'r2', sessionId: A });
     assert.equal(again.ok, true, 'a new open reads the transcript again');
     assert.equal((await poll()).expired, undefined);

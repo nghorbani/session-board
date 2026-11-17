@@ -424,6 +424,10 @@ test('fullText answers the whole text of a step whose body is cut, and says so w
   assert.ok(full.text.endsWith(' the very end'));
   const gone = await svc.handle({ type: 'fullText', sessionId: A, stepId: 'no-such:0' });
   assert.equal(gone.ok, false);
+  const same = await svc.handle({ type: 'fullText', sessionId: A, stepId: text.id, generation: opened.generation });
+  assert.equal(same.ok, true, 'asked for with the generation the step was shown under');
+  const other = await svc.handle({ type: 'fullText', sessionId: A, stepId: text.id, generation: opened.generation + 1 });
+  assert.equal(other.ok, false, 'a step held from another generation is not answered with the text of this one');
 });
 
 test('cancelSearch stops a running search; a new search cancels the previous one before it reaches ripgrep', async () => {
