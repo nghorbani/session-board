@@ -235,6 +235,59 @@ test('meta and notification user lines are not counted as you steps', async () =
   assert.equal(idx.body(youSteps[0].id).text, 'real message');
 });
 
+test('a message of the owner that starts with "<" is theirs: markup they typed, a paste; only the blocks Claude Code writes itself are left out', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, '<button disabled>Save</button> has no label, fix its accessibility'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'ok' }]),
+    userLine(uuid(3), uuid(2), [{ type: 'text', text: '<ide_opened_file>The user opened a.ts in the IDE.</ide_opened_file>' }, { type: 'text', text: '<Trans>Hello</Trans> is not translated' }]),
+    userLine(uuid(4), uuid(3), '<pasted_content id="1">line one\nline two</pasted_content>\nwhat does this log mean?'),
+    userLine(uuid(5), uuid(4), '<task-notification><task-id>x</task-id><status>completed</status></task-notification>'),
+    userLine(uuid(6), uuid(5), '<local-command-stdout>Compacted</local-command-stdout>'),
+    userLine(uuid(7), uuid(6), '<command-message>compact</command-message>\n<command-name>/compact</command-name>'),
+    { type: 'attachment', uuid: uuid(8), parentUuid: uuid(7), timestamp: new Date(2026, 0, 1, 0, 3, 0).toISOString(),
+      attachment: { type: 'queued_command', origin: { kind: 'human' }, prompt: '<div> around the list breaks the layout' } },
+    assistantLine(uuid(9), uuid(8), 'm2', [{ type: 'text', text: 'done' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const you = idx.steps().filter((x) => x.kind === 'you').map((x) => idx.body(x.id).text);
+  assert.deepEqual(you, [
+    '<button disabled>Save</button> has no label, fix its accessibility',
+    '<Trans>Hello</Trans> is not translated',
+    '<pasted_content id="1">line one\nline two</pasted_content>\nwhat does this log mean?',
+    '<div> around the list breaks the layout',
+  ]);
+  const { sections } = steps.buildSections(idx.steps(), (id) => idx.body(id));
+  assert.equal(sections.filter((s) => s.kind === 'you').length, 4, 'each of them opens its own section');
+});
+
+test('a question with overlapping option labels marks the option that was chosen, and typed words that contain a label stay typed words', async () => {
+  const file = newFile();
+  const ask = (id, multi) => ({ type: 'tool_use', id, name: 'AskUserQuestion', input: { questions: [{ header: 'Next', question: 'What next?', multiSelect: multi,
+    options: [{ label: 'Go', description: 'start now' }, { label: 'Go with tests', description: 'start, tests first' }, { label: 'Wait', description: 'not yet' }] }] } });
+  const answered = (a) => 'Your questions have been answered: "What next?"="' + a + '". You can now continue.';
+  writeLines(file, [
+    userLine(uuid(1), null, 'hi'),
+    assistantLine(uuid(2), uuid(1), 'm1', [ask('q1', false)]),
+    toolResultLine(uuid(3), uuid(2), 'q1', answered('Go with tests')),
+    assistantLine(uuid(4), uuid(3), 'm2', [ask('q2', false)]),
+    toolResultLine(uuid(5), uuid(4), 'q2', answered('Go')),
+    assistantLine(uuid(6), uuid(5), 'm3', [ask('q3', true)]),
+    toolResultLine(uuid(7), uuid(6), 'q3', answered('Go, Wait')),
+    assistantLine(uuid(8), uuid(7), 'm4', [ask('q4', false)]),
+    toolResultLine(uuid(9), uuid(8), 'q4', answered('Go but only after lunch')),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const cards = idx.steps().filter((x) => x.kind === 'question').map((x) => idx.body(x.id).questions[0]);
+  const chosen = (c) => c.options.filter((o) => o.chosen).map((o) => o.label);
+  assert.deepEqual([chosen(cards[0]), cards[0].other], [['Go with tests'], '']);
+  assert.deepEqual([chosen(cards[1]), cards[1].other], [['Go'], '']);
+  assert.deepEqual([chosen(cards[2]), cards[2].other], [['Go', 'Wait'], '']);
+  assert.deepEqual([chosen(cards[3]), cards[3].other], [[], 'Go but only after lunch']);
+});
+
 test('an unparsable line is skipped and counted; an unknown block type becomes "other"', async () => {
   const file = newFile();
   const goodLines = [
@@ -506,6 +559,27 @@ test('a body over 200 KB is truncated with the total size reported', async () =>
   assert.equal(b.truncated, true);
   assert.equal(b.text.length, 200 * 1024);
   assert.equal(b.size, huge.length);
+});
+
+test('the full text of a step is its whole text, past the 200 KB a body shows: a text, a plan, a message of the owner', async () => {
+  const file = newFile();
+  const tail = ' and this is the very end';
+  const huge = 'y'.repeat(250 * 1024) + tail;
+  writeLines(file, [
+    userLine(uuid(1), null, 'u'.repeat(210 * 1024) + tail),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: huge }]),
+    assistantLine(uuid(3), uuid(2), 'm2', [{ type: 'tool_use', id: 'p1', name: 'ExitPlanMode', input: { plan: 'p'.repeat(220 * 1024) + tail } }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  for (const kind of ['you', 'text', 'plan']) {
+    const st = idx.steps().find((x) => x.kind === kind);
+    assert.equal(idx.body(st.id).truncated, true, kind + ': the body is cut');
+    const full = idx.fullText(st.id);
+    assert.ok(full.text.endsWith(tail), kind + ': the full text reaches the end');
+    assert.equal(full.text.length, idx.body(st.id).size);
+  }
+  assert.deepEqual(idx.fullText('no-such-step:0'), { stale: true });
 });
 
 test('sections and the strip counts; a you step is never doubled', async () => {

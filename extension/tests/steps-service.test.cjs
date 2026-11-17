@@ -336,6 +336,96 @@ test('the 500 cap: more than 500 candidate steps answer "500+" beyond the cap', 
   assert.equal(res.capped, true, '"500+" beyond the stated limit');
 });
 
+// A transcript where each query sits in one place only: a tool's output, a subagent's report
+// that came as a task notification, the words typed into a question, and a text that follows
+// a long stretch of non-ASCII text (byte offsets and character positions differ from there on).
+function searchPlacesFixture(file) {
+  const ask = { questions: [{ header: 'Way', question: 'Which way?', multiSelect: false, options: [{ label: 'Left', description: 'short' }, { label: 'Right', description: 'long' }] }] };
+  writeLines(file, [
+    userLine(uuid(1), null, 'ä'.repeat(900) + ' 日本語のテキスト '.repeat(40)),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test', description: 'run the tests' } }]),
+    toolResultLine(uuid(3), uuid(2), 't1', 'FAIL widget exploded in upload.test.ts'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'tool_use', id: 'a1', name: 'Agent', input: { subagent_type: 'general-purpose', description: 'look into it', prompt: 'find the cause' } }]),
+    toolResultLine(uuid(5), uuid(4), 'a1', 'Async agent launched successfully. agentId: ag77'),
+    userLine(uuid(6), uuid(5), '<task-notification><tool-use-id>a1</tool-use-id><status>completed</status><result>The cause is a stale lockfile.</result></task-notification>'),
+    assistantLine(uuid(7), uuid(6), 'm3', [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: ask }]),
+    toolResultLine(uuid(8), uuid(7), 'q1', 'Your questions have been answered: "Which way?"="neither, take the ferry". You can now continue.'),
+    assistantLine(uuid(9), uuid(8), 'm4', [{ type: 'text', text: 'The pelican has landed.' }]),
+  ]);
+}
+
+async function searchPlaces(deps) {
+  const file = newFile();
+  searchPlacesFixture(file);
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const kindOf = (id) => opened.steps.find((s) => s.id === id).kind;
+  const found = {};
+  for (const q of ['widget exploded', 'stale lockfile', 'take the ferry', 'pelican']) {
+    const res = await svc.handle({ type: 'search', sessionId: A, query: q, requestId: 's-' + q });
+    found[q] = res.stepIds.map(kindOf);
+  }
+  return found;
+}
+
+const EVERY_PLACE = { 'widget exploded': ['tool'], 'stale lockfile': ['subagent'], 'take the ferry': ['question'], 'pelican': ['text'] };
+
+test('search without ripgrep finds text that only a tool result, a subagent report or a typed answer holds, also after non-ASCII text', async () => {
+  assert.deepEqual(await searchPlaces(makeDeps()), EVERY_PLACE);
+});
+
+test('search with ripgrep byte offsets finds the same places: a hit in a result or report line counts for the step that shows it', async () => {
+  const deps = makeDeps();
+  deps.rg = {
+    probe: async () => ({ path: '/usr/bin/rg', error: null }),
+    // what `rg --byte-offset --only-matching --fixed-strings --ignore-case -e q` prints for one file
+    run: async (_rg, args) => {
+      const q = args[args.indexOf('-e') + 1];
+      const buf = fs.readFileSync(args[args.length - 1]);
+      const needle = Buffer.from(q, 'utf8');
+      const out = [];
+      for (let at = buf.indexOf(needle); at !== -1; at = buf.indexOf(needle, at + 1)) out.push(at + ':' + q);
+      return { code: out.length ? 0 : 1, stdout: out.join('\n') + (out.length ? '\n' : ''), stderr: '' };
+    },
+    RG_BASE: core.RG_BASE,
+    jsonEscaped: core.jsonEscaped,
+  };
+  assert.deepEqual(await searchPlaces(deps), EVERY_PLACE);
+});
+
+test('search maps a very large number of hits to steps without comparing every hit with every step', async () => {
+  const file = newFile();
+  const lines = [userLine(uuid(1), null, 'start')];
+  for (let i = 2; i <= 3001; i++) lines.push(assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'the ' + 'word the '.repeat(30) + i }]));
+  writeLines(file, lines);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const t0 = Date.now();
+  const res = await svc.handle({ type: 'search', sessionId: A, query: 'the', requestId: 's1' });
+  assert.equal(res.stepIds.length, 500, 'capped at 500 confirmed hits');
+  assert.equal(res.capped, true);
+  assert.ok(Date.now() - t0 < 4000, 'took ' + (Date.now() - t0) + ' ms');
+});
+
+test('fullText answers the whole text of a step whose body is cut, and says so when the step is gone', async () => {
+  const file = newFile();
+  const huge = 'y'.repeat(250 * 1024) + ' the very end';
+  writeLines(file, [userLine(uuid(1), null, 'hi'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: huge }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const text = opened.steps.find((s) => s.kind === 'text');
+  const full = await svc.handle({ type: 'fullText', requestId: 'f1', sessionId: A, stepId: text.id });
+  assert.deepEqual([full.type, full.ok, full.requestId, full.text.length], ['fullTextResult', true, 'f1', huge.length]);
+  assert.ok(full.text.endsWith(' the very end'));
+  const gone = await svc.handle({ type: 'fullText', sessionId: A, stepId: 'no-such:0' });
+  assert.equal(gone.ok, false);
+});
+
 test('cancelSearch stops a running search; a new search cancels the previous one before it reaches ripgrep', async () => {
   const file = newFile();
   writeLines(file, [userLine(uuid(1), null, 'one'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'two' }])]);

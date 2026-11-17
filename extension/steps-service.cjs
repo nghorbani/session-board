@@ -459,6 +459,18 @@ function createStepsService(deps) {
     return { type: 'notesSendAllResult', ok: !!(result && result.ok), sessionId, text, message: (result && result.message) || 'nothing happened' };
   }
 
+  /* The whole text of a step whose body the page shows cut at 200 KB: what "Open full text"
+     opens in an editor tab, or copies in a browser. */
+  function handleFullText(msg) {
+    const sessionId = String(msg.sessionId || '');
+    const s = sessions.get(sessionId);
+    const reply = { type: 'fullTextResult', sessionId, stepId: msg.stepId };
+    if (!s || !s.index) return Object.assign(reply, { ok: false, message: 'session not open' });
+    const full = s.index.fullText(String(msg.stepId || ''));
+    if (full.stale) return Object.assign(reply, { ok: false, message: 'that step is no longer in the transcript' });
+    return Object.assign(reply, { ok: true, text: full.text });
+  }
+
   // -- search ------------------------------------------------------------------------------
 
   /* A hit's visible text is confirmed by checking it actually occurs (case-insensitively) in
@@ -481,8 +493,8 @@ function createStepsService(deps) {
     if (b.description) parts.push(b.description);
     if (b.prompt) parts.push(b.prompt);
     if (b.report) parts.push(b.report);
-    if (b.questions) for (const q of b.questions) { parts.push(q.question); for (const o of q.options) parts.push(o.label, o.description); }
-    return parts.join('\n');
+    if (b.questions) for (const q of b.questions) { parts.push(q.header, q.question, q.other); for (const o of q.options) parts.push(o.label, o.description); }
+    return parts.filter(Boolean).join('\n');
   }
 
   async function runSearch(sessionId, s, query, requestId, controller) {
@@ -542,51 +554,72 @@ function createStepsService(deps) {
     return { type: 'searchResult', sessionId, requestId, query: q, stepIds: confirmed, capped };
   }
 
-  /* Map each byte offset (from ripgrep or the Node fallback) to every step built from the tree
-     line covering it, through the index's nodeRange(uuid) hook. A line may carry several block
-     steps (a split response, several tool_use blocks); all of them become candidates, so a hit
-     on any one text/tool_use/thinking block of that line is never missed. */
+  /* Map the byte offsets of hits (from ripgrep or the Node fallback) to the steps that show the
+     text there, through the index's sourceRanges(step): the step's own line, the line of its
+     result and the line of its report. A line may carry several block steps (a split response,
+     several tool_use blocks); all of them become candidates. The offsets are sorted once and
+     each range is looked up by bisection, so a common word with hundreds of thousands of hits
+     costs steps times log(hits), not steps times hits. */
   function stepsAtOffsets(s, stepsArr, offsets) {
     if (!offsets.length) return [];
-    const ids = [];
-    const seen = new Set();
-    const sorted = offsets.slice().sort((a, b) => a - b);
-    for (const st of stepsArr) {
-      if (seen.has(st.id)) continue;
-      const r = s.index.nodeRange(st.nodeUuid);
-      if (!r) continue;
-      for (const off of sorted) {
-        if (off >= r.offset && off < r.offset + r.length) { seen.add(st.id); ids.push(st.id); break; }
+    const sorted = Float64Array.from(offsets).sort();
+    const holdsHit = (r) => {
+      let lo = 0;
+      let hi = sorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (sorted[mid] < r.offset) lo = mid + 1; else hi = mid;
       }
+      return lo < sorted.length && sorted[lo] < r.offset + r.length;
+    };
+    const ids = [];
+    for (const st of stepsArr) {
+      if (s.index.sourceRanges(st).some(holdsHit)) ids.push(st.id);
     }
     return ids;
   }
 
-  /* Streaming scan of the whole file for the two forms of the query (plain and JSON-escaped,
-     the way the text is actually stored), used only when ripgrep is unavailable. Reads the
-     file in chunks rather than loading the whole thing at once. */
+  /* Scan of the file for the two forms of the query (plain and JSON-escaped, the way the text
+     is stored), used only when ripgrep is unavailable. The file is read as bytes, chunk by
+     chunk, and searched one line at a time: memory stays at one line however large the file,
+     and a hit is recorded as the byte offset of its line, which is all the mapping to steps
+     needs (a line is one tree node). Character positions of a decoded string would drift from
+     byte offsets after the first non-ASCII character. */
   async function nodeScan(s, stepsArr, q, signal) {
     const needles = [...new Set([q, (rg.jsonEscaped ? rg.jsonEscaped(q) : q)])].filter(Boolean).map((n) => n.toLowerCase());
     if (!needles.length) return [];
-    const text = await new Promise((resolve, reject) => {
-      const rs = fs.createReadStream(s.file, { encoding: 'utf8' });
-      let buf = '';
-      rs.on('data', (chunk) => { buf += chunk; });
-      rs.on('end', () => resolve(buf));
-      rs.on('error', reject);
-      if (signal) signal.addEventListener('abort', () => rs.destroy(new Error('aborted')), { once: true });
-    }).catch(() => '');
-    const lower = text.toLowerCase();
     const offsets = [];
-    for (const needle of needles) {
-      let from = 0;
-      for (;;) {
-        const i = lower.indexOf(needle, from);
-        if (i === -1) break;
-        offsets.push(i);
-        from = i + needle.length;
-      }
-    }
+    await new Promise((resolve) => {
+      let rs;
+      try { rs = fs.createReadStream(s.file); } catch (_) { resolve(); return; }
+      let carry = [];      // the pieces of a line that runs across chunks
+      let carryLen = 0;
+      let lineStart = 0;   // byte offset of the line in progress
+      let pos = 0;         // byte offset of the chunk in hand
+      const test = (buf, offset) => {
+        let lower;
+        try { lower = buf.toString('utf8').toLowerCase(); } catch (_) { return; }   // a line too long for one string
+        if (needles.some((n) => lower.indexOf(n) !== -1)) offsets.push(offset);
+      };
+      rs.on('data', (chunk) => {
+        let from = 0;
+        for (;;) {
+          const nlAt = chunk.indexOf(10, from);
+          if (nlAt === -1) break;
+          const piece = chunk.subarray(from, nlAt);
+          test(carryLen ? Buffer.concat(carry.concat([piece]), carryLen + piece.length) : piece, lineStart);
+          carry = [];
+          carryLen = 0;
+          lineStart = pos + nlAt + 1;
+          from = nlAt + 1;
+        }
+        if (from < chunk.length) { const rest = chunk.subarray(from); carry.push(rest); carryLen += rest.length; }
+        pos += chunk.length;
+      });
+      rs.on('end', () => { if (carryLen) test(Buffer.concat(carry, carryLen), lineStart); resolve(); });
+      rs.on('error', () => resolve());
+      if (signal) signal.addEventListener('abort', () => { rs.destroy(); resolve(); }, { once: true });
+    });
     return stepsAtOffsets(s, stepsArr, offsets);
   }
 
@@ -630,6 +663,7 @@ function createStepsService(deps) {
       case 'open': return handleOpen(msg);
       case 'body': return handleBody(msg);
       case 'bodies': return handleBodies(msg);
+      case 'fullText': return handleFullText(msg);
       case 'search': return handleSearch(msg);
       case 'cancelSearch': return handleCancelSearch(msg);
       case 'seen': return handleSeen(msg);

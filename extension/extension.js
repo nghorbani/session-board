@@ -598,7 +598,7 @@ class BoardProvider {
       if (!msg || typeof msg !== 'object') return;
       let reply;
       if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
-      else if (msg.type === 'openText') reply = await this.openStepsText(String(msg.title || ''), String(msg.text || ''));
+      else if (msg.type === 'openText') reply = await this.openStepsFullText(sessionId, msg);
       else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
       // the page matches a reply to its request by this id and by nothing else
       if (reply && msg.requestId !== undefined && reply.requestId === undefined) reply = Object.assign({}, reply, { requestId: msg.requestId });
@@ -752,6 +752,17 @@ class BoardProvider {
 
   /** openText { title, text }: an untitled document, the host side of "Open full text in an
    *  editor tab" for a truncated body. */
+  /** "Open full text" from the Steps page. The page names the step: its own copy of the text
+   *  is cut at 200 KB, so the whole text is read here, through the service, from the
+   *  transcript. A message that carries a text and no step is opened as it is. */
+  async openStepsFullText(sessionId, msg) {
+    const title = String(msg.title || '');
+    if (msg.stepId === undefined) return this.openStepsText(title, String(msg.text || ''));
+    const full = await this.stepsService.handle({ type: 'fullText', sessionId, stepId: String(msg.stepId) });
+    if (!full || !full.ok) return { type: 'openTextResult', ok: false, message: (full && full.message) || 'the text of that step could not be read' };
+    return this.openStepsText(title, String(full.text || ''));
+  }
+
   async openStepsText(title, text) {
     try {
       const doc = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });

@@ -786,9 +786,16 @@ function dispatchLink(kind, target) {
 function openFullText(stepId, title) {
   var b = state.bodies[stepId];
   var text = (b && b.text) || '';
-  call({ type: 'openText', title: title || 'Step text', text: text }).then(function (reply) {
-    if (reply && reply.notAvailable) { copyToClipboard(text); flashNotice('not available in the browser, text copied'); }
-    else if (reply && reply.ok === false && reply.message) flashNotice(reply.message);
+  // The step is named, not its text: what the page holds is the text cut at 200 KB, and the
+  // host reads the whole one from the transcript. A browser has no editor tab to open, so it
+  // fetches the whole text and copies it instead.
+  call({ type: 'openText', stepId: stepId, title: title || 'Step text' }).then(function (reply) {
+    if (reply && reply.notAvailable) {
+      call({ type: 'fullText', stepId: stepId }).then(function (full) {
+        copyToClipboard(full && full.ok && typeof full.text === 'string' ? full.text : text);
+        flashNotice('not available in the browser, text copied');
+      });
+    } else if (reply && reply.ok === false && reply.message) flashNotice(reply.message);
   });
 }
 

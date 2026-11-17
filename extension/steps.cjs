@@ -64,12 +64,19 @@ function textOf(content) {
    "[object Object]" (Array's default join calls String() on every element, and a plain object's
    String() is exactly that). Any other block kind is left out, same as textOf already does for
    non-text blocks. */
+/* The blocks Claude Code itself writes into the owner's turn: the output of a local command, a
+   slash command's own record, a task notification, what the IDE had open. They are told by
+   their first tag. Any other text that starts with "<" is the owner's: markup they typed, or a
+   paste (which Claude Code wraps in <pasted_content>). */
+const ENVELOPE_RE = /^<(?:task-notification|command-message|command-name|command-args|local-command-stdout|local-command-stderr|local-command-caveat|system-reminder|ide_opened_file|ide_selection|user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b/;
+function isEnvelope(text) { return ENVELOPE_RE.test(String(text || '').trim()); }
+
 function ownerText(content) {
-  if (typeof content === 'string') return content.trim().startsWith('<') ? '' : content;
+  if (typeof content === 'string') return isEnvelope(content) ? '' : content;
   if (!Array.isArray(content)) return '';
   return content.map((b) => {
     if (!b || typeof b !== 'object') return '';
-    if (b.type === 'text') return String(b.text || '').trim().startsWith('<') ? '' : (b.text || '');
+    if (b.type === 'text') return isEnvelope(b.text) ? '' : (b.text || '');
     if (b.type === 'image') return '(image)';
     return '';
   }).filter(Boolean).join('\n');
@@ -158,6 +165,22 @@ function parseAnswers(resultContent) {
   }
   return parseAnswerSentence(String(resultContent || ''));
 }
+/* `list` without `item` when `item` stands in it as a whole entry of a comma-separated list
+   (the start or a comma before it, the end or a comma after it); null when it does not. */
+function takeItem(list, item) {
+  let from = 0;
+  for (;;) {
+    const at = list.indexOf(item, from);
+    if (at === -1) return null;
+    const before = list.slice(0, at).trimEnd();
+    const after = list.slice(at + item.length).trimStart();
+    if ((before === '' || before.endsWith(',')) && (after === '' || after.startsWith(','))) {
+      return list.slice(0, at) + list.slice(at + item.length);
+    }
+    from = at + 1;
+  }
+}
+
 // The question as it was asked: header, full text, every option, and what was chosen.
 function fullQuestions(input, parsed) {
   return ((input && input.questions) || []).map((q, i) => {
@@ -165,11 +188,18 @@ function fullQuestions(input, parsed) {
     const first = text.split('\n')[0];
     const hit = parsed.find((p) => p.q === first) || parsed[i] || null;
     let rest = hit ? String(hit.a) : '';
+    // An answer is the chosen labels joined by ", " plus whatever the owner typed. A label
+    // counts only as a whole item of that list, and the longest labels are taken first, so
+    // "Go" is not found inside "Go with tests" or inside typed words that start with it.
+    const labels = (q.options || []).map((o) => String(o.label || ''));
+    const chosenLabels = new Set();
+    for (const label of [...new Set(labels)].filter(Boolean).sort((a, b) => b.length - a.length)) {
+      const taken = takeItem(rest, label);
+      if (taken !== null) { chosenLabels.add(label); rest = taken; }
+    }
     const options = (q.options || []).map((o) => {
       const label = String(o.label || '');
-      const chosen = !!label && rest.indexOf(label) !== -1;
-      if (chosen) rest = rest.split(label).join('');
-      return { label, description: String(o.description || ''), chosen };
+      return { label, description: String(o.description || ''), chosen: chosenLabels.has(label) };
     });
     rest = rest.split(',').map((x) => x.trim()).filter(Boolean).join(', ');
     return { header: String(q.header || ''), question: stripTags(text), multiSelect: !!q.multiSelect, options, other: rest, answered: !!hit };
@@ -232,6 +262,7 @@ function createStepIndex(file, deps) {
   let reportsByToolUse = new Map(); // tool_use_id -> report text (task-notification)
   let reportsByAgentId = new Map(); // agentId -> report text (agent-message)
   let agentIdOfToolUse = new Map(); // tool_use_id -> agentId (from the launch result)
+  let reportRanges = new Map();     // tool_use_id or 'agent:' + agentId -> { offset, length } of the line its report came in
   let unreadable = 0;
   let identity = null;  // { dev, ino, birthtimeMs } best-effort file identity
   let sizeSeen = 0;     // bytes already folded into the node map
@@ -264,6 +295,7 @@ function createStepIndex(file, deps) {
     reportsByToolUse = new Map();
     reportsByAgentId = new Map();
     agentIdOfToolUse = new Map();
+    reportRanges = new Map();
     unreadable = 0;
     sizeSeen = 0;
     path = [];
@@ -274,9 +306,9 @@ function createStepIndex(file, deps) {
   /* feed one parsed line object plus its byte range into the shared maps */
   function ingest(o, offset, length) {
     if (o && typeof o === 'object') {
-      if (o.type === 'queue-operation') { grabReports(String(o.content || '')); return; }
+      if (o.type === 'queue-operation') { grabReports(String(o.content || ''), offset, length); return; }
       if (o.type === 'attachment') {
-        grabReports(strings(o.attachment, 4, []).join('\n'));
+        grabReports(strings(o.attachment, 4, []).join('\n'), offset, length);
         // attachments can still be tree nodes if they carry a uuid; fall through below
       }
     }
@@ -297,17 +329,18 @@ function createStepIndex(file, deps) {
           if (agMatch) agentIdOfToolUse.set(b.tool_use_id, agMatch[1]);
         }
       }
-      grabReports(rawText(content));
+      grabReports(rawText(content), offset, length);
     }
   }
 
-  function grabReports(raw) {
+  function grabReports(raw, offset, length) {
     if (!raw) return;
     if (raw.indexOf('<task-notification>') !== -1) {
       const id = between(raw, '<tool-use-id>', '</tool-use-id>').trim();
       const r = between(raw, '<result>', '</result>').trim();
       if (id && r && r.indexOf('was delivered to you as a message') === -1) {
         reportsByToolUse.set(id, r);
+        reportRanges.set(id, { offset, length });
         if (touched) touched.add(id);
       }
     }
@@ -319,6 +352,7 @@ function createStepIndex(file, deps) {
       r = r.split('\n').map((l) => (l.startsWith('  ') ? l.slice(2) : l)).join('\n').trim();
       if (ag && r) {
         reportsByAgentId.set(ag, r);
+        reportRanges.set('agent:' + ag, { offset, length });
         if (touched) for (const [toolUseId, agentId] of agentIdOfToolUse) if (agentId === ag) touched.add(toolUseId);
       }
     }
@@ -653,7 +687,7 @@ function createStepIndex(file, deps) {
      record a caller kept from an earlier look (its `generation` is checked first, so a step
      held across a poll that started a new generation is caught even if the file happens to
      reuse the same uuid and block index, which a bare id string could not tell apart). */
-  function body(stepId) {
+  function body(stepId, whole) {
     const heldGeneration = stepId && typeof stepId === 'object' ? stepId.generation : undefined;
     const id = stepId && typeof stepId === 'object' ? stepId.id : stepId;
     if (heldGeneration !== undefined && heldGeneration !== generation) return { stale: true };
@@ -666,6 +700,8 @@ function createStepIndex(file, deps) {
     const content = o.message ? o.message.content : null;
     const blocks = Array.isArray(content) ? content : [];
     const b = blocks[step.blockIndex];
+    // `whole` lifts the 200 KB cut (fullText below): the same text, to its end
+    const textBody = (text) => cutBody(String(text == null ? '' : text), {}, whole);
 
     if (step.kind === 'you') return textBody(o.type === 'attachment' ? ownerText(o.attachment && o.attachment.prompt) : ownerText(content));
     if (step.kind === 'interrupted') return textBody('Interrupted');
@@ -684,7 +720,7 @@ function createStepIndex(file, deps) {
     }
     if (step.kind === 'plan') {
       const input = (b && b.input) || {};
-      return cutBody(String(input.plan || ''), { approved: step.approved });
+      return cutBody(String(input.plan || ''), { approved: step.approved }, whole);
     }
     if (step.kind === 'subagent') {
       const input = (b && b.input) || {};
@@ -702,14 +738,19 @@ function createStepIndex(file, deps) {
     return textBody('');
   }
 
-  function textBody(text) {
-    return cutBody(String(text == null ? '' : text), {});
-  }
-  function cutBody(text, extra) {
-    if (text.length > BODY_LIMIT) {
+  function cutBody(text, extra, whole) {
+    if (!whole && text.length > BODY_LIMIT) {
       return Object.assign({ text: text.slice(0, BODY_LIMIT), truncated: true, size: text.length }, extra);
     }
     return Object.assign({ text, truncated: false, size: text.length }, extra);
+  }
+
+  /* The whole text of a step whose body was cut at BODY_LIMIT ("Open full text" on the page):
+     read from the same line, to its end. A step without a text of its own answers ''. */
+  function fullText(stepId) {
+    const b = body(stepId, true);
+    if (!b || b.stale) return { stale: true };
+    return { text: typeof b.text === 'string' ? b.text : '' };
   }
 
   function counts() {
@@ -726,13 +767,33 @@ function createStepIndex(file, deps) {
     return node ? { offset: node.offset, length: node.length } : undefined;
   }
 
+  /* Every stretch of the file that a step's visible text comes from: its own line, the line
+     that carries the result of its call, and the line a subagent's report arrived in. Search
+     maps the byte offset of a hit back to steps through these, so text that only a result or
+     a report holds is found on the step that shows it. */
+  function sourceRanges(step) {
+    const out = [];
+    const node = step ? nodes.get(step.nodeUuid) : null;
+    if (node) out.push({ offset: node.offset, length: node.length });
+    if (step && step.toolUseId) {
+      const result = toolResults.get(step.toolUseId);
+      if (result) out.push(result);
+      const agentId = agentIdOfToolUse.get(step.toolUseId);
+      const report = reportRanges.get(step.toolUseId) || (agentId ? reportRanges.get('agent:' + agentId) : undefined);
+      if (report) out.push(report);
+    }
+    return out;
+  }
+
   return {
     open,
     poll,
     steps() { return path.slice(); },
-    body,
+    body(stepId) { return body(stepId); },   // callers get the cut body; the whole text is fullText's
+    fullText,
     counts,
     nodeRange,
+    sourceRanges,
     generation() { return generation; },
   };
 }

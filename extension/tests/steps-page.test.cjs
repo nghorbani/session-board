@@ -187,6 +187,7 @@ async function serve(req, res) {
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
     if (msg.type === 'openText') return json(res, 200, { type: 'openTextResult', notAvailable: true });
+    if (msg.type === 'fullText') return json(res, 200, { type: 'fullTextResult', ok: true, stepId: msg.stepId, text: 'the whole text of ' + msg.stepId });
     if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete' || msg.type === 'noteSend' || msg.type === 'notesSendAll') {
       const reply = handleNoteMessage(msg);
       fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
@@ -1041,6 +1042,23 @@ test('page: a markdown link click sends openLink, never navigates', opts, async 
   await page.click('a.lnk');
   const s = await page.until((x) => x.openLinkCalls > 0, 'the link click to call dispatchLink');
   assert.ok(s.openLinkCalls > 0);
+  await page.close();
+});
+
+test('page: "Open full text" on a cut text asks for the step, and a browser copies the whole text it then fetches', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'text', { preview: 'the start of a very long answer' })],
+    sections: [section('lead', 'Session start', null, []), section('you', 'tell me everything', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])],
+  });
+  fake.body = (stepId) => (stepId === 't1:0' ? { text: 'the start of a very long answer', truncated: true, size: 300000 } : { text: 'body of ' + stepId, truncated: false, size: 10 });
+  const page = await openPage(A);
+  await page.until((x) => x.bodyTexts.some((t) => t.indexOf('Open full text') !== -1), 'the cut text with its button');
+  await page.click('.row.k-claude .showall');
+  const s = await page.until((x) => x.notices.some((n) => n.indexOf('text copied') !== -1), 'the line that says the text was copied');
+  const sent = fake.calls.filter((m) => m && (m.type === 'openText' || m.type === 'fullText'));
+  assert.deepEqual(sent.map((m) => [m.type, m.stepId]), [['openText', 't1:0'], ['fullText', 't1:0']], 'the step is named, its text is not sent back and forth');
+  assert.equal(sent[0].text, undefined, 'the page does not send the cut text as if it were the whole');
+  assert.ok(s.notices.length >= 1);
   await page.close();
 });
 
