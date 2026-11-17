@@ -267,7 +267,9 @@ var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
 var POLL_MS = 1200;
 var SEEN_DEBOUNCE_MS = 1500;
 var SEARCH_DEBOUNCE_MS = 150;
-var RENDER_WINDOW = 60;     // sections kept fully rendered around the anchor; the rest are stubs
+var RENDER_WINDOW = 60;     // at most this many sections are drawn on each side of the anchor; the rest are spacers
+var ROW_BUDGET = 400;       // rows drawn around the anchor: the page holds about this many, however long the session
+var MIN_SIDE = 3;           // sections always drawn on each side of the anchor, whatever they cost in rows
 var BODY_BATCH_DELAY_MS = 60;
 
 var state = {
@@ -1047,6 +1049,28 @@ function buildOrphanNotes(reader) {
   });
 }
 
+/* Rows a section draws: its heading and one per entry of its body. */
+function rowsOf(sec) { return 1 + ((sec.body && sec.body.length) || 0); }
+
+/* What a section that is not drawn is taken to measure, for the spacers. */
+function estimatedHeight(sec) { return 70 + 44 * ((sec.body && sec.body.length) || 0); }
+
+/* The sections to draw around the anchor: the window grows on both sides in turn until
+   ROW_BUDGET rows are in, never with fewer than MIN_SIDE sections on a side (while there
+   are any) and never with more than RENDER_WINDOW. */
+function windowAround(secs, anchor) {
+  var lo = anchor;
+  var hi = anchor + 1;
+  var rows = rowsOf(secs[anchor]);
+  for (;;) {
+    var grew = false;
+    if (lo > 0 && anchor - lo < RENDER_WINDOW && (anchor - lo < MIN_SIDE || rows < ROW_BUDGET)) { lo -= 1; rows += rowsOf(secs[lo]); grew = true; }
+    if (hi < secs.length && hi - 1 - anchor < RENDER_WINDOW && (hi - 1 - anchor < MIN_SIDE || rows < ROW_BUDGET)) { rows += rowsOf(secs[hi]); hi += 1; grew = true; }
+    if (!grew) break;
+  }
+  return { lo: lo, hi: hi };
+}
+
 function renderReader() {
   var reader = document.getElementById('readerInner');
   reader.textContent = '';
@@ -1062,20 +1086,23 @@ function renderReader() {
     return;
   }
   if (state.lens === 'notes') buildOrphanNotes(reader);
-  // Two spacers carry the weight of everything outside the render window (one estimated-height
-  // div each, never one per hidden section), so the DOM a 5,000-step session holds stays
-  // bounded by RENDER_WINDOW regardless of how many sections sit off screen; only the window
-  // itself, plus these two spacers, is ever in the tree at once.
+  // Two spacers carry the weight of everything outside the window (one div of estimated
+  // height each, never one per hidden section), so what the page holds for a session of
+  // any length is the window (about ROW_BUDGET rows) and these two spacers.
   // the list may have shrunk under the anchor (a reset, a note deleted in the Notes view)
   anchorIndex = Math.max(0, Math.min(anchorIndex, secs.length - 1));
-  var lo = Math.max(0, anchorIndex - RENDER_WINDOW);
-  var hi = Math.min(secs.length, anchorIndex + RENDER_WINDOW);
+  var win = windowAround(secs, anchorIndex);
+  var lo = win.lo;
+  var hi = win.hi;
   renderedLo = lo;
   renderedHi = hi;
-  var SEC_HEIGHT_ESTIMATE = 70;
-  if (lo > 0) reader.appendChild(buildSpacer('before', lo * SEC_HEIGHT_ESTIMATE));
+  var heightBefore = 0;
+  var heightAfter = 0;
+  for (var b = 0; b < lo; b++) heightBefore += estimatedHeight(secs[b]);
+  for (var a = hi; a < secs.length; a++) heightAfter += estimatedHeight(secs[a]);
+  if (lo > 0) reader.appendChild(buildSpacer('before', heightBefore));
   for (var i = lo; i < hi; i++) reader.appendChild(buildSectionNode(secs[i], i, secs));
-  if (hi < secs.length) reader.appendChild(buildSpacer('after', (secs.length - hi) * SEC_HEIGHT_ESTIMATE));
+  if (hi < secs.length) reader.appendChild(buildSpacer('after', heightAfter));
   insertNewSinceMarker(reader, secs);
   markCurrentHit();
 }
@@ -1095,19 +1122,21 @@ function topRowInView(reader) {
   var rows = reader.querySelectorAll('[data-step]');
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i].getBoundingClientRect();
-    if (r.bottom > box.top) return r.top < box.bottom ? { id: rows[i].getAttribute('data-step'), top: r.top } : null;
+    if (r.bottom > box.top) return r.top < box.bottom ? { id: rows[i].getAttribute('data-step'), top: r.top, el: rows[i] } : null;
   }
   return null;
 }
 
 /* Moves the window of drawn sections as the reader comes within a viewport of a spacer; run on
    every scroll, it redraws only when the window has to move.
-   Scrolling toward a spacer moves the window that way and holds the row at the top of the
-   viewport exactly where it was: the sections that come into the window have their real
-   heights, not the estimate the spacer stood for, so a row can be held and an offset cannot.
+   Scrolling toward a spacer draws the window anew around the section at the top of the
+   viewport and holds that row exactly where it was: the sections that come into the window
+   have their real heights, not the estimate the spacer stood for, so a row can be held and
+   an offset cannot.
    A jump (the scrollbar, a key) can put the viewport inside a spacer, past everything that is
-   drawn. The spacer stands for the sections it replaced, in order, so the place in it names
-   one of them; the window is drawn around that section, with it at the top. */
+   drawn. The spacer stands for the sections it replaced, in order and each at its estimated
+   height, so the place in it names one of them; the window is drawn around that section, with
+   it at the top. */
 function expandNearbyStubs() {
   var reader = document.getElementById('reader');
   var before = reader.querySelector('[data-spacer="before"]');
@@ -1121,24 +1150,30 @@ function expandNearbyStubs() {
   var secs = visibleSections();
   var ref = topRowInView(reader);
   if (!ref) {
-    var spacer = nearBefore ? before : after;
-    var sp = spacer.getBoundingClientRect();
-    var frac = Math.max(0, Math.min(1, (box.top - sp.top) / Math.max(1, sp.height)));
-    var first = nearBefore ? 0 : renderedHi;
-    var count = nearBefore ? renderedLo : secs.length - renderedHi;
-    anchorIndex = Math.max(0, Math.min(secs.length - 1, first + Math.floor(frac * count)));
+    var inBefore = Boolean(before) && before.getBoundingClientRect().bottom > box.top;
+    var spacer = inBefore ? before : after;
+    if (!spacer) return;
+    var from = inBefore ? 0 : renderedHi;
+    var to = inBefore ? renderedLo : secs.length;
+    var offset = Math.max(0, box.top - spacer.getBoundingClientRect().top);
+    var at = from;
+    for (var k = from; k < to; k++) {
+      at = k;
+      var h = estimatedHeight(secs[k]);
+      if (offset < h) break;
+      offset -= h;
+    }
+    anchorIndex = Math.max(0, Math.min(secs.length - 1, at));
     renderReader();
     var landed = reader.querySelector('[data-sec-index="' + anchorIndex + '"]');
     if (landed) reader.scrollTop += landed.getBoundingClientRect().top - box.top;
     queueVisibleBodies();
     return;
   }
-  var step = Math.max(1, Math.floor(RENDER_WINDOW / 2));
-  var moved = anchorIndex;
-  if (nearBefore) moved = Math.max(0, moved - step);
-  if (nearAfter) moved = Math.min(secs.length - 1, moved + step);
-  if (moved === anchorIndex) return;
-  anchorIndex = moved;
+  var sectionNode = ref.el.closest('.section');
+  var inView = sectionNode ? Number(sectionNode.getAttribute('data-sec-index')) : anchorIndex;
+  if (inView === anchorIndex) return;   // the window is already drawn around what is in view
+  anchorIndex = inView;
   renderReader();
   var held = document.getElementById('step-' + ref.id);
   if (held) reader.scrollTop += held.getBoundingClientRect().top - ref.top;

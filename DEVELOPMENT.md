@@ -45,6 +45,8 @@ session-board/
   build.ps1                   tests, packages the .vsix with vsce 4 and installs it
   tools/screenshot.cjs        renders the README screenshots with example data: the board from
                               index.html, the Steps tab from steps.html over the real steps service
+  tools/chrome.cjs            finds, starts, drives and stops a headless Chromium; used by the
+                              screenshot tool and by both page suites
   tools/release-notes.cjs     prints one CHANGELOG section, used by the release workflow
   .github/workflows/release.yml   builds and attaches the .vsix to a GitHub Release on a version tag
   LICENSE                     MIT, covers the root files too
@@ -407,8 +409,9 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   64 KB, the one route that parses a body) and `GET /api/steps/poll?session=&after=<seq>`.
   A browser tab cannot say that it closed, so `server.cjs` knows a viewer by its requests
   and releases it after ten 30 s ticks without one (ticks, not the clock, so a machine that
-  slept does not wake to released tabs); the next poll of such a tab answers `expired` and
-  the page opens the session again, keeping the reader's place.
+  slept does not wake to released tabs). Only an `open` starts a viewer; the next poll of a
+  released tab, or its next request that reads the transcript, answers `expired`, and the
+  page opens the session again, keeping the reader's place.
   - Reader (`steps.cjs`, no `vscode`): `createStepIndex(file)` reads the transcript from its
     end, the last 2 MB first and then 1 MB chunks with a `setImmediate` between them, always
     whole lines. Per tree line (`user`, `assistant`, `system`, `attachment` with a `uuid`) it
@@ -453,10 +456,13 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     offsets. Notes are searched too.
   - Page (`steps.html`): text is inserted as text nodes; the Markdown renderer builds DOM
     nodes and there is no `innerHTML` assignment. Both hosts serve it with a CSP whose
-    script source is a per-response nonce. Only the sections near the viewport hold their
-    rows; two spacers stand for the rest. Scrolling toward a spacer moves that window and
-    holds the row at the top of the viewport; a jump into a spacer draws the window around
-    the section that place names. Which texts to fetch is decided by bounding boxes against
+    script source is a per-response nonce. Only the sections around the anchor hold their
+    rows: about 400 rows (`ROW_BUDGET`), never fewer than three sections and never more
+    than 60 on each side; two spacers of estimated height stand for the rest. Scrolling
+    toward a spacer draws the window anew around the section at the top of the viewport
+    and holds that row where it was; a jump into a spacer draws the window around the
+    section that place names. The mark on the current hit or note is state
+    (`curHitStep`), drawn after every redraw. Which texts to fetch is decided by bounding boxes against
     the reader's, never by `offsetTop` (that is relative to the row). A text cut at 200 KB
     is opened in full by naming its step: `openText` with a `stepId`, which the host reads
     through `fullText`. An open note box keeps its draft in the page state, because every

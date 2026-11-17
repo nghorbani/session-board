@@ -1163,6 +1163,51 @@ test('page: a 3,000-step fake session stays responsive with a bounded DOM node c
   await page.close();
 }, { timeout: 30000 });
 
+test('page: a session of long sections keeps the number of drawn rows bounded, and scrolling through it, in jumps and in small steps, always shows rows', opts, async () => {
+  const steps = [];
+  const sections = [section('lead', 'Session start', null, [])];
+  for (let i = 0; i < 40; i++) {
+    const you = 'u' + i + ':0';
+    steps.push(step(you, 'you'));
+    const body = [];
+    for (let j = 0; j < 60; j++) {
+      const id = 't' + i + 'x' + j + ':0';
+      steps.push(step(id, 'text', { preview: 'text ' + j + ' of turn ' + i }));
+      body.push({ kind: 'text', stepId: id });
+    }
+    sections.push(section('you', 'turn ' + i, you, body));
+  }
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 600000, sections: 40, decisions: 40, filesChanged: 0 } });
+  const page = await openPage(A);
+  let s = await page.until((x) => x.sectionHeadings.length >= 40 && x.rowsInView > 0, 'first paint, at the end');
+  const LIMIT = 700;   // 2,440 rows in the story; about 400 are drawn, a few sections more at most
+  assert.ok(s.domRowCount < LIMIT, 'rows drawn at the end: ' + s.domRowCount);
+  const height = await page.eval('document.getElementById("reader").scrollHeight');
+  // jumps, as with the scrollbar
+  for (const frac of [0.5, 0.1, 0.8, 0.3, 0.95, 0]) {
+    await page.eval('(function () { var r = document.getElementById("reader"); r.scrollTop = Math.floor(r.scrollHeight * ' + frac + '); r.dispatchEvent(new Event("scroll")); return true; })()');
+    await sleep(350);
+    s = await page.sample();
+    assert.ok(s.rowsInView > 0, 'rows in view after a jump to ' + frac + ' of the story');
+    assert.ok(s.domRowCount < LIMIT, 'rows drawn after a jump to ' + frac + ': ' + s.domRowCount);
+  }
+  // small steps down from the top, as with the wheel: the window follows, no row is lost
+  let seen = 0;
+  for (let k = 0; k < 60; k++) {
+    await page.eval('(function () { var r = document.getElementById("reader"); r.scrollTop += 700; r.dispatchEvent(new Event("scroll")); return true; })()');
+    await sleep(60);
+    if (k % 10 === 9) {
+      s = await page.sample();
+      assert.ok(s.rowsInView > 0, 'rows in view while scrolling, step ' + k);
+      assert.ok(s.domRowCount < LIMIT, 'rows drawn while scrolling: ' + s.domRowCount);
+      seen += 1;
+    }
+  }
+  assert.equal(seen, 6);
+  assert.ok(height > 0);
+  await page.close();
+}, { timeout: 60000 });
+
 // -- narrow layout -------------------------------------------------------------------------
 
 test('page: the narrow layout (520px) shows the outline drawer toggle, and "Jump to the start" lives inside the drawer', opts, async () => {
