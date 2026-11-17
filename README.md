@@ -64,6 +64,8 @@ shows background agents only, not the sessions you talk to.
 
 ![Searching every session by title and content](extension/media/search.png)
 
+![The Steps tab of a session, with an example story](extension/media/steps.png)
+
 ## Install
 
 You need Windows, VS Code 1.100 or newer, the Claude Code extension, and the `claude`

@@ -145,6 +145,8 @@ The chat shows a session's latest text and replaces the lines it printed between
 the session's transcript on disk. A running session is followed live; untick **Follow** to
 stay where you are while it grows.
 
+![The Steps tab of a session, with an example story](https://github.com/nghorbani/session-board/raw/HEAD/extension/media/steps.png)
+
 - **Sections in your words**: the story is cut where you said something (a message, an answer
   to a question, a plan approval), and each section is headed by what you said. Under it come
   Claude's texts, the short updates it showed between tool calls, questions, plans, and one
@@ -185,7 +187,9 @@ stay where you are while it grows.
 
 What the story cannot show: Claude Code stores most reasoning as an empty block, so the Work
 line says "Thought for 18 s" and no more. The short updates between tool calls are stored in
-a reworded form, not word for word as the chat showed them.
+a reworded form, not word for word as the chat showed them. Slash commands and the output
+of local commands are left out; a message of yours that starts with markup or a paste is
+shown as you wrote it.
 
 ## Context marks
 
@@ -231,6 +235,8 @@ logged in", and a Claude Code release without that command shows no account.
 - **Send to session** fills the chat box from Claude Code 2.1.322 on. With an older Claude
   Code, a session that runs outside VS Code, or a session owned by a window whose board is
   older than 0.12.0, the text is on the clipboard and the session opens. In the browser page
-  it is always the clipboard.
+  it is always the clipboard. A note counts as sent only when the text reached a chat box: a
+  session in another window confirms that, and when it does not within 8 seconds the tab
+  says so and leaves the note unmarked.
 - A search in Steps finds words inside one stored piece of text. A phrase the page puts
   together from two pieces (a tool's name and its path) is not found across the join.

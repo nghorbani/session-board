@@ -1,24 +1,33 @@
 #!/usr/bin/env node
 /**
- * Renders the README screenshots from extension/index.html with example sessions, in a
- * headless Chromium (Chrome or Edge). No real session data is read; the page's fetch calls
- * are answered from the fixtures below.
+ * Renders the README screenshots with example data, in a headless Chromium (Chrome or Edge).
+ * No real session data is read.
  *
- *   node tools/screenshot.cjs     -> extension/media/board.png, extension/media/search.png
+ *   node tools/screenshot.cjs          -> extension/media/board.png, search.png and steps.png
+ *   node tools/screenshot.cjs steps    -> only the pictures named
+ *
+ * board and search come from extension/index.html, with the page's fetch calls answered from
+ * the fixtures below. steps comes from extension/steps.html over the real steps service
+ * (extension/steps-service.cjs) reading an example transcript written to a temp folder, so
+ * the picture shows what the reader makes of a transcript, not a reply written by hand.
  *
  * Set SCREENSHOT_BROWSER to a Chromium executable when none of the usual paths exist.
  */
 'use strict';
 
 const fs = require('fs');
+const http = require('http');
+const net = require('net');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const INDEX = path.join(ROOT, 'extension', 'index.html');
+const STEPS = path.join(ROOT, 'extension', 'steps.html');
 const OUT_DIR = path.join(ROOT, 'extension', 'media');
 const WIDTH = 440;
+const STEPS_WIDTH = 1100;
 
 function browser() {
   const candidates = [
@@ -85,6 +94,66 @@ const searchRows = [
     snippets: ['…export invoices as CSV instead of XLSX for the accounting hand-off…'] },
 ];
 
+// -- the example session of the Steps picture ------------------------------------------------
+
+const STEPS_SESSION = '57f9950b-6af0-43b1-8cf6-df44231415d6';
+const STEPS_TITLE = 'Fix flaky upload test';
+const NOTE_TEXT = 'Ask the team whether 5 seconds is the right cap before this merges.';
+
+/** The lines of an invented transcript, in the shape Claude Code stores them. */
+function stepsTranscript() {
+  const lines = [];
+  let prev = null;
+  let clock = new Date(2026, 0, 15, 14, 2, 0).getTime();   // fixed, so the times in the picture stay the same
+  const add = (o, seconds) => {
+    clock += seconds * 1000;
+    const uuid = '00000000-0000-4000-8000-' + String(lines.length + 1).padStart(12, '0');
+    lines.push(Object.assign({ uuid, parentUuid: prev, timestamp: new Date(clock).toISOString() }, o));
+    prev = uuid;
+  };
+  const you = (text, s) => add({ type: 'user', message: { role: 'user', content: text } }, s);
+  const says = (block, s) => add({ type: 'assistant', message: { id: 'msg' + lines.length, role: 'assistant', content: [block] } }, s);
+  const text = (t, s) => says({ type: 'text', text: t }, s);
+  const update = (t, s) => says({ type: 'thinking', thinking: t, signature: 'example' }, s);
+  const tool = (id, name, input, s, result, took) => {
+    says({ type: 'tool_use', id, name, input }, s);
+    add({ type: 'user', toolUseResult: {}, sourceToolAssistantUUID: prev, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: result }] } }, took);
+  };
+  const SRC = 'C:\\code\\acme\\webapp\\src\\upload\\retry.ts';
+  const TEST = 'C:\\code\\acme\\webapp\\tests\\upload.test.ts';
+  const QUESTION = 'The test waits a fixed 200 ms, but the retry backs off for up to 400 ms. How should I fix it?';
+
+  you('The upload test fails about one run in five on CI. Find out why and fix it.', 0);
+  text('I will reproduce the failure first, then read the retry code the test exercises.', 6);
+  tool('t1', 'Bash', { command: 'npx vitest run tests/upload.test.ts --repeat 20', description: 'Run the upload test 20 times' }, 4, '16 passed, 4 failed (20)', 48);
+  update('4 of 20 runs fail, all on the retry assertion. Reading the retry code.', 3);
+  tool('t2', 'Read', { file_path: SRC }, 2, 'export async function retry(fn, attempts) { /* ... */ }', 1);
+  tool('t3', 'Read', { file_path: TEST }, 2, 'it("retries a failed chunk", async () => { /* ... */ });', 1);
+  tool('q1', 'AskUserQuestion', { questions: [{
+    header: 'Fix', question: QUESTION, multiSelect: false,
+    options: [
+      { label: 'Fake timers in the test', description: 'The test drives the clock itself and no longer depends on real time. No change to the product code.' },
+      { label: 'Wait longer', description: 'Raise the wait to 600 ms. The smallest change, but the test stays slow and can still fail on a loaded runner.' },
+      { label: 'Pass the delay in', description: 'Make the back-off a parameter of the uploader. Cleanest to test, but it changes the public options.' },
+    ],
+  }] }, 20, 'Your questions have been answered: "' + QUESTION + '"="Fake timers in the test". You can now continue.', 95);
+  update('Switching the test to fake timers.', 4);
+  tool('t4', 'Edit', { file_path: TEST, old_string: 'await sleep(200);', new_string: 'await vi.advanceTimersByTimeAsync(400);' }, 9, 'The file has been updated.', 1);
+  tool('t5', 'Bash', { command: 'npx vitest run tests/upload.test.ts --repeat 50', description: 'Run the upload test 50 times' }, 3, '50 passed (50)', 61);
+  text('**Fixed.** The test no longer waits on real time.\n\n'
+    + '- `tests/upload.test.ts` uses fake timers and moves the clock past each back-off step.\n'
+    + '- 50 runs in a row pass. Before the change, 4 of 20 failed.\n\n'
+    + 'The retry code is unchanged. One thing I noticed in [src/upload/retry.ts](src/upload/retry.ts): '
+    + 'the back-off has no upper limit after the fifth attempt.', 8);
+  you('Cap the back-off at 5 seconds and add a test for it.', 140);
+  update('Adding the cap, then a test for the sixth attempt.', 5);
+  tool('t6', 'Edit', { file_path: SRC, old_string: 'const wait = base * 2 ** attempt;', new_string: 'const wait = Math.min(base * 2 ** attempt, 5000);' }, 12, 'The file has been updated.', 1);
+  tool('t7', 'Edit', { file_path: TEST, old_string: '});', new_string: 'it("caps the back-off at 5 seconds", async () => { /* ... */ });\n});' }, 15, 'The file has been updated.', 1);
+  tool('t8', 'Bash', { command: 'npx vitest run tests/upload.test.ts', description: 'Run the upload tests' }, 3, '7 passed (7)', 9);
+  text('The back-off is capped at 5 seconds, and `caps the back-off at 5 seconds` checks the sixth attempt. All 7 upload tests pass.', 6);
+  return lines;
+}
+
 // -- rendering ---------------------------------------------------------------------------
 
 function mock(mode) {
@@ -133,12 +202,137 @@ function render(mode, out, height) {
   console.log('wrote ' + out);
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const freePort = () => new Promise((res) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
+const getJson = (url) => new Promise((res, rej) => http.get(url, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }).on('error', rej));
+
+/** The Steps page over the real steps service, the way server.cjs serves it (without the
+    content policy, so the page can be given the VS Code colours). */
+async function renderSteps(out, width, height) {
+  const { createStepsService } = require(path.join(ROOT, 'extension', 'steps-service.cjs'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-board-demo-steps-'));
+  const file = path.join(dir, STEPS_SESSION + '.jsonl');
+  fs.writeFileSync(file, stepsTranscript().map((l) => JSON.stringify(l) + '\n').join(''));
+  const service = createStepsService({ resolveTranscript: () => file, sessionTitle: () => STEPS_TITLE, dataDir: dir });
+  const pushes = [];
+  const unsubscribe = service.subscribe(STEPS_SESSION, (msg) => pushes.push(msg));
+
+  // what the owner did before the picture: read up to the first answer, and kept a note there
+  const opened = await service.handle({ type: 'open', sessionId: STEPS_SESSION });
+  const fixed = opened.steps.find((s) => s.kind === 'text' && s.preview.indexOf('Fixed.') !== -1);
+  await service.handle({ type: 'noteAdd', sessionId: STEPS_SESSION, stepId: fixed.id, text: NOTE_TEXT });
+  await service.handle({ type: 'seen', sessionId: STEPS_SESSION, stepId: fixed.id });
+
+  const token = 'example';
+  const json = (res, code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    if (u.pathname === '/steps') {
+      const html = fs.readFileSync(STEPS, 'utf8')
+        .replace('<meta charset="utf-8">', () => '<meta charset="utf-8"><meta name="board-token" content="' + token + '"><meta name="steps-session" content="' + STEPS_SESSION + '">')
+        .replace('<script>', () => '<script>document.body.classList.add("vscode");</script>\n<script>');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } else if (u.pathname === '/api/steps' && req.method === 'POST') {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        let msg = null;
+        try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (_) { /* answered below */ }
+        if (!msg) return json(res, 400, { error: 'invalid JSON' });
+        if (msg.type === 'seen') return json(res, 200, { type: 'seenResult', ok: true });   // the picture keeps the marker where the fixture put it
+        service.handle(msg).then((reply) => json(res, 200, reply), (e) => json(res, 500, { error: String(e) }));
+      });
+    } else if (u.pathname === '/api/steps/poll') {
+      const after = Number(u.searchParams.get('after') || 0) || 0;
+      json(res, 200, { seq: pushes.length, pushes: pushes.slice(after) });
+    } else {
+      json(res, 404, { error: 'not found' });
+    }
+  });
+  const port = await freePort();
+  await new Promise((res) => server.listen(port, '127.0.0.1', res));
+
+  const cdpPort = await freePort();
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'session-board-demo-chrome-'));
+  const chrome = spawn(browser(), ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run',
+    '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + profile, 'about:blank'], { stdio: 'ignore' });
+  try {
+    let info = null;
+    for (let i = 0; i < 100 && !info; i++) { try { info = await getJson('http://127.0.0.1:' + cdpPort + '/json/version'); } catch (_) { await sleep(200); } }
+    if (!info) throw new Error('the browser did not open its debugging port');
+    const ws = new WebSocket(info.webSocketDebuggerUrl);
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    let seq = 0;
+    const pending = new Map();
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); const p = pending.get(m.id); if (!p) return; pending.delete(m.id); if (m.error) p.reject(new Error(JSON.stringify(m.error))); else p.resolve(m.result); };
+    const send = (method, params, sessionId) => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params: params || {}, sessionId })); });
+    const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+    await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: false }, sessionId);
+    await send('Page.navigate', { url: 'http://127.0.0.1:' + port + '/steps?session=' + STEPS_SESSION }, sessionId);
+    const evaluate = async (expression) => {
+      const r = await send('Runtime.evaluate', { expression, returnByValue: true }, sessionId);
+      if (r.exceptionDetails) throw new Error('page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
+      return r.result.value;
+    };
+    const until = async (expression, what) => {
+      for (let i = 0; i < 100; i++) { if (await evaluate(expression)) return; await sleep(150); }
+      throw new Error('the Steps page did not show ' + what);
+    };
+    // drawn means: the texts are in as formatted text, the question shows its options, the
+    // note and the marker are there, and the last text of the story has loaded
+    const drawn = 'document.querySelectorAll(".row .body.md b").length > 0 && document.querySelectorAll(".qopt").length === 3'
+      + ' && !!document.querySelector(".saved-note") && !!document.querySelector(".new-marker")'
+      + ' && Array.prototype.some.call(document.querySelectorAll(".row .body.md code"), function (e) { return e.textContent.indexOf("caps the back-off") !== -1; })';
+    const toEnd = '(function () { var r = document.getElementById("reader"); r.scrollTop = r.scrollHeight; r.dispatchEvent(new Event("scroll")); return true; })()';
+    // how far the second section's heading sits below the top of the reader
+    const gap = '(function () { var r = document.getElementById("reader"); var h = document.querySelectorAll(".sec-head")[1]; return Math.round(h.getBoundingClientRect().top - r.getBoundingClientRect().top); })()';
+    await until('document.querySelectorAll(".section").length > 0', 'its sections');
+    await evaluate(toEnd);
+    await until(drawn, 'the whole example story');
+    // The picture runs from the second section to the end of the story: with the reader at its
+    // end, the window is made as tall as it takes to put that section's heading at the top.
+    const fitted = height - (await evaluate(gap)) + 18;
+    await send('Emulation.setDeviceMetricsOverride', { width, height: fitted, deviceScaleFactor: 2, mobile: false }, sessionId);
+    await evaluate(toEnd);
+    await until(drawn, 'the whole example story at its final size');
+    await sleep(400);
+    const shot = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
+    fs.writeFileSync(out, Buffer.from(shot.data, 'base64'));
+    ws.close();
+  } finally {
+    if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(chrome.pid), '/T', '/F'], { stdio: 'ignore' }); } catch (_) { /* gone */ } } else { try { chrome.kill(); } catch (_) { /* gone */ } }
+    await new Promise((res) => server.close(res));
+    unsubscribe();   // the last subscriber gone, the service drops its follow timer and this process can end
+    await sleep(300);
+    for (const d of [dir, profile]) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* left to the temp cleanup */ } }
+  }
+  console.log('wrote ' + out);
+}
+
 module.exports = { browser };   // tests/page.test.cjs reuses the browser discovery
 
 if (require.main === module) {
+  const known = ['board', 'search', 'steps'];
+  const asked = process.argv.slice(2);
+  const unknown = asked.filter((n) => known.indexOf(n) === -1);
+  if (unknown.length) {
+    console.error('unknown picture: ' + unknown.join(', ') + ' (known: ' + known.join(', ') + ')');
+    process.exit(2);
+  }
+  const names = asked.length ? asked : known;
   fs.mkdirSync(OUT_DIR, { recursive: true });
   // Heights fit the fixtures above; adjust when they change (SCREENSHOT_*_HEIGHT override).
-  const heights = { board: Number(process.env.SCREENSHOT_BOARD_HEIGHT) || 1000, search: Number(process.env.SCREENSHOT_SEARCH_HEIGHT) || 870 };
-  render('board', path.join(OUT_DIR, 'board.png'), heights.board);
-  render('search', path.join(OUT_DIR, 'search.png'), heights.search);
+  // The Steps picture starts from its height and then fits itself to the example story.
+  const heights = {
+    board: Number(process.env.SCREENSHOT_BOARD_HEIGHT) || 1000,
+    search: Number(process.env.SCREENSHOT_SEARCH_HEIGHT) || 870,
+    steps: Number(process.env.SCREENSHOT_STEPS_HEIGHT) || 1200,
+  };
+  (async () => {
+    if (names.indexOf('board') !== -1) render('board', path.join(OUT_DIR, 'board.png'), heights.board);
+    if (names.indexOf('search') !== -1) render('search', path.join(OUT_DIR, 'search.png'), heights.search);
+    if (names.indexOf('steps') !== -1) await renderSteps(path.join(OUT_DIR, 'steps.png'), STEPS_WIDTH, heights.steps);
+  })().catch((e) => { console.error(e.message); process.exitCode = 1; });
 }
