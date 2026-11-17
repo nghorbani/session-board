@@ -521,6 +521,26 @@ test('page: a step that arrives while following is drawn with its time and its W
   } finally { real.done(); }
 });
 
+const rEdit = (n, id, file) => ({ type: 'assistant', uuid: ru(n), parentUuid: ru(n - 1), timestamp: rat(n), message: { id: 'm' + n, role: 'assistant', content: [{ type: 'tool_use', id, name: 'Edit', input: { file_path: file, old_string: 'a', new_string: 'b' } }] } });
+
+test('page: a live update refreshes the tiles, and with Files changed open it adds to the file list instead of drawing the story over it (real reader)', opts, async () => {
+  const real = realService([rUser(1, 'start'), rEdit(2, 'e1', 'C:\\proj\\first.js'), rResult(3, 'e1'), rText(4, 'first answer')]);
+  try {
+    const page = await openPage(A);
+    let s = await page.until((x) => x.stripNums.indexOf('Sections=1') !== -1 && x.stripNums.indexOf('Files changed=1') !== -1, 'the tiles of the first paint');
+    await page.click('.strip .item:nth-child(4)');
+    s = await page.until((x) => x.fileLinks.length === 1 && x.rowKinds.length === 0, 'the Files changed view');
+    fs.appendFileSync(real.file, [rUser(5, 'next'), rEdit(6, 'e2', 'C:\\proj\\second.js'), rResult(7, 'e2'), rText(8, 'second answer')].map((l) => JSON.stringify(l) + '\n').join(''));
+    await real.tick();
+    s = await page.until((x) => x.stripNums.indexOf('Sections=2') !== -1, 'the Sections tile to count the new section');
+    assert.ok(s.stripNums.indexOf('Files changed=2') !== -1, 'the Files changed tile counts the new file: ' + JSON.stringify(s.stripNums));
+    s = await page.until((x) => x.fileLinks.length === 2, 'the new file in the list');
+    assert.equal(s.rowKinds.length, 0, 'the story is not drawn over the file list');
+    assert.ok(s.fileLinks.some((f) => f.indexOf('second.js') !== -1), JSON.stringify(s.fileLinks));
+    await page.close();
+  } finally { real.done(); }
+});
+
 test('page: scrolled to the middle of a long session, the texts in view load in full (real reader)', opts, async () => {
   const lines = [];
   for (let turn = 0; turn < 150; turn++) {
@@ -553,7 +573,8 @@ test('page in the VS Code panel: texts load in full and formatted, question card
     input: { questions: [{ header: 'Approach', question: 'Which way should we go?', multiSelect: false, options: [{ label: 'Option A', description: 'the simple route' }, { label: 'Option B', description: 'the thorough route' }] }] } }] } };
   const answer = { type: 'user', uuid: ru(4), parentUuid: ru(3), timestamp: rat(4), toolUseResult: {}, sourceToolAssistantUUID: ru(3),
     message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'ask1', content: 'Your questions have been answered: "Which way should we go?"="Option A". You can now continue.' }] } };
-  fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, LONG_ANSWER), ask, answer, rText(5, 'Going with A.')].map((l) => JSON.stringify(l) + '\n').join(''));
+  const withLink = LONG_ANSWER + '\n\nThe notes are on [the share](//fileserver/share/notes.md).';
+  fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, withLink), ask, answer, rText(5, 'Going with A.')].map((l) => JSON.stringify(l) + '\n').join(''));
   const { provider } = host.boot({
     transcriptIndex: () => new Map([[A, file]]),
     transcriptFacts: () => ({ tokens: null, title: 'Webview session', customTitle: null, lastPrompt: null }),
@@ -570,6 +591,10 @@ test('page in the VS Code panel: texts load in full and formatted, question card
     // the question as it was asked
     s = await page.until((x) => x.qOptions.length === 2, 'the question card with both options');
     assert.equal(s.qOptions.find((o) => o.label === 'Option A').chosen, true);
+    // a link the host will not open: the page shows the reason the host gave
+    await page.eval('(function () { var a = Array.prototype.filter.call(document.querySelectorAll("a.lnk"), function (e) { return e.textContent === "the share"; })[0]; a.click(); })()');
+    s = await page.until((x) => x.notices.some((n) => n.indexOf('Network paths are not opened from here') !== -1), 'the reason the host gave for not opening the link');
+    assert.ok(host.vscode.__clipboard.some((t) => t.indexOf('fileserver') !== -1), 'the refused path is on the clipboard');
     // a note: Keep note closes the box and shows the note
     const firstText = await page.eval('document.querySelector(".row.k-claude").getAttribute("data-step")');
     await page.eval('(function () { document.getElementById("step-' + firstText + '").querySelector(".add-note").click(); })()');
@@ -580,10 +605,13 @@ test('page in the VS Code panel: texts load in full and formatted, question card
     // Send to session: the text reaches the clipboard and the page says what happened
     await page.eval('(function () { document.getElementById("step-' + firstText + '").querySelector(".add-note").click(); })()');
     await page.until((x) => x.noteBoxOpen, 'the note box again');
+    const noticesBefore = s.notices.length;
     await page.click('.notebox .row2 button.primary');
-    s = await page.until((x) => x.notices.length > 0, 'the line that says where the note went');
+    s = await page.until((x) => x.notices.length > noticesBefore, 'the line that says where the note went');
     assert.ok(host.vscode.__clipboard.some((t) => t.indexOf('About your step at') === 0 && t.indexOf('check this') !== -1), 'the hand-over text is on the clipboard');
-    // follow: a long answer that arrives now loads in full as well
+    // follow: with Follow on, a long answer that arrives now is brought into view and loads in
+    // full, without a scroll by hand
+    await page.eval('(function () { var f = document.getElementById("follow"); if (!f.checked) f.click(); return true; })()');
     fs.appendFileSync(file, [rUser(6, 'and now?'), rText(7, LONG_ANSWER.replace('That is the end of the answer.', 'That is the end of the second answer.'))].map((l) => JSON.stringify(l) + '\n').join(''));
     s = await page.until((x) => x.bodyTexts.some((t) => t.indexOf('That is the end of the second answer.') !== -1), 'the answer that arrived while following, in full');
     await page.close();

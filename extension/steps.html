@@ -436,6 +436,7 @@ function onPush(msg) {
     } else if (msg.sections) {
       mergeSections(msg.sections, msg.strip);
     }
+    renderStrip();   // the tiles count what the push added (a section, a decision, a file)
     renderAll();
     maybeStickToBottom();
     return;
@@ -739,8 +740,9 @@ function hl(root, q) {
 // -- links and long texts ---------------------------------------------------------------------
 
 function dispatchLink(kind, target) {
-  if (vsapi) { send({ type: 'openLink', sessionId: SESSION_ID, kind: kind, target: target }); return; }
-  if (kind === 'url') { window.open(target, '_blank', 'noopener'); return; }
+  // a web link in a browser needs no host; everything else is the host's to open or to refuse,
+  // and its answer says why when it refuses (no such path, a network path, a cancelled question)
+  if (!vsapi && kind === 'url') { window.open(target, '_blank', 'noopener'); return; }
   call({ type: 'openLink', kind: kind, target: target }).then(function (reply) {
     if (reply && reply.ok === false && reply.notAvailable) {
       copyToClipboard(target);
@@ -754,9 +756,9 @@ function dispatchLink(kind, target) {
 function openFullText(stepId, title) {
   var b = state.bodies[stepId];
   var text = (b && b.text) || '';
-  if (vsapi) { send({ type: 'openText', title: title || 'Step text', text: text }); return; }
   call({ type: 'openText', title: title || 'Step text', text: text }).then(function (reply) {
     if (reply && reply.notAvailable) { copyToClipboard(text); flashNotice('not available in the browser, text copied'); }
+    else if (reply && reply.ok === false && reply.message) flashNotice(reply.message);
   });
 }
 
@@ -1899,10 +1901,11 @@ document.getElementById('sendAllNotes').addEventListener('click', function () {
   });
 });
 document.getElementById('decisions').addEventListener('click', function () { toggleLens('decisions'); });
-document.getElementById('allTools').addEventListener('change', function (ev) { state.showAllTools = ev.target.checked; renderReader(); queueVisibleBodies(); });
+// both go through the lens-aware paths: with Files changed open there is no story to redraw
+document.getElementById('allTools').addEventListener('change', function (ev) { state.showAllTools = ev.target.checked; renderAll(); });
 document.getElementById('follow').addEventListener('change', function (ev) {
   state.follow = ev.target.checked;
-  if (state.follow) scrollToEnd();
+  maybeStickToBottom();
 });
 
 // -- scrolling, follow, edge bars, seen ------------------------------------------------------
@@ -1922,6 +1925,9 @@ function scrollToEnd() {
   renderReader();
   var reader = document.getElementById('reader');
   reader.scrollTo(0, reader.scrollHeight);
+  // the rows now at the end need their texts; a scroll event only follows when the position
+  // changed, so this does not wait for one
+  queueVisibleBodies();
 }
 
 function scrollToEndOnLoad() {
@@ -1936,7 +1942,9 @@ function maybeStickToBottom() {
   // Follow means "stay at the end", full stop: it only turns itself off on a manual scroll
   // away from the bottom (the reader's own scroll handler), never because state.atBottom
   // happened to read stale from before this push grew the content past the viewport.
-  if (state.follow) scrollToEnd();
+  // The Files changed view is a list of its own, not the story: there is no end to stay at,
+  // and scrollToEnd would draw the story's rows over it.
+  if (state.follow && state.lens !== 'files') scrollToEnd();
   else updateEdgeBars();
 }
 
