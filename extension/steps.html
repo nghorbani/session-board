@@ -2032,7 +2032,9 @@ function jumpToHit() {
   var stepId = state.hits[state.curHit];
   if (!stepId) return;
   if (!state.bodies[stepId]) {
-    requestBodies([stepId]).then(function () { scrollToStepId(stepId); });
+    // The text is fetched first. By the time it is here another hit, or another search, may
+    // be the current one; then this jump is no longer wanted.
+    requestBodies([stepId]).then(function () { if (state.hits[state.curHit] === stepId) scrollToStepId(stepId); });
   } else {
     scrollToStepId(stepId);
   }

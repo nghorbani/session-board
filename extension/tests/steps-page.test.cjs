@@ -185,7 +185,7 @@ async function serve(req, res) {
       return json(res, 200, Object.assign({ requestId: msg.requestId }, base, { notes }));
     }
     if (msg.type === 'body') return json(res, 200, Object.assign({ type: 'bodyResult', sessionId: msg.sessionId, stepId: msg.stepId }, fake.body(msg.stepId)));
-    if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: fake.bodies(msg.stepIds || []) });
+    if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: await fake.bodies(msg.stepIds || []) });
     if (msg.type === 'search') return json(res, 200, Object.assign({ type: 'searchResult', requestId: msg.requestId, query: msg.query }, await fake.search(msg.query)));
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
@@ -335,6 +335,7 @@ test.beforeEach(() => {
   fake.calls.length = 0; fake.pushes.length = 0;
   fake.open = () => openReply();
   fake.body = (stepId) => ({ text: 'body of ' + stepId, truncated: false, size: 10 });
+  fake.bodies = (ids) => ids.map((id) => Object.assign({ stepId: id }, fake.body(id)));
   fake.search = () => ({ stepIds: [], capped: false });
   fake.deliver = () => ({ ok: true, message: 'In the chat box and on the clipboard.' });
   fake.notes.clear();
@@ -993,6 +994,33 @@ test('page: a search without hits takes the mark off the hit of the search befor
   fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: [] });
   await sleep(400);
   assert.equal((await page.sample()).curHitText, null, 'still none after a redraw');
+  await page.close();
+});
+
+test('page: a hit whose text arrives only after the next search has come back is not jumped to any more', opts, async () => {
+  searchFixture();
+  fake.search = (q) => (q === 'needle' ? { stepIds: ['t1:0'], capped: false } : { stepIds: [], capped: false });
+  // the text of the hit is slow: every request that asks for it waits until the test lets go
+  let letGo = null;
+  const held = new Promise((resolve) => { letGo = resolve; });
+  fake.bodies = async (ids) => {
+    if (ids.indexOf('t1:0') !== -1) await held;
+    return ids.map((id) => Object.assign({ stepId: id }, fake.body(id)));
+  };
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1, 'the page to render');
+  await page.search('needle');
+  const first = await page.until((x) => x.searchCount === '1 of 1', 'the first search to come back');
+  assert.equal(first.curHitText, null, 'its hit is not marked yet: the text is still on its way');
+  await page.search('a word the story does not hold');
+  await page.until((x) => x.searchCount === 'no hits', 'the second search to come back empty');
+  letGo();
+  for (let i = 0; i < 100 && !(await page.eval('Boolean(state.bodies["t1:0"])')); i++) await sleep(50);
+  assert.equal(await page.eval('Boolean(state.bodies["t1:0"])'), true, 'the slow text has arrived');
+  await sleep(300);
+  const s = await page.sample();
+  assert.equal(s.searchCount, 'no hits');
+  assert.equal(s.curHitText, null, 'the hit of the search before is not marked after all');
   await page.close();
 });
 
