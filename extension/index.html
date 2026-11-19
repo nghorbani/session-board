@@ -562,9 +562,9 @@ function fmtStarted(ms) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
-/** A value that copies itself on click (an id, a path). */
+/** A value that copies itself on click (an id, a path). `what` names it in the tooltip and is its key among the row's copy buttons. */
 function copyHtml(v, what, cls) {
-  return '<button class="copyval' + (cls ? ' ' + cls : '') + '" data-act="copyval" data-copy="' + esc(v) + '" title="click to copy the ' + what + '">' + esc(v) + '</button>';
+  return '<button class="copyval' + (cls ? ' ' + cls : '') + '" data-act="copyval" data-key="' + esc(what) + '" data-copy="' + esc(v) + '" title="click to copy the ' + what + '">' + esc(v) + '</button>';
 }
 
 /** The folded-out details of a row: full id, start, process, window, transcript; a click on a value copies it. */
@@ -637,8 +637,8 @@ function rowHtml(s, limits, opts) {
   if (opts.past && !opts.ended && s.window) chips += '<span class="chip" title="VS Code window ' + esc(s.window.id) + '">' + esc(s.window.label || ('window ' + s.window.id)) + '</span>';   // live rows sit in their window's section
   if (!opts.past && isMuted(s)) chips += '<span class="chip muted" title="muted: no notifications, not counted">muted</span>';
   var agent = s.name && s.name !== s.title && s.name !== String(s.sessionId).slice(0, 8)
-    ? '<button class="agent" data-act="copyval" data-copy="' + esc(s.name) + '" title="the agent name other Claude sessions use for this one; click to copy">' + esc(s.name) + '</button>' : '';
-  var sub = chips + agent + '<button class="sid" data-act="copyval" data-copy="' + esc(s.sessionId) + '" title="' + esc(s.sessionId) + ' (click to copy)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // a click on an id copies it
+    ? '<button class="agent" data-act="copyval" data-key="agent" data-copy="' + esc(s.name) + '" title="the agent name other Claude sessions use for this one; click to copy">' + esc(s.name) + '</button>' : '';
+  var sub = chips + agent + '<button class="sid" data-act="copyval" data-key="sid" data-copy="' + esc(s.sessionId) + '" title="' + esc(s.sessionId) + ' (click to copy)">Session ' + esc(String(s.sessionId).slice(0, 8)) + '</button>' + esc(shortCwd(s.cwd));   // a click on an id copies it
   if (pe && pe.kind === 'error') sub = '<span style="color:var(--crit)">' + esc(pe.message || 'failed') + '</span> · ' + sub;
 
   var hint = !isLive ? 'click: resume this session (in this window when its folder is open here)'
@@ -1323,19 +1323,20 @@ function focusedInRow() {
   if (!row) return null;
   var list = row.closest('#sections, #l-archived, #l-results');
   var act = el !== row && el.getAttribute ? el.getAttribute('data-act') : null;
-  // a row can hold several controls with one action (the three copy buttons): remember which of them it was
-  var nth = act ? Array.prototype.indexOf.call(row.querySelectorAll('[data-act="' + act + '"]'), el) : -1;
-  return { sid: row.getAttribute('data-session'), act: act, nth: nth, list: list ? list.id : null };
+  // a row can hold several controls with one action (the copy buttons): each of those names itself in data-key.
+  // Their number and order change between renders (the agent name comes and goes), so a position would not do.
+  return { sid: row.getAttribute('data-session'), act: act, key: act ? el.getAttribute('data-key') : null, list: list ? list.id : null };
 }
 
-/** Give the focus back after a render: to the same control of the same row (the n-th with its action), else to the row. A row that is gone takes the focus with it. */
+/** Give the focus back after a render: to the same control of the same row (same action, same key), else to the row. A row that is gone takes the focus with it. */
 function restoreFocus(f) {
   if (!f || !f.list) return;
   var rows = document.getElementById(f.list).querySelectorAll('.row[data-session]');
   for (var i = 0; i < rows.length; i++) {
     if (rows[i].getAttribute('data-session') !== f.sid) continue;
     var same = f.act ? rows[i].querySelectorAll('[data-act="' + f.act + '"]') : [];
-    var el = same[f.nth] || null;                          // gone or fewer than before: the row takes the focus
+    var el = null;                                         // its control is gone: the row takes the focus
+    for (var k = 0; k < same.length && !el; k++) if (same[k].getAttribute('data-key') === f.key) el = same[k];
     el = el && !el.disabled ? el : rows[i];
     if (el.focus) el.focus({ preventScroll: true });
     return;

@@ -1139,6 +1139,25 @@ test('page: the keyboard keeps its place across a render: a focused lock button 
   await page.close();
 });
 
+test('page: the focus follows the id button when the agent name before it goes and comes back: a press copies the id both times', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows({ [A]: { name: 'agent-a' } }), auto);
+  const page = await openPage();
+  await page.until((x) => x.agents.length === 1, 'the agent name on the card');
+  await page.eval('window.__copied = null; document.querySelector(' + JSON.stringify(rowSel(A) + ' .sid') + ').focus(); true');
+  fake.snapshot = snapshotOf(boardRows(), auto);             // the name is gone: the id button is now the first copy button of the row
+  await page.until((x) => x.agents.length === 0, 'the card without the agent name');
+  await page.eval('document.activeElement.click(); true');
+  let s = await page.until((x) => x.copied !== null, 'a copy after the agent name went');
+  assert.equal(s.copied, A, 'the id: the focus stayed on the id button, it did not fall back to the card');
+  fake.snapshot = snapshotOf(boardRows({ [A]: { name: 'agent-a' } }), auto);   // the name is back: the id button is the second again
+  await page.until((x) => x.agents.length === 1, 'the agent name is back');
+  await page.eval('window.__copied = null; document.activeElement.click(); true');
+  s = await page.until((x) => x.copied !== null, 'a copy after the agent name came back');
+  assert.equal(s.copied, A, 'the id again, not the agent name that now stands before it');
+  await page.close();
+});
+
 test('page: lock then unlock in a row: a snapshot that knows only the first write does not show the card locked again', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf(boardRows(), auto);

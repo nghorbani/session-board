@@ -403,7 +403,9 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   within the same millisecond can leave that card locked (unlock it again). A board archive
   removes the session's lock at once (`archiveSession()`). A render hands the keyboard focus to
   the replacement of the control that held it (`focusedInRow()`, `restoreFocus()`), so a
-  focused lock button or card stays usable across the polls. A pending lock change ends on an
+  focused lock button or card stays usable across the polls. Controls that share an action in
+  one row (the copy buttons) each carry a `data-key`: the focus follows that key, not the
+  position, because the agent name before the id comes and goes. A pending lock change ends on an
   agreeing snapshot only after its own reply came (`acked`): a snapshot from before the write
   can agree by chance, as after lock then unlock.
   `order\` and `sort.json` of 0.10.0 to 0.12.0 stay on disk and are never read.
