@@ -217,7 +217,8 @@ async function serve(req, res) {
       // a test may hold the answer to one kind of note message back
       if (fake.holdNote && fake.holdNote[msg.type]) await fake.holdNote[msg.type];
       const reply = handleNoteMessage(msg);
-      fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
+      // as the service: a message that changed nothing tells nobody
+      if (reply.ok !== false) fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
       return json(res, 200, reply);
     }
     return json(res, 200, { type: 'errorResult' });
@@ -616,7 +617,7 @@ test('page in the VS Code panel: texts load in full and formatted, question card
   const withLink = LONG_ANSWER + '\n\nThe notes are on [the share](//fileserver/share/notes.md).';
   fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, withLink), ask, answer, rText(5, 'Going with A.')].map((l) => JSON.stringify(l) + '\n').join(''));
   const { provider } = host.boot({
-    transcriptIndex: () => new Map([[A, file]]),
+    transcriptOf: () => file,
     transcriptFacts: () => ({ tokens: null, title: 'Webview session', customTitle: null, lastPrompt: null }),
   }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
   await provider.onMessage({ type: 'steps', sessionId: A });
@@ -1794,7 +1795,7 @@ test('page in the VS Code panel: Export hands the story to the host, which saves
   const file = path.join(dir, A + '.jsonl');
   fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, LONG_ANSWER), rUser(3, 'and the rest?'), rText(4, 'All of it is done.')].map((l) => JSON.stringify(l) + '\n').join(''));
   const { provider } = host.boot({
-    transcriptIndex: () => new Map([[A, file]]),
+    transcriptOf: () => file,
     transcriptFacts: () => ({ tokens: null, title: 'Webview session', customTitle: null, lastPrompt: null }),
   }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
   await provider.onMessage({ type: 'steps', sessionId: A });
@@ -1992,6 +1993,63 @@ test('page: a note whose step left the path can be changed and deleted, and two 
   assert.equal(fake.notes.has('n-gone'), false, 'and deleted');
   await page.close();
 }, { timeout: 60000 });
+
+test('page: a jump to a note whose step left the path shows that note under Notes and marks it, from the counter as well as from a search', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])],
+  });
+  fake.notes.set('n-gone', { id: 'n-gone', stepId: 'gone:0', at: 1, text: 'a note on a step of an abandoned try', sent: [] });
+  fake.search = (q) => ({ stepIds: /abandoned/.test(q) ? ['gone:0'] : [], capped: false });
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 2 && x.notesTileNum === '1', 'the page with its note');
+  // under Notes, the counter in the header jumps to the note: it stays on the page and is marked
+  await page.click('.strip .item:nth-child(5)');
+  await page.until((x) => x.notesTileOn === true && x.savedNoteOffPath === true, 'the Notes view with the note off the path');
+  await page.click('#notesJump');
+  let s = await page.until((x) => x.curHitText !== null, 'the mark on the note');
+  assert.equal(s.notesTileOn, true, 'the view is still Notes');
+  assert.equal(s.savedNoteOffPath, true, 'and the note is still on the page');
+  assert.match(s.curHitText, /abandoned try/);
+  // from the whole story, a search for its words leads there too
+  await page.click('.strip .item:nth-child(5)');
+  await page.until((x) => x.notesTileOn === false && x.savedNoteOffPath === false, 'the whole story');
+  await page.search('abandoned');
+  s = await page.until((x) => x.searchCount === '1 of 1' && x.notesTileOn === true && x.curHitText !== null, 'the hit, shown under Notes');
+  assert.match(s.curHitText, /abandoned try/);
+  await page.close();
+});
+
+test('page: after a note could not be kept, Send works again on the box that a redraw built while the answer was on its way', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('x1:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }])],
+  });
+  let letGo = null;
+  fake.holdNote = { noteAdd: new Promise((resolve) => { letGo = resolve; }) };
+  fake.noteReject = 'a note is 16 KB at most';
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 2, 'the rows');
+  await page.click('#step-x1\\:0 .add-note');
+  await page.eval('(function () { var t = document.querySelector(".notebox textarea"); t.value = "far too long"; t.dispatchEvent(new Event("input")); return true; })()');
+  await page.click('.notebox .row2 button.primary');
+  for (let i = 0; i < 100 && !fake.calls.some((m) => m && m.type === 'noteAdd'); i++) await sleep(50);
+  // another window keeps a note meanwhile: the reader is drawn anew, and the box with it
+  fake.notes.set('n-other', { id: 'n-other', stepId: 'u1:0', at: 1, text: 'from the other window', sent: [] });
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: noteList() });
+  await page.until((x) => x.notedRows >= 1 && x.sendButtonDisabled === true, 'the redraw, with the send still on its way');
+  letGo();
+  await page.until((x) => x.notices.some((n) => /not kept/i.test(n)), 'the refusal');
+  const s = await page.until((x) => x.sendButtonDisabled === false, 'the Send button that is on the page now');
+  assert.equal(s.noteBoxText, 'far too long', 'the draft is still in the box');
+  // with a text the store takes, the same box sends
+  fake.noteReject = null;
+  fake.holdNote = null;
+  await page.click('.notebox .row2 button.primary');
+  for (let i = 0; i < 100 && !fake.calls.some((m) => m && m.type === 'noteSend'); i++) await sleep(50);
+  assert.equal(fake.calls.filter((m) => m && m.type === 'noteSend').length, 1, 'the note is sent');
+  await page.close();
+});
 
 test('page: an edit that failed is not listed as a changed file, and the Work line says that it failed', opts, async () => {
   fake.open = () => openReply({

@@ -932,6 +932,18 @@ function transcriptGone(sessionId) {
 function liveTranscripts(sessionId) { return transcriptsNamed(PROJECTS_DIR, sessionId); }
 function stowedTranscripts(sessionId) { return transcriptsNamed(ARCHIVE_TRANSCRIPTS_DIR, sessionId); }
 
+/**
+ * Where the transcript of a session is now, or null. The filename index is a list read up to
+ * a minute ago, and only the process that moves a transcript reads it anew: another window
+ * may have stowed the session or brought it back since. A path of the index that is gone is
+ * therefore no answer; the two roots are looked at instead.
+ */
+function transcriptOf(sessionId) {
+  const listed = transcriptIndex().get(sessionId);
+  if (listed && fs.existsSync(listed)) return listed;
+  return liveTranscripts(sessionId)[0] || stowedTranscripts(sessionId)[0] || null;
+}
+
 /** Every registry record as { pid, sessionId }, pid from the file name. */
 function registryRecords() {
   let names = [];
@@ -2804,6 +2816,7 @@ module.exports = {
   ARCHIVE_TRANSCRIPTS_DIR,
   transcriptRoots,
   transcriptIndex,
+  transcriptOf,
   transcriptFacts,
   liveTranscripts,
   stowedTranscripts,

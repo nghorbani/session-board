@@ -52,6 +52,10 @@ function makeDeps(overrides) {
     clearInterval: timer.clearInterval,
     pollIntervalMs: 1000,
     progressIntervalMs: 0,
+    // A clock that stands still, so a progress push costs no time: the pause after a push
+    // grows with what it took to build, and on a busy machine that is no longer zero, which
+    // would leave a short pass with fewer pushes than a test counts on.
+    now: () => 0,
     rg: {
       probe: async () => ({ path: null, error: 'not used in this test' }),
       run: async () => ({ code: 1, stdout: '', stderr: '' }),
@@ -1338,6 +1342,57 @@ test('progress pushes of the indexing get rarer when building one is slow, so th
   await donePromise;
   assert.equal(pushes[pushes.length - 1].done, true, 'the end is always told');
   assert.ok(pushes.length >= 2 && pushes.length <= 20, 'a slow push is followed by a pause: ' + pushes.length + ' pushes for about 100 chunks');
+});
+
+// -- findings of the review of those fixes ---------------------------------------------------
+
+test('an indexing pass whose transcript moved away says nothing to the viewers and leaves the indexing of the new index alone', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 120; i++) {
+    objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' ' + 'x'.repeat(3000) }]));
+  }
+  writeLines(file, objs);
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096 });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  let doneSeen;
+  const done = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => { if (msg.type === 'stepsProgress') { pushes.push(msg); if (msg.done && !msg.error) doneSeen(); } });
+  const first = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  assert.equal(first.indexing, true, 'the pass over the rest of the file is still running');
+  // the session is stowed at this moment: its transcript lies elsewhere, and the tab opens again
+  const moved = newFile();
+  fs.renameSync(file, moved);
+  deps.__files.set(A, moved);
+  pushes.length = 0;
+  const again = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.equal(again.ok, true);
+  assert.equal(again.indexing, true, 'the new index has only begun, whatever became of the old pass');
+  await done;
+  assert.deepEqual(pushes.filter((m) => m.error).map((m) => m.error), [], 'the old pass, which lost its file, tells nobody');
+  assert.equal(pushes.filter((m) => m.done).length, 1, 'and the end of the indexing is told once, by the new index');
+});
+
+test('a note that another window kept reaches the viewers already open also when a further viewer opens the session before the next tick', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const firstTab = [];
+  svc.subscribe(A, (msg) => firstTab.push(msg));
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const { createNotesStore } = require('../notes.cjs');
+  createNotesStore({ dataDir: deps.dataDir }).add(A, opened.steps[0].id, 'kept in the other window');
+  // a second tab opens the session; its reply carries the note
+  const second = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.deepEqual(second.notes.map((n) => n.text), ['kept in the other window']);
+  await deps.__timer.fireAll();
+  const told = firstTab.filter((m) => m.type === 'notesChanged');
+  assert.equal(told.length, 1, 'the first tab is told as well, and once');
+  assert.deepEqual(told[0].notes.map((n) => n.text), ['kept in the other window']);
 });
 
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

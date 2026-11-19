@@ -958,7 +958,7 @@ test('a line whose tool input has an unexpected shape does not stop the indexing
   writeLines(file, [
     userLine(uuid(1), null, 'ask me something'),
     assistantLine(uuid(2), uuid(1), 'm2', [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: { questions: 'not a list' } }]),
-    assistantLine(uuid(3), uuid(2), 'm3', [{ type: 'tool_use', id: 'q2', name: 'AskUserQuestion', input: { questions: [null, 7, { question: 5, options: 'none' }] } }]),
+    assistantLine(uuid(3), uuid(2), 'm3', [{ type: 'tool_use', id: 'q2', name: 'AskUserQuestion', input: { questions: [null, 7] } }]),
     assistantLine(uuid(4), uuid(3), 'm4', [{ type: 'tool_use', id: 'x1', name: 'Agent', input: 7 }, { type: 'tool_use', id: 'x2', name: 'ExitPlanMode', input: null }]),
     assistantLine(uuid(5), uuid(4), 'm5', [{ type: 'text', text: 'the text after the odd lines' }]),
   ]);
@@ -969,5 +969,26 @@ test('a line whose tool input has an unexpected shape does not stop the indexing
   assert.deepEqual(all.filter((s) => s.kind === 'text').map((s) => idx.body(s.id).text), ['the text after the odd lines']);
   // every step can be read and put into sections without a throw
   for (const s of all) idx.body(s.id);
+  steps.buildSections(all, idx.body, idx.fullText);
+});
+
+test('a question whose options have an unexpected shape is still a step that can be read: what is there is shown', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'ask me something'),
+    assistantLine(uuid(2), uuid(1), 'm2', [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: { questions: [
+      { question: 5, options: 'none' },
+      { question: 'Which one?', options: [null, 'a word', { label: 7 }, { label: 'Second', description: 9 }] },
+    ] } }]),
+    assistantLine(uuid(3), uuid(2), 'm3', [{ type: 'text', text: 'the text after the question' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const all = idx.steps();
+  const asked = all.filter((s) => s.kind === 'question');
+  assert.equal(asked.length, 1, 'the line is indexed: nothing in what the index reads of it is odd');
+  const body = idx.body(asked[0].id);
+  assert.deepEqual(body.questions.map((q) => [q.question, q.options.map((o) => [o.label, o.description])]),
+    [['5', []], ['Which one?', [['7', ''], ['Second', '9']]]]);
   steps.buildSections(all, idx.body, idx.fullText);
 });

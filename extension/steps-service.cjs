@@ -159,7 +159,10 @@ function createStepsService(deps) {
     }
     s.indexing = true;
     s.pushedIds = new Set();
-    const sameSlot = () => sessions.get(sessionId) === s;
+    // What this pass finds is for the viewers of this index only. A slot that was released, or
+    // that got another index since (the transcript moved and the session was opened again), is
+    // told nothing by it, and the end of this pass is not the end of that index's indexing.
+    const sameSlot = () => sessions.get(sessionId) === s && s.index === idx;
     let totalSize = 0;
     try { totalSize = fs.statSync(file).size; } catch (_) { /* open() will find the same miss */ }
     const tailFraction = totalSize > 0 ? Math.min(1, (tailBytes || 2 * 1024 * 1024) / totalSize) : 1;
@@ -325,7 +328,8 @@ function createStepsService(deps) {
       // are provisional until a stepsProgress push with done:true lands.
       indexing: Boolean(s.indexing),
       seenStepId: readSeen(sessionId),
-      notes: notesTold(sessionId),
+      // what this reply carries, the viewers already open learn too (see tellNotesChanged)
+      notes: tellNotesChanged(sessionId, s),
     });
   }
 
@@ -335,28 +339,27 @@ function createStepsService(deps) {
     try { return notes.list(sessionId); } catch (_) { return []; }
   }
 
-  /* Reads the list and remembers it as what this session's viewers were told last. */
-  function notesTold(sessionId) {
+  /* After a change this service made itself: the list goes to every viewer of the session, and
+     is remembered as what they were told last. */
+  function pushNotesChanged(sessionId) {
     const list = notesSafe(sessionId);
     const s = sessions.get(sessionId);
     if (s) s.notesSig = JSON.stringify(list);
-    return list;
+    push(sessionId, { type: 'notesChanged', sessionId, notes: list });
   }
 
-  function pushNotesChanged(sessionId) {
-    push(sessionId, { type: 'notesChanged', sessionId, notes: notesTold(sessionId) });
-  }
-
-  /* Notes are files that every window writes. A viewer learns of a note that another window
-     kept, changed or deleted by a look at the list with each tick: it is told when the list
-     differs from the one it was told last. */
+  /* Notes are files that every window writes. The viewers of a session learn of a note that
+     another window kept, changed or deleted by a look at the list: they are told when it
+     differs from the one they were told last. The look is taken with each tick, and when a
+     further viewer opens the session, since the list in its reply is then the newest one and
+     the next tick would find nothing new to tell the others. Returns the list. */
   function tellNotesChanged(sessionId, s) {
     const list = notesSafe(sessionId);
     const sig = JSON.stringify(list);
-    if (s.notesSig === undefined) { s.notesSig = sig; return; }
-    if (sig === s.notesSig) return;
+    const told = s.notesSig;
     s.notesSig = sig;
-    push(sessionId, { type: 'notesChanged', sessionId, notes: list });
+    if (told !== undefined && sig !== told) push(sessionId, { type: 'notesChanged', sessionId, notes: list });
+    return list;
   }
 
   async function handleBody(msg) {

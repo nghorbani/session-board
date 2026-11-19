@@ -247,6 +247,27 @@ test('delete: an edit that lands after the delete has begun is told the note is 
   assert.deepEqual(editing.list(A), []);
 });
 
+test('delete: its mark does not wait for a look at the note file, so an edit that puts the file back meanwhile still learns of the delete', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-notes-'));
+  const editing = createNotesStore({ dataDir });
+  const note = editing.add(A, 'u1:0', 'first words');
+  const file = path.join(dataDir, 'notes', A, note.id + '.json');
+  const saved = fs.readFileSync(file);
+  // the file is away at the delete's first look (taken by something that left no mark) ...
+  fs.unlinkSync(file);
+  let edited = 'not run';
+  const racing = Object.assign({}, fs, {
+    readdirSync: (...args) => {
+      // ... and an edit of another window, which had read the note before, writes it now
+      if (edited === 'not run') { fs.writeFileSync(file, saved); edited = editing.edit(A, note.id, 'edited meanwhile'); }
+      return fs.readdirSync(...args);
+    },
+  });
+  createNotesStore({ dataDir, fs: racing }).delete(A, note.id);
+  assert.deepEqual(editing.list(A), [], 'the note is gone');
+  assert.equal(edited, null, 'and the edit was not told that it kept it');
+});
+
 test('pruneDead: without a check of the disk nothing is removed', () => {
   const { store } = freshStore();
   store.add(B, 'u1:0', 'a list of transcripts alone is not enough to delete what someone wrote');

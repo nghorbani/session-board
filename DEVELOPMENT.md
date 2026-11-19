@@ -184,7 +184,9 @@ installed.
   One test covers the VS Code transport end to end: it serves the panel's own html with a
   stand-in for `acquireVsCodeApi` and passes the page's messages through the panel handler
   of `extension.js` (booted by the host shim), with the real service and reader behind it.
-  The page matches a reply to its request by `requestId` there, so a reply without it hangs.
+  The page matches a reply to its request by `requestId` there, so a reply without it hangs;
+  the panel handler therefore answers a request whose handling threw as well (`ok: false`
+  with the message).
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -472,9 +474,16 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     dropped when its viewer closed or its index was replaced while it ran. A transcript
     that moved (a session stowed or brought back) is not "gone": the service asks
     `resolveTranscript` again, tells the viewer `moved` once, and the page opens the
-    session again, which builds the index on the file where it is now. With each tick the
-    service also looks at the notes of the session and tells the viewer when they differ
-    from what it told last, so a note kept in another window shows up here. During the
+    session again, which builds the index on the file where it is now. Both hosts resolve
+    with `core.transcriptOf`: the path of the filename index only while that file is there,
+    else a look at the two roots, since the index is up to a minute old and only the
+    process that moves a transcript reads it anew. An indexing pass tells the viewers of
+    its own index only (`s.index === idx`): one whose transcript moved away ends without a
+    word and leaves the indexing of the new index alone. With each tick the
+    service also looks at the notes of the session and tells the viewers when they differ
+    from what it told last, so a note kept in another window shows up here; the same look
+    is taken when a further viewer opens the session, whose reply would otherwise be the
+    only one to carry the change. During the
     backward pass a progress push is followed by a pause of twenty times what it took to
     build (`PROGRESS_COST_FACTOR`), which keeps the pushes rare on a very large transcript.
   - Page (`steps.html`): text is inserted as text nodes; the Markdown renderer builds DOM
@@ -487,7 +496,10 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     toward a spacer draws the window anew around the section at the top of the viewport
     and holds that row where it was; a jump into a spacer draws the window around the
     section that place names. The mark on the current hit or note is state
-    (`curHitStep`), drawn after every redraw. Which texts to fetch is decided by bounding boxes against
+    (`curHitStep`), drawn after every redraw. A jump to a hit or a note that the view in
+    use does not draw goes to the whole story; a note whose step left the path has a row
+    under Notes only (with the id a row of that step would have), so a jump to it goes
+    there. Which texts to fetch is decided by bounding boxes against
     the reader's, never by `offsetTop` (that is relative to the row). A text cut at 200 KB
     is opened in full by naming its step: `openText` with a `stepId`, which the host reads
     through `fullText`. An open note box keeps its draft in the page state, because every

@@ -126,11 +126,15 @@ function createNotesStore(deps) {
     noteId = checkNoteId(noteId);
     const dir = sessionDir(sessionId);
     const prefix = noteId + '.';
-    // The mark first, before anything else is looked at, then the files: see edit(). An edit
-    // that finishes before the mark is an edit followed by this delete; one that finishes
-    // after it sees the mark and reports the note gone.
+    // The mark first, before anything is looked at, then the files: see edit(). An edit that
+    // finishes before the mark is an edit followed by this delete; one that finishes after it
+    // sees the mark and reports the note gone. The mark does not wait for the note file to be
+    // there: an edit of another window may put it back between a look and the removal below.
+    // A session without a folder has no note, and gets no mark.
+    try { fs.writeFileSync(tombFile(sessionId, noteId), ''); } catch (_) { /* the removal below still runs */ }
+    // a note that was there when the mark was set is one this delete removes, also when an
+    // edit that saw the mark takes the file away first
     let removed = fs.existsSync(noteFile(sessionId, noteId));
-    if (removed) { try { fs.writeFileSync(tombFile(sessionId, noteId), ''); } catch (_) { /* the removal below still runs */ } }
     let names = [];
     try { names = fs.readdirSync(dir); } catch (_) { names = []; }
     const cutoff = now() - TOMB_KEEP_MS;

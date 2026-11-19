@@ -82,8 +82,7 @@ class BoardProvider {
     this.accountError = null;  // the account probe failure last logged, so it is said once per change
     this.claudeArchiveError = null;   // same for the read of Claude Code's archive
     this.stepsService = createStepsService({
-      resolveTranscript: (sessionId) => core.transcriptIndex().get(sessionId)
-        || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0] || null,
+      resolveTranscript: (sessionId) => core.transcriptOf(sessionId),
       sessionTitle: (sessionId) => this.stepsSessionTitle(sessionId),
       dataDir: core.DATA_DIR,
       rg: { probe: (appRoot) => core.rgProbe(appRoot), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
@@ -337,7 +336,7 @@ class BoardProvider {
   stepsSessionTitle(sessionId) {
     const row = this.sessionRow(sessionId);
     if (row && (row.title || row.name)) return row.title || row.name;
-    const file = core.transcriptIndex().get(sessionId) || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0];
+    const file = core.transcriptOf(sessionId);
     if (!file) return null;
     const facts = core.transcriptFacts(sessionId, file);
     return facts.customTitle || facts.title || null;
@@ -637,10 +636,16 @@ class BoardProvider {
     panel.webview.onDidReceiveMessage(async (msg) => {
       if (!msg || typeof msg !== 'object') return;
       let reply;
-      if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
-      else if (msg.type === 'openText') reply = await this.openStepsFullText(sessionId, msg);
-      else if (msg.type === 'exportSave') reply = await this.saveStepsExport(msg);
-      else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
+      try {
+        if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
+        else if (msg.type === 'openText') reply = await this.openStepsFullText(sessionId, msg);
+        else if (msg.type === 'exportSave') reply = await this.saveStepsExport(msg);
+        else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
+      } catch (e) {
+        // A request that failed is answered too. The page waits for the reply to each request
+        // and has nothing else to go by: without one, what it asked for stays "on its way".
+        reply = { type: String(msg.type || 'unknown') + 'Result', ok: false, message: String((e && e.message) || e) };
+      }
       // the page matches a reply to its request by this id and by nothing else
       if (reply && msg.requestId !== undefined && reply.requestId === undefined) reply = Object.assign({}, reply, { requestId: msg.requestId });
       try { panel.webview.postMessage(reply); } catch (_) { /* panel gone */ }

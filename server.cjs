@@ -39,12 +39,11 @@ function queuePush(sessionId, msg) {
 }
 
 const stepsService = createStepsService({
-  resolveTranscript: (sessionId) => core.transcriptIndex().get(sessionId)
-    || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0] || null,
+  resolveTranscript: (sessionId) => core.transcriptOf(sessionId),
   sessionTitle: (sessionId) => {
     const row = core.lastGoodRows().find((r) => r.sessionId === sessionId);
     if (row && (row.title || row.name)) return row.title || row.name;
-    const file = core.transcriptIndex().get(sessionId) || core.liveTranscripts(sessionId)[0] || core.stowedTranscripts(sessionId)[0];
+    const file = core.transcriptOf(sessionId);
     if (!file) return null;
     const facts = core.transcriptFacts(sessionId, file);
     return facts.customTitle || facts.title || null;

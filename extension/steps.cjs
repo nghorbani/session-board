@@ -183,7 +183,13 @@ function takeItem(list, item) {
 
 // The question as it was asked: header, full text, every option, and what was chosen.
 function fullQuestions(input, parsed) {
-  return ((input && input.questions) || []).map((q, i) => {
+  // The input is what the model wrote, which is not always what the tool asks for (options
+  // that are a string, an entry that is no object). What is there is shown; the rest is left
+  // out, so the step can be read whatever its shape.
+  const asked = input && Array.isArray(input.questions) ? input.questions : [];
+  return asked.map((q, i) => {
+    q = q && typeof q === 'object' ? q : {};
+    const given = (Array.isArray(q.options) ? q.options : []).filter((o) => o && typeof o === 'object');
     const text = String(q.question || '');
     const first = text.split('\n')[0];
     const hit = parsed.find((p) => p.q === first) || parsed[i] || null;
@@ -191,13 +197,13 @@ function fullQuestions(input, parsed) {
     // An answer is the chosen labels joined by ", " plus whatever the owner typed. A label
     // counts only as a whole item of that list, and the longest labels are taken first, so
     // "Go" is not found inside "Go with tests" or inside typed words that start with it.
-    const labels = (q.options || []).map((o) => String(o.label || ''));
+    const labels = given.map((o) => String(o.label || ''));
     const chosenLabels = new Set();
     for (const label of [...new Set(labels)].filter(Boolean).sort((a, b) => b.length - a.length)) {
       const taken = takeItem(rest, label);
       if (taken !== null) { chosenLabels.add(label); rest = taken; }
     }
-    const options = (q.options || []).map((o) => {
+    const options = given.map((o) => {
       const label = String(o.label || '');
       return { label, description: String(o.description || ''), chosen: chosenLabels.has(label) };
     });

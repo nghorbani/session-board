@@ -1162,9 +1162,11 @@ function buildOrphanNotes(reader) {
   orphanNotes().forEach(function (n) {
     if (done[n.stepId]) return;   // the notes of one step share a row, as on the path
     done[n.stepId] = true;
-    // a row of its own with the controls every note has, so it can be changed and deleted
+    // a row of its own with the controls every note has, so it can be changed and deleted,
+    // under the id a row of that step would have, so a jump to the note finds it
     var row = document.createElement('div');
     row.className = 'row k-orphan';
+    row.id = 'step-' + n.stepId;
     addNoteUi(row, n.stepId);
     reader.appendChild(row);
   });
@@ -1417,6 +1419,16 @@ function buildSavedNote(stepId, note) {
   return div;
 }
 
+/* The send of this step's note ended without a redraw (the note was not kept). The Send button
+   to give back is the one on the page now: a push since the click has redrawn the reader, and
+   the box built then found the send still on its way. */
+function noteSendOver(stepId) {
+  delete state.noteSending[stepId];
+  if (state.noteBoxFor !== stepId) return;
+  var btn = document.querySelector('.notebox .row2 button.primary');
+  if (btn) btn.disabled = false;
+}
+
 function buildNoteBox(stepId, existing) {
   var box = document.createElement('div');
   box.className = 'notebox';
@@ -1494,7 +1506,7 @@ function buildNoteBox(stepId, existing) {
     state.noteSending[stepId] = true;
     send.disabled = true;
     saveThenGetNoteId(text).then(function (noteId) {
-      if (!noteId) { delete state.noteSending[stepId]; send.disabled = false; return; }   // nothing is sent without a kept note
+      if (!noteId) { noteSendOver(stepId); return; }   // nothing is sent without a kept note
       return call({ type: 'noteSend', noteId: noteId }).then(function (reply) {
         delete state.noteSending[stepId];
         if (reply && reply.message) flashNotice(reply.message);
@@ -2200,8 +2212,14 @@ function stepDrawnInView(stepId) {
 }
 
 function scrollToStepId(stepId) {
-  // a hit or a note in a row the view does not draw: back to the whole story, which draws it
-  if (state.lens !== 'all' && !stepDrawnInView(stepId)) { state.lens = 'all'; renderStrip(); }
+  if (!stepIsOnPath(stepId)) {
+    // a note whose step left the path: no view but Notes has a row for it
+    if (state.lens !== 'notes' && notesOfStep(stepId).length) { state.lens = 'notes'; renderStrip(); }
+  } else if (state.lens !== 'all' && !stepDrawnInView(stepId)) {
+    // a hit or a note in a row the view does not draw: back to the whole story, which draws it
+    state.lens = 'all';
+    renderStrip();
+  }
   // make sure the owning section is in the fully-rendered window, open any folded work list
   // that holds it, then scroll; a step bundled into a Work line is reached by its group key.
   var secs = visibleSections();

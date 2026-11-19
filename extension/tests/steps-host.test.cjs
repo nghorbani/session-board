@@ -70,7 +70,7 @@ test('an ended session\'s panel and the session title use its row from last.ende
 test('a session the board has not snapshotted at all gets its title read straight from the transcript', async () => {
   const service = fakeService();
   const { provider } = boot({
-    transcriptIndex: () => new Map([[A, 'C:\\fake\\' + A + '.jsonl']]),
+    transcriptOf: () => 'C:\\fake\\' + A + '.jsonl',
     transcriptFacts: () => ({ tokens: null, title: 'Generated title', customTitle: 'Renamed by hand', lastPrompt: null }),
   }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
   provider.stepsService = service;
@@ -804,6 +804,20 @@ test('escapeAttr: the characters that could end an attribute or open markup insi
   assert.equal(core.escapeAttr('"><script>alert(1)</script>'), '&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
   assert.equal(core.escapeAttr(null), '');
   assert.equal(core.escapeAttr(42), '42');
+});
+
+test('a request whose handling throws is still answered, so the page does not wait for good', async () => {
+  const service = fakeService({ handle: async (msg) => { if (msg.type === 'bodies') throw new Error('a line of an unexpected shape'); return { type: msg.type + 'Result', ok: true }; } });
+  const { provider } = boot({}, { last: last() });
+  provider.stepsService = service;
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  const panel = vscode.__panels[0];
+  panel.__fireMessage({ type: 'bodies', requestId: 'r1', stepIds: ['x:0'] });
+  await new Promise((r) => setTimeout(r, 20));
+  const reply = panel.__posted.find((m) => m.requestId === 'r1');
+  assert.ok(reply, 'a reply with the id of the request');
+  assert.equal(reply.ok, false);
+  assert.match(String(reply.message), /unexpected shape/);
 });
 
 test.after(() => cleanup());
