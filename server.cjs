@@ -22,7 +22,8 @@ const INDEX_HTML = path.join(__dirname, 'extension', 'index.html');
 const STEPS_HTML = path.join(__dirname, 'extension', 'steps.html');
 const TOKEN = crypto.randomBytes(16).toString('hex');
 const HOST = '127.0.0.1:' + PORT;
-const STEPS_BODY_LIMIT = 64 * 1024;   // the one route in this file that parses a body
+const STEPS_BODY_LIMIT = 64 * 1024;   // /api/steps and /api/locks are the two routes in this file that parse a body
+const LOCKS_BODY_LIMIT = 64 * 1024;   // 500 ids with their slots are about 25 KB
 
 // Pushes (follow, indexing progress) have no open socket to ride on in the browser front end,
 // so each session keeps a small bounded queue the page drains by polling; a push past the cap
@@ -109,9 +110,8 @@ function safeDecode(s) {
 /** A request body up to `limit` bytes, or { tooLarge: true } once it is exceeded. The rest of
     the body is drained rather than the socket destroyed, so the 413 response the caller writes
     still reaches the client instead of looking like a dropped connection. Every other route in
-    this file parses its input from the query string; this is the one place that reads a body,
-    because steps messages (open/body/search/seen/close) carry structured fields a query string
-    cannot hold cleanly. */
+    this file parses its input from the query string; the steps messages (open/body/search/seen/close)
+    and a lock request (set, move, clear) carry structured fields a query string cannot hold cleanly. */
 function readBoundedBody(req, limit) {
   return new Promise((resolve) => {
     const chunks = [];
@@ -240,27 +240,20 @@ async function handle(req, res) {
     }
   }
 
-  if (route === '/api/order' && req.method === 'POST') {
-    // A move on the page: the group's complete order, ids comma-joined in the query (this file
-    // parses no bodies). 8000 characters is about 216 ids, the cap the page mirrors; core caps
-    // the list at 500 for the host transport.
-    const raw = parsed.searchParams.get('ids') || '';
-    if (raw.length > 8000) return sendJson(res, 400, { ok: false, error: 'too many ids' });
-    const ids = raw.split(',').filter(Boolean).map(safeDecode);
-    if (!ids.length || ids.some((id) => !id || !core.UUID_RE.test(id))) return sendJson(res, 400, { ok: false, error: 'not a session id' });
-    try { return sendJson(res, 200, { ok: true, count: core.setOrder(ids) }); }
-    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
-  }
-
-  if (route === '/api/order/mode' && req.method === 'POST') {
-    const mode = parsed.searchParams.get('mode') || '';
-    if (mode !== 'activity' && mode !== 'manual') return sendJson(res, 400, { ok: false, error: 'mode must be activity or manual' });
-    try { core.setSortMode(mode); return sendJson(res, 200, { ok: true, mode }); }
-    catch (e) { return sendJson(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+  if (route === '/api/locks' && req.method === 'POST') {
+    // The lock button, a drop or a keyboard move on the page: { set, move, clear } as a JSON body.
+    // core checks the whole request before it writes; what it refuses is a 400.
+    const body = await readBoundedBody(req, LOCKS_BODY_LIMIT);
+    if (body.tooLarge) return sendJson(res, 413, { ok: false, error: 'body too large' });
+    let msg;
+    try { msg = JSON.parse(body.text); } catch (_) { return sendJson(res, 400, { ok: false, error: 'invalid JSON' }); }
+    if (!msg || typeof msg !== 'object') return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    try { return sendJson(res, 200, Object.assign({ ok: true }, core.setLocks({ set: msg.set, move: msg.move, clear: msg.clear }))); }
+    catch (e) { return sendJson(res, e && e.code === 'invalid' ? 400 : 500, { ok: false, error: String((e && e.message) || e) }); }
   }
 
   if (route === '/api/order/show' && req.method === 'POST') {
-    // The header's "running | open | all" switch: the board-wide file every window reads.
+    // The header's "auto | running | all" switch: the board-wide file every window reads.
     const show = parsed.searchParams.get('show') || '';
     if (!core.SHOW_MODES.includes(show)) return sendJson(res, 400, { ok: false, error: 'show must be one of ' + core.SHOW_MODES.join(', ') });
     try { core.setShowMode(show); return sendJson(res, 200, { ok: true, show }); }

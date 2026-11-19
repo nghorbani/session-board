@@ -196,14 +196,16 @@ test('a root reached through a junction lists the folders of both paths', { skip
   assert.deepEqual(ids(list().ended), [L1, L2]);
 });
 
-test('the snapshot carries ended rows, archived rows only with "all", and the show mode; the store keeps running, open or all board-wide and reads 0.11.2\'s file', async () => {
+test('the snapshot carries ended rows, archived rows only with "all", and the show mode; the store keeps auto, running or all board-wide in the file format older boards read', async () => {
   clearHeartbeats();
   heartbeat(W1, REPO);
   fs.rmSync(core.SHOW_FILE, { force: true });
-  assert.equal(core.readShowMode(), 'open', 'default');
+  assert.equal(core.readShowMode(), 'auto', 'default');
   let snap = await core.snapshot();
   assert.ok(Array.isArray(snap.ended) && snap.ended.length >= 4, JSON.stringify(snap.ended && snap.ended.length));
-  assert.deepEqual([snap.order.show, snap.archivedEnded], ['open', []]);
+  assert.deepEqual([snap.order.show, snap.archivedEnded], ['auto', []]);
+  assert.ok(snap.ended.every((r) => typeof r.activityAt === 'number' && r.workingSince === null && r.lockSlot === null && !('ageMinutes' in r)), 'an ended row carries the time it is ordered by, no working time, no lock');
+  assert.deepEqual(snap.ended.map((r) => r.activityAt), snap.ended.map((r) => r.activityAt).sort((a, b) => b - a), 'newest first');
   assert.ok(!ids(snap.ended).includes(P1), 'programmatic sessions stay out of the snapshot by default');
   snap = await core.snapshot({ includeProgrammatic: true });
   assert.ok(ids(snap.ended).includes(P1), 'the host passes Claude Code\'s setting through');
@@ -219,15 +221,23 @@ test('the snapshot carries ended rows, archived rows only with "all", and the sh
   assert.deepEqual([snap.order.show, snap.archivedEnded], ['running', []], 'ended rows still travel; the page hides them');
   assert.throws(() => core.setShowMode('some'), /unknown show mode/);
   fs.writeFileSync(core.SHOW_FILE, JSON.stringify({ show: 'all', at: 1 }));
-  assert.equal(core.readShowMode(), 'open', '0.11.2 wrote no version: its "all" is today\'s "open"');
+  assert.equal(core.readShowMode(), 'auto', '0.11.2 wrote no version: its "all" is auto');
   fs.writeFileSync(core.SHOW_FILE, JSON.stringify({ show: 'running', at: 1 }));
   assert.equal(core.readShowMode(), 'running');
   fs.writeFileSync(core.SHOW_FILE, JSON.stringify({ show: 'some', v: 2 }));
-  assert.equal(core.readShowMode(), 'open', 'an unknown value');
+  assert.equal(core.readShowMode(), 'auto', 'an unknown value');
+  fs.writeFileSync(core.SHOW_FILE, JSON.stringify({ show: 'open', v: 2 }));
+  assert.equal(core.readShowMode(), 'auto', 'what a board of 0.12.0 writes for its open');
+  fs.writeFileSync(core.SHOW_FILE, JSON.stringify({ show: 'all', v: 2 }));
+  assert.equal(core.readShowMode(), 'all', 'what a board of 0.12.0 writes for all');
   fs.writeFileSync(core.SHOW_FILE, 'garbage');
-  assert.equal(core.readShowMode(), 'open', 'unreadable means open');
-  assert.deepEqual(core.SHOW_MODES, ['running', 'open', 'all']);
-  core.setShowMode('open');
+  assert.equal(core.readShowMode(), 'auto', 'unreadable means auto');
+  assert.deepEqual(core.SHOW_MODES, ['auto', 'running', 'all']);
+  assert.throws(() => core.setShowMode('open'), /unknown show mode/, 'open is the stored word, not a mode');
+  core.setShowMode('auto');
+  const stored = JSON.parse(fs.readFileSync(core.SHOW_FILE, 'utf8'));
+  assert.deepEqual([stored.show, stored.v], ['open', 2], 'auto is stored as open, version 2');
+  assert.equal(core.readShowMode(), 'auto');
 });
 
 test('archivePast: the marker, then the transcript moves to the board archive; a second archive is a no-op; a running session and a bad id are refused', async () => {

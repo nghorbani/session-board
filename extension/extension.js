@@ -149,8 +149,7 @@ class BoardProvider {
         case 'seen': if (core.UUID_RE.test(sid)) this.markSeen(sid); return;
         case 'mute': if (core.UUID_RE.test(sid)) return this.setMuted(sid, true); return;
         case 'unmute': if (core.UUID_RE.test(sid)) return this.setMuted(sid, false); return;
-        case 'order': return this.setOrder(m.ids);
-        case 'sortMode': return this.setSortMode(m.mode);
+        case 'locks': return this.setLocks(m);
         case 'showMode': return this.setShowMode(m.show);
         case 'archivePast': if (core.UUID_RE.test(sid)) return await this.archivePast(sid); return;
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
@@ -941,41 +940,24 @@ class BoardProvider {
     this.schedule(0);
   }
 
-  /** A move on the page: the group's complete order becomes ranks; the page hears the outcome, the next snapshot carries it. */
-  setOrder(ids) {
-    let ok = true;
-    let count = 0;
-    let message = '';
-    try {
-      if (!Array.isArray(ids)) throw new Error('order must be a list of session ids');
-      count = core.setOrder(ids);
-      this.log.info('order ' + count + ' sessions');
-    } catch (e) {
-      ok = false;
-      message = String((e && e.message) || e);
-      this.log.error('order failed: ' + message);
-    }
-    this.post({ type: 'orderResult', ok, count: ok ? count : 0, message });
-    this.schedule(0);
-  }
-
-  /** The header switch: the board-wide mode file; every window follows with its next snapshot. */
-  setSortMode(mode) {
+  /** The lock button, a drop or a keyboard move on the page: core checks and writes the request; the page hears the outcome under its seq, the next snapshot carries the slots. */
+  setLocks(m) {
+    const seq = Number.isFinite(Number(m.seq)) && m.seq != null ? Number(m.seq) : null;
     let ok = true;
     let message = '';
     try {
-      core.setSortMode(String(mode || ''));
-      this.log.info('sort mode ' + mode);
+      const done = core.setLocks({ set: m.set, move: m.move, clear: m.clear });
+      this.log.info('locks: ' + done.set + ' set, ' + done.moved + ' moved, ' + done.cleared + ' cleared');
     } catch (e) {
       ok = false;
       message = String((e && e.message) || e);
-      this.log.error('sort mode failed: ' + message);
+      this.log.error('locks failed: ' + message);
     }
-    this.post({ type: 'sortModeResult', ok, mode: ok ? String(mode) : null, message });
+    this.post({ type: 'locksResult', ok, seq, message });
     this.schedule(0);
   }
 
-  /** The header's "running | open | all" switch: the board-wide file; every window follows with its next snapshot. */
+  /** The header's "auto | running | all" switch: the board-wide file; every window follows with its next snapshot. */
   setShowMode(show) {
     let ok = true;
     let message = '';

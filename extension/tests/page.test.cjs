@@ -28,8 +28,11 @@ const B = 'bbbbbbbb-2222-4222-8222-222222222222';
 const P = 'cccccccc-3333-4333-8333-333333333333';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const ago = (minutes) => Date.now() - minutes * 60000;   // the time of a last message that many minutes back
 function row(sessionId, title, status, extra) {
-  return Object.assign({ sessionId, title, status, waitingFor: status === 'waiting' ? 'permission prompt' : null, name: null, lastPrompt: null, cwd: 'C:\\code\\x', window: { id: 1, label: 'x' }, ageMinutes: 1, contextTokens: 1000, pct: 1, transcriptPath: null, kind: 'interactive', pid: 100, archived: false }, extra);
+  const r = Object.assign({ sessionId, title, status, waitingFor: status === 'waiting' ? 'permission prompt' : null, name: null, lastPrompt: null, cwd: 'C:\\code\\x', window: { id: 1, label: 'x' }, activityAt: ago(1), workingSince: null, lockSlot: null, contextTokens: 1000, pct: 1, transcriptPath: null, kind: 'interactive', pid: 100, archived: false }, extra);
+  if (r.status === 'busy' && r.workingSince == null) r.workingSince = r.activityAt;   // a busy row works since its last message unless the test says otherwise
+  return r;
 }
 function snapshotOf(sessions, extra) {
   return Object.assign({ at: Date.now(), stale: false, error: null, limits: { compact: 100000, save: 90000 }, platform: 'win32', sessions, usage: { state: 'ok', at: Date.now(), ageSeconds: 0, subscriptionType: 'x', windows: { five_hour: { label: '5h', usedPct: 1, resetsAt: null, expired: false } }, account: { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', email: 'dev@example.com', orgName: 'Example', subscriptionType: 'x' }, accountError: null } }, extra || {});
@@ -38,8 +41,8 @@ function snapshotOf(sessions, extra) {
 // -- fake API ----------------------------------------------------------------------------
 
 const fake = { snapshot: snapshotOf([]), end: () => ({ status: 200, body: { ok: true, code: 'ended' } }), unarchive: () => ({ status: 200, body: { ok: true, restoredTo: null } }), suggest: () => ({ status: 200, body: { ok: true, title: 'Suggested by model' } }), title: (id, t) => ({ status: 200, body: { ok: true, title: t } }), mute: () => ({ status: 200, body: { ok: true, muted: true } }), unmute: () => ({ status: 200, body: { ok: true, muted: false } }), search: { rows: [] }, calls: [] };
-fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
-fake.mode = (m) => ({ status: 200, body: { ok: true, mode: m } });
+const locksOk = () => ({ status: 200, body: { ok: true, set: 0, moved: 0, cleared: 0 } });
+fake.locks = locksOk;
 fake.show = (v) => ({ status: 200, body: { ok: true, show: v } });
 fake.archive = () => ({ status: 200, body: { ok: true, moved: true } });
 let PORT = 0;
@@ -50,7 +53,7 @@ function serve(req, res) {
     const html = INDEX
       .replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '">')
       .replace('var POLL_MS = 4000;', 'var POLL_MS = 250;')
-      .replace('<script>', '<script>window.confirm = function () { return window.__confirmAnswer !== false; }; window.__prompts = []; window.prompt = function (m, v) { window.__prompts.push([m, v]); return window.__promptAnswer === undefined ? null : window.__promptAnswer; };'
+      .replace('<script>', '<script>' + (u.searchParams.get('webview') === '1' ? 'window.__posted = []; window.acquireVsCodeApi = function () { return { postMessage: function (m) { window.__posted.push(m); }, getState: function () { return null; }, setState: function () {} }; }; ' : '') + 'window.confirm = function () { return window.__confirmAnswer !== false; }; window.__prompts = []; window.prompt = function (m, v) { window.__prompts.push([m, v]); return window.__promptAnswer === undefined ? null : window.__promptAnswer; };'
         + ' Object.defineProperty(navigator, "clipboard", { value: { writeText: function (t) { window.__copied = t; return Promise.resolve(); } } }); window.Notification = undefined;</script>\n<script>');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(html);
@@ -58,15 +61,25 @@ function serve(req, res) {
   }
   if (req.headers['x-board-token'] !== TOKEN) return json(res, 403, { error: 'forbidden' });
   if (u.pathname === '/api/sessions') return json(res, 200, fake.snapshot);
+  if (u.pathname === '/api/locks' && req.method === 'POST') {
+    let text = '';
+    req.on('data', (d) => { text += d; });
+    req.on('end', () => {
+      let body = null;
+      try { body = JSON.parse(text); } catch (_) { /* recorded as null */ }
+      fake.calls.push({ method: req.method, path: u.pathname, query: u.search, body });
+      const r = fake.locks(body || {});
+      setTimeout(() => json(res, r.status, r.body), r.delayMs || 0);
+    });
+    return;
+  }
   fake.calls.push({ method: req.method, path: u.pathname, query: u.search });
   if (u.pathname.startsWith('/api/end/')) { const r = fake.end(u.pathname.slice('/api/end/'.length), u.searchParams); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unarchive/')) { const r = fake.unarchive(u.pathname.slice('/api/unarchive/'.length)); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/mute/')) { const r = fake.mute(u.pathname.slice('/api/mute/'.length)); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/unmute/')) { const r = fake.unmute(u.pathname.slice('/api/unmute/'.length)); return json(res, r.status, r.body); }
-  if (u.pathname === '/api/order') { const r = fake.order(u.searchParams.get('ids') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname === '/api/order/show') { const r = fake.show(u.searchParams.get('show') || ''); return json(res, r.status, r.body); }
   if (u.pathname.startsWith('/api/archive/')) { const r = fake.archive(u.pathname.slice('/api/archive/'.length)); return json(res, r.status, r.body); }
-  if (u.pathname === '/api/order/mode') { const r = fake.mode(u.searchParams.get('mode') || ''); return setTimeout(() => json(res, r.status, r.body), r.delayMs || 0); }
   if (u.pathname.startsWith('/api/focus/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/seen/')) return json(res, 200, { ok: true });
   if (u.pathname.startsWith('/api/title/suggest/')) { const r = fake.suggest(u.pathname.slice('/api/title/suggest/'.length)); return json(res, r.status, r.body); }
@@ -105,7 +118,12 @@ const SAMPLE = `(function () {
     rows: ids('#sections'), archivedList: ids('#l-archived'), results: ids('#l-results'),
     sections: q('#sections > .section').map(function (sec) { var rowsOf = function (el) { return Array.prototype.slice.call(el.querySelectorAll(':scope > .section-body > .row[data-session]')).map(function (r) { return r.getAttribute('data-session'); }); }; var h = sec.querySelector(':scope > .section-head .fold'); var b = h.querySelector('.badge'); var t = sec.querySelector(':scope > .section-body > .empty > button[data-act="stale"]'); return { key: sec.getAttribute('data-section'), label: h.querySelector('.label').textContent, here: !!h.querySelector('.chip.here'), expanded: h.getAttribute('aria-expanded'), folded: sec.classList.contains('folded'), badge: b ? b.textContent : null, tone: b ? (b.classList.contains('wait') ? 'wait' : 'unseen') : null, n: h.querySelector('.n').textContent, rows: rowsOf(sec), stale: t ? t.textContent : null, groups: sec.querySelectorAll('.section .section').length }; }),
     title: document.title,
-    mode: (function () { var b = document.querySelector('#sortMode button[aria-pressed="true"]'); return b && document.getElementById('sortMode').style.display !== 'none' ? b.getAttribute('data-mode') : null; })(),
+    locked: q('.row.locked[data-session]').map(function (r) { return r.getAttribute('data-session'); }),
+    lockButtons: q('.row .lockbtn').length,
+    pressedLocks: q('.row .lockbtn[aria-pressed="true"]').length,
+    ages: q('#sections .row[data-session]').map(function (r) { var a = r.querySelector('.age'); return r.getAttribute('data-session') + '=' + (a ? a.textContent : ''); }),
+    sortSwitch: document.getElementById('sortMode') !== null,
+    posted: window.__posted || null,
     handles: q('.row .handle').length,
     focused: document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-session') : null,
     dropMarks: q('.row.drop-before, .row.drop-after').length,
@@ -255,7 +273,7 @@ test('page: a resumed archived session comes back only when it waits; busy stays
 test('page: clicking a board-archived search row waits for the restore, then copies and shows the restored path', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([]);
-  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, archived: true, archivedBy: 'board', snippets: [] }] };
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', activityAt: ago(5000), archived: true, archivedBy: 'board', snippets: [] }] };
   fake.unarchive = () => ({ status: 200, body: { ok: true, restoredTo: 'C:\\p\\x\\p.jsonl' }, delayMs: 600 });
   const page = await openPage();
   await page.search('Old');
@@ -277,7 +295,7 @@ test('page: clicking a board-archived search row waits for the restore, then cop
 test('page: a failed restore on a search row click copies nothing and shows the notice', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([]);
-  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, archived: true, archivedBy: 'board', snippets: [] }] };
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', activityAt: ago(5000), archived: true, archivedBy: 'board', snippets: [] }] };
   fake.unarchive = () => ({ status: 500, body: { ok: false, error: 'a different file is already at C:\\p\\x\\p.jsonl; C:\\t\\x\\p.jsonl stays' } });
   const page = await openPage();
   await page.search('Old');
@@ -416,7 +434,7 @@ test('page (browser): a running session answers 409; the title goes on the clipb
 test('page (browser): an ended session in the search results has ✎ too', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([]);
-  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, snippets: [] }] };
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', activityAt: ago(5000), snippets: [] }] };
   const page = await openPage();
   await page.search('Old');
   await page.until((x) => x.results.includes(P), 'the search row');
@@ -504,7 +522,7 @@ test('page: every row shows "Session <first 8>", and a click copies the full id 
 test('page: a search row shows its id too, and its details carry the transcript path', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([]);
-  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', ageMinutes: 5000, snippets: [] }] };
+  fake.search = { rows: [{ sessionId: P, title: 'Old spike', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\x\\p.jsonl', activityAt: ago(5000), snippets: [] }] };
   const page = await openPage();
   await page.search('Old');
   let s = await page.until((x) => x.results.includes(P), 'the search row');
@@ -535,12 +553,12 @@ test('page: the filter takes an id as Claude Code shows it ("Session f8005c0d") 
 
 // -- ended sessions (Claude Code's list per window) -----------------------------------------
 
-const ended = (sessionId, title, extra) => Object.assign({ sessionId, status: 'ended', live: false, title, lastPrompt: null, cwd: 'C:\\code\\x', transcriptPath: 'C:\\p\\x\\' + sessionId + '.jsonl', path: 'C:\\p\\x\\' + sessionId + '.jsonl', folder: 'C--code-x', ageMinutes: 60, hasTranscript: true, archived: false, window: { id: 1, label: 'x' } }, extra);
+const ended = (sessionId, title, extra) => Object.assign({ sessionId, status: 'ended', live: false, title, lastPrompt: null, cwd: 'C:\\code\\x', transcriptPath: 'C:\\p\\x\\' + sessionId + '.jsonl', path: 'C:\\p\\x\\' + sessionId + '.jsonl', folder: 'C--code-x', activityAt: ago(60), workingSince: null, lockSlot: null, hasTranscript: true, archived: false, window: { id: 1, label: 'x' } }, extra);
 const searchCalls = () => fake.calls.filter((c) => c.path === '/api/search').map((c) => new URLSearchParams(c.query).get('q') + ':' + new URLSearchParams(c.query).get('content'));
 
 test('page: a window section shows its ended, unarchived sessions after the running ones, newest first, with "+ N ended" on the head; ⤓ archives one and it leaves', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(C, 'Older ended', { ageMinutes: 3000 }), ended(B, 'Recent ended', { ageMinutes: 25 }), ended(D, null, { ageMinutes: 90, lastPrompt: 'no title yet', window: { id: 2, label: 'other' } })], order: { mode: 'activity', show: 'all' }, thisWindowId: 1 });
+  fake.snapshot = snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(C, 'Older ended', { activityAt: ago(3000) }), ended(B, 'Recent ended', { activityAt: ago(25) }), ended(D, null, { activityAt: ago(90), lastPrompt: 'no title yet', window: { id: 2, label: 'other' } })], order: { show: 'all' }, thisWindowId: 1 });
   const page = await openPage();
   let s = await page.until((x) => x.sections.length === 2 && x.endedRows.length === 3, 'both sections');
   assert.deepEqual(s.sections[0].rows, [A, B, C], 'running first, then ended newest first');
@@ -551,7 +569,7 @@ test('page: a window section shows its ended, unarchived sessions after the runn
   await page.click(rowSel(B) + ' .iconbtn[data-act="archivepast"]');
   s = await page.until((x) => !x.endedRows.includes(B), 'gone at once');
   await page.until(() => fake.calls.some((c) => c.method === 'POST' && c.path === '/api/archive/' + B), 'the POST');
-  fake.snapshot = snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(C, 'Older ended', { ageMinutes: 3000 }), ended(D, null, { ageMinutes: 90, window: { id: 2, label: 'other' } })], order: { mode: 'activity', show: 'all' }, thisWindowId: 1 });
+  fake.snapshot = snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(C, 'Older ended', { activityAt: ago(3000) }), ended(D, null, { activityAt: ago(90), window: { id: 2, label: 'other' } })], order: { show: 'all' }, thisWindowId: 1 });
   await sleep(600);
   s = await page.sample();
   assert.equal(s.endedRows.includes(B), false, 'and stays gone');
@@ -565,7 +583,7 @@ test('page: a window section shows its ended, unarchived sessions after the runn
 
 test('page: the switch "running" hides the ended rows and a section that only had ended rows; "all" brings them back', opts, async () => {
   fake.calls.length = 0;
-  const snap = (show) => snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(B, 'Recent ended'), ended(D, 'Other window', { window: { id: 2, label: 'other' } })], order: { mode: 'activity', show } });
+  const snap = (show) => snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(B, 'Recent ended'), ended(D, 'Other window', { window: { id: 2, label: 'other' } })], order: { show } });
   fake.snapshot = snap('all');
   const page = await openPage();
   let s = await page.until((x) => x.endedRows.length === 2, 'ended rows');
@@ -585,10 +603,10 @@ test('page: the switch "running" hides the ended rows and a section that only ha
 
 test('page: typing filters running and ended rows and, after a pause, searches every session by title once; the results skip what the board shows; Enter adds the text', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf([row(A, 'Parser running', 'idle')], { ended: [ended(B, 'Parser ended'), ended(C, 'Unrelated')], order: { mode: 'activity', show: 'all' } });
+  fake.snapshot = snapshotOf([row(A, 'Parser running', 'idle')], { ended: [ended(B, 'Parser ended'), ended(C, 'Unrelated')], order: { show: 'all' } });
   fake.search = { rows: [
-    { sessionId: B, title: 'Parser ended', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\b.jsonl', ageMinutes: 60, snippets: [] },
-    { sessionId: P, title: 'Parser from another repo', live: false, status: 'past', folder: 'y', cwd: 'C:\\y', path: 'C:\\t\\p.jsonl', ageMinutes: 5000, snippets: [] },
+    { sessionId: B, title: 'Parser ended', live: false, status: 'past', folder: 'x', cwd: 'C:\\x', path: 'C:\\t\\b.jsonl', activityAt: ago(60), snippets: [] },
+    { sessionId: P, title: 'Parser from another repo', live: false, status: 'past', folder: 'y', cwd: 'C:\\y', path: 'C:\\t\\p.jsonl', activityAt: ago(5000), snippets: [] },
   ] };
   const page = await openPage();
   await page.until((x) => x.rows.length === 3, 'the rows');
@@ -620,24 +638,25 @@ test('page: a row without a title is headed by its last prompt, else "Untitled";
   await page.close();
 });
 
-test('page: the switch offers running, open and all; open shows ended rows but no archived ones; all adds the archived ones (chips, ⤒ only where the board archived, no ⤓) and moves a running archived row into its section; the head counts all three', opts, async () => {
+test('page: the switch offers auto, running and all; auto shows ended rows but no archived ones; all adds the archived ones after the placed rows (chips, ⤒ only where the board archived, no ⤓, no rail) and moves a running archived row into its section; the head counts all three', opts, async () => {
   fake.calls.length = 0;
   const runningArchived = row(C, 'Archived but running', 'idle', { pid: 300, archived: true, archivedBy: 'board' });
   const archivedEnded = [
-    ended(D, 'Archived in Claude', { ageMinutes: 30, archived: true, archivedBy: 'claude-code' }),
-    ended(E, 'Archived here', { ageMinutes: 90, archived: true, archivedBy: 'board' }),
+    ended(D, 'Archived in Claude', { activityAt: ago(30), archived: true, archivedBy: 'claude-code' }),
+    ended(E, 'Archived here', { activityAt: ago(90), archived: true, archivedBy: 'board' }),
   ];
-  const snap = (show) => snapshotOf([row(A, 'Running one', 'idle'), runningArchived], { ended: [ended(B, 'Recent ended', { ageMinutes: 20 })], archivedEnded: show === 'all' ? archivedEnded : [], order: { mode: 'activity', show } });
-  fake.snapshot = snap('open');
+  const snap = (show) => snapshotOf([row(A, 'Running one', 'idle'), runningArchived], { ended: [ended(B, 'Recent ended', { activityAt: ago(20) })], archivedEnded: show === 'all' ? archivedEnded : [], order: { show } });
+  fake.snapshot = snap('auto');
   const page = await openPage();
-  let s = await page.until((x) => x.endedRows.length === 1, 'the open view');
-  assert.deepEqual(await page.eval('Array.prototype.map.call(document.querySelectorAll("#showMode button"), function (b) { return b.getAttribute("data-show"); })'), ['running', 'open', 'all']);
-  assert.deepEqual([s.showSwitch, s.archivedInSections, s.archivedGroup, s.heads], ['open', [], true, ['1 + 1 ended']], 'the running archived row waits in the bottom group');
+  let s = await page.until((x) => x.endedRows.length === 1, 'the auto view');
+  assert.deepEqual(await page.eval('Array.prototype.map.call(document.querySelectorAll("#showMode button"), function (b) { return b.getAttribute("data-show"); })'), ['auto', 'running', 'all']);
+  assert.deepEqual([s.showSwitch, s.archivedInSections, s.archivedGroup, s.heads, s.sortSwitch], ['auto', [], true, ['1 + 1 ended'], false], 'the running archived row waits in the bottom group; the order switch is gone');
   await page.click('#showMode button[data-show="all"]');
   await page.until(() => fake.calls.some((c) => c.path === '/api/order/show' && c.query === '?show=all'), 'the POST');
   fake.snapshot = snap('all');
   s = await page.until((x) => x.archivedInSections.length === 3, 'the archived rows');
-  assert.deepEqual(s.sections[0].rows, [A, B, C, D, E], 'running, ended, then archived newest first (the running archived row by its age)');
+  assert.deepEqual(s.sections[0].rows, [A, B, C, D, E], 'the placed rows (running and ended), then archived newest first (the running archived row by its time)');
+  assert.deepEqual([s.handles, s.lockButtons], [2, 2], 'only the two placed rows carry a rail: an archived row has no place');
   assert.deepEqual([s.showSwitch, s.archivedGroup, s.heads], ['all', false, ['1 + 1 ended + 3 archived']]);
   assert.equal(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(D) + ' .iconbtn.unarchive') + ').length'), 0, 'Claude Code\'s archive is unarchived there');
   assert.equal(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(E) + ' .iconbtn.unarchive') + ').length'), 1);
@@ -663,7 +682,7 @@ test('page: one section per window, this window first, then by activity, Elsewhe
     row(A, 'Alpha idle', 'idle', win(1, 'alpha')),
     row(B, 'Beta unseen', 'idle', Object.assign({ unseen: true }, win(2, 'beta'))),
     row(C, 'Gamma waits', 'waiting', win(3, 'gamma')),
-    row(E, 'Gamma old idle', 'idle', Object.assign({ ageMinutes: 30 }, win(3, 'gamma'))),
+    row(E, 'Gamma old idle', 'idle', Object.assign({ activityAt: ago(30) }, win(3, 'gamma'))),
     row(D, 'Nowhere', 'idle', { window: null }),
   ], { thisWindowId: 2 });
   const page = await openPage();
@@ -780,9 +799,9 @@ test('page: every running row stays in its section however long it has been idle
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([
     row(A, 'Fresh', 'idle', win(1, 'alpha')),
-    row(B, 'Idle three days', 'idle', Object.assign({ pid: 200, ageMinutes: 3 * 24 * 60 }, win(1, 'alpha'))),
-    row(C, 'Older', 'idle', Object.assign({ pid: 300, ageMinutes: 400 }, win(2, 'beta'))),
-    row(D, 'Archived', 'idle', Object.assign({ pid: 400, ageMinutes: 600, archived: true, archivedBy: 'claude-code' }, win(1, 'alpha'))),
+    row(B, 'Idle three days', 'idle', Object.assign({ pid: 200, activityAt: ago(3 * 24 * 60) }, win(1, 'alpha'))),
+    row(C, 'Older', 'idle', Object.assign({ pid: 300, activityAt: ago(400) }, win(2, 'beta'))),
+    row(D, 'Archived', 'idle', Object.assign({ pid: 400, activityAt: ago(600), archived: true, archivedBy: 'claude-code' }, win(1, 'alpha'))),
   ]);
   const page = await openPage();
   let s = await page.until((x) => x.sections.length === 2, 'two sections');
@@ -839,202 +858,272 @@ test('page: the agent name other sessions use shows on the row and in the detail
   await page.close();
 });
 
-// -- manual order -------------------------------------------------------------------------
+// -- order, locks and moves -----------------------------------------------------------------
 
-const orderCalls = () => fake.calls.filter((c) => c.path === '/api/order').map((c) => decodeURIComponent(c.query.slice('?ids='.length)).split(','));
-const modeCalls = () => fake.calls.filter((c) => c.path === '/api/order/mode').map((c) => c.query);
-const manualRows = () => [
-  row(A, 'Alpha ranked idle', 'idle', { rank: 2, ageMinutes: 10 }),
-  row(B, 'Beta ranked waits', 'waiting', { pid: 200, rank: 0, ageMinutes: 20 }),
-  row(C, 'Gamma new idle', 'idle', { pid: 300, ageMinutes: 5 }),
-  row(D, 'Delta new busy', 'busy', { pid: 400, ageMinutes: 1 }),
-];
-const Q = '12121212-8888-4888-8888-888888888888';
-const otherWindow = () => row(Q, 'Elsewhere idle', 'idle', Object.assign({ pid: 800, rank: 0, ageMinutes: 2 }, win(2, 'beta')));
-
-test('page: the header switch posts /api/order/mode, the rows follow the pending mode at once, and the snapshot confirms it', opts, async () => {
-  fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
-  const page = await openPage();
-  let s = await page.until((x) => x.mode === 'activity', 'the switch');
-  assert.deepEqual([s.sections[0].rows, s.handles], [[B, D, C, A], 0], 'by activity: waiting, busy, idle by age; no handles');
-  await page.click('#sortMode button[data-mode="manual"]');
-  s = await page.until((x) => x.mode === 'manual', 'manual at once');
-  assert.deepEqual([s.sections[0].rows, s.handles], [[D, C, B, A], 4], 'manual: unranked on top newest first, then by rank, the waiting row stays put; a handle per live row');
-  await page.until(() => modeCalls().length === 1, 'the POST');
-  assert.deepEqual(modeCalls(), ['?mode=manual']);
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
-  await sleep(600);
-  s = await page.sample();
-  assert.deepEqual([s.mode, s.sections[0].rows], ['manual', [D, C, B, A]], 'the snapshot agrees');
-  await page.click('#sortMode button[data-mode="activity"]');
-  s = await page.until((x) => x.mode === 'activity', 'back to activity at once');
-  assert.deepEqual([s.sections[0].rows, s.handles], [[B, D, C, A], 0]);
-  await page.until(() => modeCalls().length === 2, 'the second POST');
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
-  await page.until((x) => x.mode === 'activity', 'settled');
-  await page.close();
-});
-
-test('page: a failed /api/order/mode drops the pending mode, the order returns and the notice says why; an old server without order hides the switch', opts, async () => {
-  fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
-  fake.mode = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
-  const page = await openPage();
-  await page.until((x) => x.mode === 'activity', 'the switch');
-  await page.click('#sortMode button[data-mode="manual"]');
-  let s = await page.until((x) => x.notice !== null, 'the notice');
-  assert.equal(s.notice, 'order mode failed: EACCES: permission denied');
-  assert.deepEqual([s.mode, s.sections[0].rows, s.handles], ['activity', [B, D, C, A], 0]);
-  fake.mode = (m) => ({ status: 200, body: { ok: true, mode: m } });
-  const old = snapshotOf(manualRows());
-  delete old.order;
-  fake.snapshot = old;
-  s = await page.until((x) => x.mode === null, 'no switch without an order field');
-  assert.deepEqual(s.sections[0].rows, [B, D, C, A], 'activity order without the field');
-  await page.close();
-});
-
+const locksCalls = () => fake.calls.filter((c) => c.path === '/api/locks').map((c) => c.body);
 const F = '99999999-7777-4777-8777-777777777777';
+const G = '78787878-9999-4999-8999-999999999999';
+const N = '34343434-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const Q = '12121212-8888-4888-8888-888888888888';
 const secOf = (s, key) => s.sections.find((sec) => sec.key === key);
+// Claude Code's order of these four: D works, then C (5 min), A (10 min), B (20 min)
+const boardRows = (extra) => [
+  row(A, 'Alpha idle', 'idle', Object.assign({ activityAt: ago(10) }, (extra || {})[A])),
+  row(B, 'Beta waits vis', 'waiting', Object.assign({ pid: 200, activityAt: ago(20) }, (extra || {})[B])),
+  row(C, 'Gamma idle vis', 'idle', Object.assign({ pid: 300, activityAt: ago(5) }, (extra || {})[C])),
+  row(D, 'Delta works', 'busy', Object.assign({ pid: 400, activityAt: ago(30), workingSince: ago(2) }, (extra || {})[D])),
+];
+const otherWindow = () => row(Q, 'Elsewhere idle', 'idle', Object.assign({ pid: 800, activityAt: ago(2) }, win(2, 'beta')));
+const auto = { order: { show: 'auto' } };
 
-test('page: Alt+Down on a focused row posts /api/order with the complete list of its group, the row moves at once and keeps focus; Alt+Up at the top is a no-op', opts, async () => {
+test('page: a section is one list in Claude Code\'s order: working sessions on top by their start, then running and ended rows together by their last message; every placed card has a rail', opts, async () => {
   fake.calls.length = 0;
-  // every row has a transcript, so each carries the Steps button: the keyboard order of the
-  // list must be what it was before that button came
-  const withTranscripts = manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]).map((r) => Object.assign(r, { transcriptPath: 'C:\\x\\' + r.sessionId + '.jsonl' }));
-  fake.snapshot = snapshotOf(withTranscripts, { order: { mode: 'manual' } });
+  const rows = boardRows().concat([
+    row(E, 'Eps works longer', 'busy', { pid: 500, activityAt: ago(50), workingSince: ago(1) }),
+    row(N, 'Put away', 'idle', { pid: 600, archived: true, archivedBy: 'board' }),
+  ]);
+  fake.snapshot = snapshotOf(rows, Object.assign({ ended: [ended(F, 'Ended 7 min', { activityAt: ago(7) }), ended(G, 'Ended an hour', { activityAt: ago(60) })] }, auto));
+  fake.search = { rows: [{ sessionId: Q, title: 'A past hit', live: false, cwd: 'C:\\code\\y', activityAt: ago(500), path: 'C:\\p\\y\\' + Q + '.jsonl', snippets: [] }] };
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 5, 'manual rows');
+  let s = await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 7, 'the rows');
+  assert.deepEqual(s.sections[0].rows, [E, D, C, F, A, B, G], 'the two working rows by their start, then every other by its last message, ended ones among them');
+  assert.deepEqual([s.handles, s.lockButtons, s.pressedLocks, s.locked, s.sortSwitch], [7, 7, 0, [], false], 'a grip and a lock on every placed card, none locked, no order switch');
+  assert.deepEqual(s.ages, [E + '=1m', D + '=2m', C + '=5m', F + '=7m', A + '=10m', B + '=20m', G + '=1h'], 'a working card shows since when it works, every other the time since its last message');
+  await page.click('#toggleArchived');
+  s = await page.until((x) => x.archivedList.length === 1, 'the bottom group');
+  assert.equal(s.handles, 7, 'no rail on a put away row');
+  await page.search('past');
+  await page.until((x) => x.results.length === 1, 'a search hit');
+  assert.equal(await page.eval('document.querySelectorAll("#l-results .rail, #l-archived .rail").length'), 0, 'no rail on a search row');
+  await page.search('');
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 7, 'the board again');
+  await page.click('#showMode button[data-show="running"]');
+  s = await page.until((x) => x.endedRows.length === 0, 'running');
+  assert.deepEqual(s.sections[0].rows, [E, D, C, A, B]);
+  fake.search = { rows: [] };
+  await page.close();
+});
+
+test('page: the lock button holds a card at its place number in the list the switch shows, while sessions start, end and get written in; unlock sends it back', opts, async () => {
+  fake.calls.length = 0;
+  const endedF = () => [ended(F, 'Ended 3 min', { activityAt: ago(3) })];
+  fake.snapshot = snapshotOf(boardRows(), Object.assign({ ended: endedF() }, auto));
+  const page = await openPage();
+  let s = await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 5, 'the rows');
+  assert.deepEqual(s.sections[0].rows, [D, F, C, A, B]);
+  await page.click(rowSel(A) + ' .lockbtn');
+  s = await page.until((x) => x.locked.length === 1, 'locked at once');
+  assert.deepEqual([s.locked, s.pressedLocks, s.sections[0].rows], [[A], 1, [D, F, C, A, B]], 'the card stays where it was');
+  await page.until(() => locksCalls().length === 1, 'the POST');
+  assert.deepEqual(locksCalls(), [{ set: { [A]: 3 }, move: {}, clear: [] }], 'locked at its index in the list');
+  const lockedA = { [A]: { lockSlot: 3 } };
+  fake.snapshot = snapshotOf(boardRows(lockedA).concat([row(N, 'New one works', 'busy', { pid: 600, workingSince: ago(0) })]), Object.assign({ ended: endedF() }, auto));
+  s = await page.until((x) => x.sections[0].rows.length === 6, 'a session started');
+  assert.deepEqual(s.sections[0].rows, [N, D, F, A, C, B], 'the new card is on top, the locked one is still fourth, the others moved around it');
+  fake.snapshot = snapshotOf(boardRows({ [A]: { lockSlot: 3, activityAt: ago(0) } }), Object.assign({ ended: endedF() }, auto));
+  s = await page.until((x) => x.sections[0].rows.length === 5, 'the new session is gone again');
+  assert.deepEqual(s.sections[0].rows, [D, F, C, A, B], 'writing in the locked session does not move it');
+  await page.click('#showMode button[data-show="running"]');
+  s = await page.until((x) => x.endedRows.length === 0, 'running');
+  assert.deepEqual(s.sections[0].rows, [D, C, B, A], 'in running the hidden ended row takes no place: the card is fourth among the rows shown');
+  fake.snapshot = snapshotOf(boardRows(lockedA).concat([row(N, 'New one works', 'busy', { pid: 600, workingSince: ago(0) })]), Object.assign({ ended: endedF() }, { order: { show: 'running' } }));
+  s = await page.until((x) => x.sections[0].rows.length === 5, 'a session started in running');
+  assert.deepEqual(s.sections[0].rows, [N, D, C, A, B], 'still fourth on screen');
+  await page.click(rowSel(A) + ' .lockbtn');
+  s = await page.until((x) => x.locked.length === 0, 'unlocked at once');
+  await page.until(() => locksCalls().length === 2, 'the second POST');
+  assert.deepEqual(locksCalls()[1], { set: {}, move: {}, clear: [A] });
+  fake.snapshot = snapshotOf(boardRows(), Object.assign({ ended: endedF() }, { order: { show: 'running' } }));
+  s = await page.until((x) => x.sections[0].rows.length === 4 && x.sections[0].rows[2] === A, 'back in the order by time');
+  assert.deepEqual(s.sections[0].rows, [D, C, A, B]);
+  await page.close();
+});
+
+test('page: Alt+Down moves a card past its neighbour, locks it there and keeps the focus; a locked card it passes gets the place it now has; Alt+Up at the top is a no-op', opts, async () => {
+  fake.calls.length = 0;
+  // every row has a transcript, so each carries the Steps button: the keyboard order of the row must be what it was before that button came
+  const rows = () => boardRows({ [B]: { lockSlot: 3 } }).map((r) => Object.assign(r, { transcriptPath: 'C:\\x\\' + r.sessionId + '.jsonl' }));
+  fake.snapshot = snapshotOf(rows(), auto);
+  const page = await openPage();
+  let s = await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
   assert.ok(s.actionKinds.every((k) => k.split('=')[1].split(',')[0] === 'steps'), 'every row carries the Steps button: ' + JSON.stringify(s.actionKinds));
-  assert.deepEqual([s.sections[0].rows, s.sections[0].stale], [[D, C, B, A, F], null], 'the row idle for 5 h is shown in its rank');
+  assert.deepEqual([s.sections[0].rows, s.locked], [[D, C, A, B], [B]]);
   await page.key(C, 'ArrowDown');
-  s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
-  assert.deepEqual([s.sections[0].rows, s.focused], [[D, B, C, A, F], C], 'the row moved and kept the focus');
-  await page.until(() => orderCalls().length === 1, 'the POST');
-  assert.deepEqual(orderCalls(), [[D, B, C, A, F]], 'the whole group in its new order');
+  s = await page.until((x) => x.sections[0].rows[1] === A, 'moved at once');
+  assert.deepEqual([s.sections[0].rows, s.focused, s.locked.slice().sort()], [[D, A, C, B], C, [B, C].sort()], 'the card moved one place, is locked there and kept the focus');
+  await page.until(() => locksCalls().length === 1, 'the POST');
+  assert.deepEqual(locksCalls()[0], { set: { [C]: 2 }, move: {}, clear: [] }, 'the locked card below did not change its place: nothing to move');
+  await page.key(C, 'ArrowDown');
+  s = await page.until((x) => x.sections[0].rows[3] === C, 'past the locked card');
+  assert.deepEqual(s.sections[0].rows, [D, A, B, C]);
+  await page.until(() => locksCalls().length === 2, 'the second POST');
+  assert.deepEqual(locksCalls()[1], { set: { [C]: 3 }, move: { [B]: 2 }, clear: [] }, 'the card it passed is rewritten to the place it now has');
   await page.key(D, 'ArrowUp');
   await sleep(300);
   s = await page.sample();
-  assert.deepEqual([s.sections[0].rows, orderCalls().length], [[D, B, C, A, F], 1], 'the top row and Alt+Up: nothing happens');
-  fake.snapshot = snapshotOf([
-    row(D, 'Delta new busy', 'busy', { pid: 400, rank: 0, ageMinutes: 1 }), row(B, 'Beta ranked waits', 'waiting', { pid: 200, rank: 1, ageMinutes: 20 }),
-    row(C, 'Gamma new idle', 'idle', { pid: 300, rank: 2, ageMinutes: 5 }), row(A, 'Alpha ranked idle', 'idle', { rank: 3, ageMinutes: 10 }),
-    row(F, 'Phi old idle', 'idle', { pid: 700, rank: 4, ageMinutes: 300 }),
-  ], { order: { mode: 'manual' } });
+  assert.deepEqual([s.sections[0].rows, locksCalls().length], [[D, A, B, C], 2], 'the top card and Alt+Up: nothing happens');
+  fake.snapshot = snapshotOf(boardRows({ [B]: { lockSlot: 2 }, [C]: { lockSlot: 3 } }), auto);
   await sleep(600);
   s = await page.sample();
-  assert.deepEqual(s.sections[0].rows, [D, B, C, A, F], 'the snapshot agrees');
+  assert.deepEqual(s.sections[0].rows, [D, A, B, C], 'the snapshot agrees');
   await page.close();
 });
 
-test('page: a drag by the handle moves the row inside its group and posts the order; a drop on another group is refused', opts, async () => {
+test('page: a drag by the grip drops a card next to another and locks it; an ended card moves like a running one; a drop on another section is refused', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows().concat([otherWindow()]), { order: { mode: 'manual' } });
+  fake.snapshot = snapshotOf(boardRows().concat([otherWindow()]), Object.assign({ ended: [ended(F, 'Ended 7 min', { activityAt: ago(7) })] }, auto));
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.handles === 5, 'manual with handles');
-  let r = await page.drag(A, D, true);
+  let s = await page.until((x) => x.sections.length === 2 && x.handles === 6, 'two sections with rails');
+  assert.deepEqual(secOf(s, 'w1').rows, [D, C, F, A, B]);
+  let r = await page.drag(B, D, true);
   assert.deepEqual([r.allowed, r.marks], [true, 1], 'the drop was allowed and the target marked');
-  s = await page.until((x) => x.sections[0].rows[0] === A, 'moved at once');
-  assert.deepEqual([s.sections[0].rows, s.dropMarks], [[A, D, C, B], 0]);
-  await page.until(() => orderCalls().length === 1, 'the POST');
-  assert.deepEqual(orderCalls(), [[A, D, C, B]]);
-  r = await page.drag(B, Q, false);
-  assert.deepEqual([r.allowed, r.marks], [false, 0], 'a row onto another window section: refused');
+  s = await page.until((x) => secOf(x, 'w1').rows[0] === B, 'moved at once');
+  assert.deepEqual([secOf(s, 'w1').rows, s.dropMarks, s.locked], [[B, D, C, F, A], 0, [B]]);
+  await page.until(() => locksCalls().length === 1, 'the POST');
+  assert.deepEqual(locksCalls()[0], { set: { [B]: 0 }, move: {}, clear: [] });
+  r = await page.drag(F, A, false);
+  assert.equal(r.allowed, true, 'an ended card is dragged like any other');
+  s = await page.until((x) => secOf(x, 'w1').rows[4] === F, 'the ended card moved');
+  assert.deepEqual([secOf(s, 'w1').rows, s.locked.slice().sort()], [[B, D, C, A, F], [B, F].sort()]);
+  await page.until(() => locksCalls().length === 2, 'the second POST');
+  assert.deepEqual(locksCalls()[1], { set: { [F]: 4 }, move: {}, clear: [] });
+  r = await page.drag(C, Q, false);
+  assert.deepEqual([r.allowed, r.marks], [false, 0], 'a card onto another window section: refused');
   await sleep(300);
   s = await page.sample();
-  assert.deepEqual([secOf(s, 'w1').rows, secOf(s, 'w2').rows, orderCalls().length], [[A, D, C, B], [Q], 1]);
+  assert.deepEqual([secOf(s, 'w1').rows, secOf(s, 'w2').rows, locksCalls().length], [[B, D, C, A, F], [Q], 2]);
   await page.close();
 });
 
-test('page: a muted row (blinded under 0.10.0) keeps its rank and moves with the rest of its section', opts, async () => {
+test('page: a failed /api/locks drops the pending lock, the card is free again and the notice says why; an older failure does not undo a newer change', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows().concat([row(E, 'Eps muted', 'idle', { pid: 500, rank: 1, muted: true, ageMinutes: 3 })]), { order: { mode: 'manual' } });
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  fake.locks = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.handles === 5, 'manual with the muted row');
-  assert.deepEqual([s.sections[0].rows, s.mutedRows], [[D, C, B, E, A], [E]], 'ranked between B (0) and A (2)');
-  await page.key(E, 'ArrowUp');
-  s = await page.until((x) => x.sections[0].rows[2] === E, 'moved at once');
-  assert.deepEqual([s.sections[0].rows, s.focused], [[D, C, E, B, A], E]);
-  await page.until(() => orderCalls().length === 1, 'the POST');
-  assert.deepEqual(orderCalls(), [[D, C, E, B, A]], 'one list for the whole section');
-  await page.close();
-});
-
-test('page: a failed /api/order drops the pending order, the row returns and the notice says why', opts, async () => {
-  fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
-  fake.order = () => ({ status: 500, body: { ok: false, error: 'EACCES: permission denied' } });
-  const page = await openPage();
-  await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 4, 'manual rows');
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
   await page.key(C, 'ArrowDown');
-  const s = await page.until((x) => x.notice !== null, 'the notice');
-  assert.equal(s.notice, 'reorder failed: EACCES: permission denied');
-  assert.deepEqual(s.sections[0].rows, [D, C, B, A], 'the row returned');
-  fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
+  let s = await page.until((x) => x.notice !== null, 'the notice');
+  assert.equal(s.notice, 'lock failed: EACCES: permission denied');
+  assert.deepEqual([s.sections[0].rows, s.locked], [[D, C, A, B], []], 'the card returned and is not locked');
+  // the first request fails late, the second succeeds at once: the late failure must leave the second lock alone
+  fake.locks = (body) => (body.set && body.set[A] !== undefined ? { status: 500, body: { ok: false, error: 'late failure' }, delayMs: 700 } : locksOk());
+  await page.click(rowSel(A) + ' .lockbtn');
+  await page.click(rowSel(B) + ' .lockbtn');
+  s = await page.until((x) => x.notice === 'lock failed: late failure', 'the late failure');
+  assert.deepEqual(s.locked, [B], 'only the failed lock went');
+  fake.locks = locksOk;
   await page.close();
 });
 
-test('page: a stale snapshot that lands before the /api/order reply does not snap the row back', opts, async () => {
+test('page: a stale snapshot that lands before the /api/locks reply does not snap the card back', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
-  fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 }, delayMs: 900 });
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  fake.locks = () => Object.assign(locksOk(), { delayMs: 900 });
   const page = await openPage();
-  await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 4, 'manual rows');
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
   await page.key(C, 'ArrowDown');
-  let s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
-  await sleep(700);                                          // two or three polls with the old ranks, the reply still pending
+  let s = await page.until((x) => x.sections[0].rows[1] === A, 'moved at once');
+  await sleep(700);                                          // two or three polls without the lock, the reply still pending
   s = await page.sample();
-  assert.deepEqual(s.sections[0].rows, [D, B, C, A], 'the pending order holds under the stale polls');
-  await page.until(() => orderCalls().length === 1, 'the POST');
+  assert.deepEqual(s.sections[0].rows, [D, A, C, B], 'the pending lock holds under the stale polls');
+  await page.until(() => locksCalls().length === 1, 'the POST');
   await sleep(400);
   s = await page.sample();
-  assert.deepEqual(s.sections[0].rows, [D, B, C, A], 'and after the reply');
-  fake.order = (ids) => ({ status: 200, body: { ok: true, count: ids ? ids.split(',').length : 0 } });
+  assert.deepEqual(s.sections[0].rows, [D, A, C, B], 'and after the reply');
+  fake.locks = locksOk;
   await page.close();
 });
 
-test('page: two moves in two groups inside the guard both hold', opts, async () => {
+test('page: two moves in two sections inside the guard both hold', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([
-    row(A, 'A first', 'idle', { rank: 0, ageMinutes: 2 }), row(B, 'B second', 'idle', { pid: 200, rank: 1, ageMinutes: 3 }),
-    row(C, 'C first', 'idle', Object.assign({ pid: 300, rank: 0, ageMinutes: 2 }, win(2, 'beta'))), row(D, 'D second', 'idle', Object.assign({ pid: 400, rank: 1, ageMinutes: 3 }, win(2, 'beta'))),
-  ], { order: { mode: 'manual' } });
+    row(A, 'A first', 'idle', { activityAt: ago(2) }), row(B, 'B second', 'idle', { pid: 200, activityAt: ago(3) }),
+    row(C, 'C first', 'idle', Object.assign({ pid: 300, activityAt: ago(2) }, win(2, 'beta'))), row(D, 'D second', 'idle', Object.assign({ pid: 400, activityAt: ago(3) }, win(2, 'beta'))),
+  ], auto);
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'manual' && x.sections.length === 2, 'two sections');
+  let s = await page.until((x) => x.sections.length === 2, 'two sections');
   await page.key(B, 'ArrowUp');
   s = await page.until((x) => secOf(x, 'w1').rows[0] === B, 'the first move');
   await page.key(D, 'ArrowUp');
   s = await page.until((x) => secOf(x, 'w2').rows[0] === D, 'the second move');
-  await sleep(600);                                          // polls with the old ranks keep coming
+  await sleep(600);                                          // polls without the locks keep coming
   s = await page.sample();
-  assert.deepEqual([secOf(s, 'w1').rows, secOf(s, 'w2').rows], [[B, A], [D, C]], 'both groups hold their new order');
-  await page.until(() => orderCalls().length === 2, 'both POSTs');
-  assert.deepEqual(orderCalls(), [[B, A], [D, C]]);
+  assert.deepEqual([secOf(s, 'w1').rows, secOf(s, 'w2').rows], [[B, A], [D, C]], 'both sections hold their new order');
+  await page.until(() => locksCalls().length === 2, 'both POSTs');
+  assert.deepEqual(locksCalls(), [{ set: { [B]: 0 }, move: {}, clear: [] }, { set: { [D]: 0 }, move: {}, clear: [] }]);
   await page.close();
 });
 
-test('page: in activity mode there are no handles and Alt+arrows do nothing; with a filter typed, moving is disabled', opts, async () => {
+test('page: with a filter typed the grip stays and Alt+Down goes past the next card the filter shows; locks past the end of a short list sit at its end in their order', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'activity' } });
+  fake.snapshot = snapshotOf(boardRows(), auto);
   const page = await openPage();
-  let s = await page.until((x) => x.mode === 'activity', 'activity');
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
+  await page.type('vis');
+  let s = await page.until((x) => x.sections[0].rows.length === 2, 'the filter');
+  assert.deepEqual([s.sections[0].rows, s.handles], [[C, B], 2], 'the filter hides two cards; the grip stays on the others');
   await page.key(C, 'ArrowDown');
-  await sleep(300);
-  s = await page.sample();
-  assert.deepEqual([s.sections[0].rows, s.handles, orderCalls().length], [[B, D, C, A], 0, 0], 'inert in activity mode');
-  fake.snapshot = snapshotOf(manualRows(), { order: { mode: 'manual' } });
-  s = await page.until((x) => x.mode === 'manual', 'manual from the snapshot');
-  await page.type('ranked');
-  s = await page.until((x) => x.sections[0].rows.length === 2, 'the filter');
-  assert.deepEqual([s.sections[0].rows, s.handles], [[B, A], 0], 'a filter: no handles');
-  await page.key(B, 'ArrowDown');
-  await sleep(300);
-  assert.equal(orderCalls().length, 0, 'a filter: the keys do nothing');
+  await page.until(() => locksCalls().length === 1, 'the POST');
+  assert.deepEqual(locksCalls()[0], { set: { [C]: 3 }, move: {}, clear: [] }, 'past B, the next card shown, and past the hidden card between them: the last place of the whole list');
   await page.type('');
-  s = await page.until((x) => x.sections[0].rows.length === 4 && x.handles === 4, 'the filter cleared');
-  await page.key(C, 'ArrowDown');
-  await page.until(() => orderCalls().length === 1, 'moving works again');
+  s = await page.until((x) => x.sections[0].rows.length === 4, 'the filter cleared');
+  assert.deepEqual(s.sections[0].rows, [D, A, B, C]);
+  fake.snapshot = snapshotOf(boardRows({ [A]: { lockSlot: 9 }, [B]: { lockSlot: 7 } }), auto);
+  s = await page.until((x) => x.locked.length === 2 && x.sections[0].rows[3] === A, 'two locks past the end');
+  assert.deepEqual(s.sections[0].rows, [D, C, B, A], 'both at the end, the lower slot first; the free cards fill the places before them');
+  await page.close();
+});
+
+async function openWebviewPage(snapshot) {
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'http://127.0.0.1:' + PORT + '/?webview=1' });
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+  await cdp.send('Runtime.enable', {}, sessionId);
+  const ev = async (expr) => {
+    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, sessionId);
+    if (r.exceptionDetails) throw new Error('page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
+    return r.result.value;
+  };
+  const page = {
+    sample: () => ev(SAMPLE),
+    click: (sel) => ev('(function () { var e = document.querySelector(' + JSON.stringify(sel) + '); if (!e) throw new Error("no element " + ' + JSON.stringify(sel) + '); e.click(); return true; })()'),
+    host: (msg) => ev('window.postMessage(' + JSON.stringify(msg) + ', "*"); true'),   // what the extension host would post to the webview
+    until: async (pred, what) => {
+      const start = Date.now();
+      let s = null;
+      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
+      throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
+    },
+    close: () => cdp.send('Target.closeTarget', { targetId }),
+  };
+  await page.until((s) => Array.isArray(s.posted) && s.posted.some((m) => m.type === 'refresh'), 'the webview page to ask for a snapshot');
+  await page.host({ type: 'snapshot', data: snapshot });
+  await page.until((s) => s.sections.length > 0, 'the snapshot to render');
+  return page;
+}
+
+test('page (webview): the lock button posts a locks message with a seq; a failed locksResult for that seq frees the card and shows the notice; a good one holds until the snapshot agrees', opts, async () => {
+  const page = await openWebviewPage(snapshotOf(boardRows(), auto));
+  const locksPosted = (s) => s.posted.filter((m) => m.type === 'locks');
+  await page.click(rowSel(A) + ' .lockbtn');
+  let s = await page.until((x) => locksPosted(x).length === 1, 'the locks message');
+  assert.deepEqual(locksPosted(s)[0], { type: 'locks', set: { [A]: 2 }, move: {}, clear: [], seq: 1 });
+  assert.deepEqual(s.locked, [A], 'locked at once');
+  await page.host({ type: 'locksResult', ok: false, seq: 1, message: 'EACCES: permission denied' });
+  s = await page.until((x) => x.notice !== null, 'the notice');
+  assert.deepEqual([s.notice, s.locked], ['lock failed: EACCES: permission denied', []], 'the reply reached the page over the message path');
+  await page.click(rowSel(A) + ' .lockbtn');
+  s = await page.until((x) => locksPosted(x).length === 2, 'the second message');
+  assert.equal(locksPosted(s)[1].seq, 2);
+  await page.host({ type: 'locksResult', ok: true, seq: 2, message: '' });
+  await page.host({ type: 'snapshot', data: snapshotOf(boardRows(), auto) });   // a snapshot from before the write
+  await sleep(200);
+  s = await page.sample();
+  assert.deepEqual(s.locked, [A], 'held under a snapshot that does not know the lock yet');
+  await page.host({ type: 'snapshot', data: snapshotOf(boardRows({ [A]: { lockSlot: 2 } }), auto) });
+  await sleep(200);
+  s = await page.sample();
+  assert.deepEqual([s.locked, s.sections[0].rows], [[A], [D, C, A, B]]);
+  assert.equal(s.posted.some((m) => m.type === 'order' || m.type === 'sortMode'), false, 'the retired messages are never sent');
   await page.close();
 });
 
