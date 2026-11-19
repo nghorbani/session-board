@@ -687,7 +687,7 @@ function createStepIndex(file, deps) {
      record a caller kept from an earlier look (its `generation` is checked first, so a step
      held across a poll that started a new generation is caught even if the file happens to
      reuse the same uuid and block index, which a bare id string could not tell apart). */
-  function body(stepId, whole) {
+  function body(stepId, whole, noResult) {
     const heldGeneration = stepId && typeof stepId === 'object' ? stepId.generation : undefined;
     const id = stepId && typeof stepId === 'object' ? stepId.id : stepId;
     if (heldGeneration !== undefined && heldGeneration !== generation) return { stale: true };
@@ -714,7 +714,10 @@ function createStepIndex(file, deps) {
     if (step.kind === 'tool') {
       const input = (b && b.input) || {};
       const inputSummary = summary(step.title, input);
-      const out = { title: step.title, input: inputSummary, result: toolResultFor(step.toolUseId) };
+      // `noResult` leaves the result unread (exportBody below): an export words its Work
+      // lines from the call alone, and a result is a line of its own, megabytes at times
+      const out = { title: step.title, input: inputSummary };
+      if (!noResult) out.result = toolResultFor(step.toolUseId);
       if (step.title === 'Edit' || step.title === 'Write' || step.title === 'Read') out.path = String(input.file_path || '');
       return out;
     }
@@ -782,6 +785,8 @@ function createStepIndex(file, deps) {
     poll,
     steps() { return path.slice(); },
     body(stepId) { return body(stepId); },   // callers get the cut body; the whole text is fullText's
+    // what an export of the story takes: the whole text of a step, a tool call without its result
+    exportBody(stepId) { return body(stepId, true, true); },
     fullText,
     counts,
     sourceRanges,

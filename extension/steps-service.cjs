@@ -316,7 +316,9 @@ function createStepsService(deps) {
      sections near the viewport), instead of one body message per step. Each entry carries its
      own stepId/generation pair the same way a single body request does, and a step this
      session's index no longer holds (closed, re-indexed) answers { stale: true } like body()
-     does, never a thrown error that would drop the rest of the batch. */
+     does, never a thrown error that would drop the rest of the batch. With `forExport` the
+     page is writing the story out: every text comes whole, past the 200 KB a row shows, and
+     a tool call comes without its result, which no export prints. */
   async function handleBodies(msg) {
     const sessionId = String(msg.sessionId || '');
     const s = sessions.get(sessionId);
@@ -325,7 +327,7 @@ function createStepsService(deps) {
     const items = stepIds.map((stepId) => {
       if (!s || !s.index) return Object.assign({ stepId, stale: true });
       const held = generation !== undefined ? { id: stepId, generation } : stepId;
-      return Object.assign({ stepId }, s.index.body(held));
+      return Object.assign({ stepId }, msg.forExport ? s.index.exportBody(held) : s.index.body(held));
     });
     return { type: 'bodiesResult', sessionId, generation, items };
   }

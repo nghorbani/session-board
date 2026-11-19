@@ -12,6 +12,7 @@
 - Notes: write a note on any step. "Keep note" stores it; "Send to session" puts it into that session's chat box, with a line saying which step it is about, and onto the clipboard; "Send all notes" hands over every kept note as one message, in the order of their steps. Notes are kept per session under `%LOCALAPPDATA%\SessionBoard\notes` and go when the session's transcript is gone
 - "Send to session" needs Claude Code 2.1.322 or newer in the window that owns the session, and a board 0.12.0 or newer there when it is another window; otherwise the text is on the clipboard and the session opens
 - Subagent calls show the task and the report the subagent sent back, as formatted text; their inner steps are not shown
+- Export: the Steps tab saves the story of the view you are in as Markdown or as a PDF. Every text is written whole and tool results are left out. The PDF is the story as the tab draws it, printed by Chrome, Edge or Chromium on your machine; without one, the story is saved as an .html page and opened in your browser to print from there
 - Browser page: `/steps?session=<id>`, `POST /api/steps` (JSON body, 64 KB at most) and `GET /api/steps/poll`. Sending to a session copies the text there
 
 ## 0.11.3

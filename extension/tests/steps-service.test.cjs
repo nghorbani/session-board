@@ -199,6 +199,31 @@ test('bodies: one round trip loads the texts of several steps at once', async ()
   assert.equal(res.items[2].text, 'second message');
 });
 
+test('bodies for an export: whole texts past the 200 KB cut, tool calls without their results', async () => {
+  const file = newFile();
+  const huge = 'y'.repeat(250 * 1024) + ' the very end';
+  writeLines(file, [
+    userLine(uuid(1), null, 'first message'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: huge }]),
+    assistantLine(uuid(3), uuid(2), 'm2', [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'ls', description: 'list' } }]),
+    toolResultLine(uuid(4), uuid(3), 'b1', 'a.txt'),
+  ]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const ids = opened.steps.map((s) => s.id);
+  const shown = await svc.handle({ type: 'bodies', sessionId: A, stepIds: ids, generation: opened.generation });
+  const forExport = await svc.handle({ type: 'bodies', sessionId: A, stepIds: ids, generation: opened.generation, forExport: true });
+  const textAt = opened.steps.findIndex((s) => s.kind === 'text');
+  const toolAt = opened.steps.findIndex((s) => s.kind === 'tool');
+  assert.equal(shown.items[textAt].truncated, true);
+  assert.deepEqual([forExport.items[textAt].truncated, forExport.items[textAt].text.length], [false, huge.length]);
+  assert.equal(shown.items[toolAt].result, 'a.txt');
+  assert.equal('result' in forExport.items[toolAt], false);
+  assert.ok(forExport.items[toolAt].input, 'the command is still there');
+});
+
 test('bodies: a step from a generation that no longer exists answers stale, not a throw, and does not drop the rest of the batch', async () => {
   const file = newFile();
   writeLines(file, [userLine(uuid(1), null, 'hello'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'reply' }])]);

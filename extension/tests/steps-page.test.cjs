@@ -185,7 +185,7 @@ async function serve(req, res) {
       return json(res, 200, Object.assign({ requestId: msg.requestId }, base, { notes }));
     }
     if (msg.type === 'body') return json(res, 200, Object.assign({ type: 'bodyResult', sessionId: msg.sessionId, stepId: msg.stepId }, fake.body(msg.stepId)));
-    if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: await fake.bodies(msg.stepIds || []) });
+    if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: await fake.bodies(msg.stepIds || [], msg) });
     if (msg.type === 'search') return json(res, 200, Object.assign({ type: 'searchResult', requestId: msg.requestId, query: msg.query }, await fake.search(msg.query)));
     if (msg.type === 'seen') return json(res, 200, Object.assign({ type: 'seenResult' }, fake.seen(msg.stepId)));
     if (msg.type === 'openLink') return json(res, 200, { type: 'openLinkResult', ok: false, notAvailable: true });
@@ -1332,6 +1332,192 @@ test('page: under Decisions a session of long sections is measured by what Decis
   assert.equal(v.spacerInView, false, 'no empty stretch in the viewport at the end');
   await page.close();
 }, { timeout: 60000 });
+
+// -- export ----------------------------------------------------------------------------------
+
+const LONG_TEXT = 'A long answer. '.repeat(40);
+
+/* A story longer than the reader draws (30 turns of 20 texts in front), ending in a turn with
+   a text that the page shows cut, a Work line, an answered question, a plan and its approval,
+   and one note. Bodies are served the way the service serves them: for an export every text
+   comes whole and a tool call comes without its result. */
+function exportFixture() {
+  const steps = [];
+  const sections = [section('lead', 'Session start', null, [])];
+  for (let i = 0; i < 30; i++) {
+    const you = 'u' + i + ':0';
+    steps.push(step(you, 'you'));
+    const body = [];
+    for (let j = 0; j < 20; j++) {
+      const id = 't' + i + 'x' + j + ':0';
+      steps.push(step(id, 'text', { preview: 'text ' + j + ' of turn ' + i }));
+      body.push({ kind: 'text', stepId: id });
+    }
+    sections.push(section('you', 'turn ' + i, you, body));
+  }
+  steps.push(step('u30:0', 'you'), step('x1:0', 'text'), step('e1:0', 'tool', { title: 'Edit' }), step('b1:0', 'tool', { title: 'Bash' }),
+    step('r1:0', 'reasoning', { durationMs: 3000 }), step('q1:0', 'question'), step('x2:0', 'text'), step('p1:0', 'plan', { approved: true }), step('x3:0', 'text'));
+  sections.push(section('you', 'plan and build', 'u30:0', [{ kind: 'text', stepId: 'x1:0' }, { kind: 'work', items: ['e1:0', 'b1:0', 'r1:0'] }], { activeTimeMs: 120000, toolCalls: 2, filesChanged: 1 }));
+  sections.push(section('question', 'Option A', 'q1:0', [{ kind: 'text', stepId: 'x2:0' }, { kind: 'plan', stepId: 'p1:0' }]));
+  sections.push(section('approve', 'Plan approved', 'p1:0', [{ kind: 'text', stepId: 'x3:0' }]));
+  fake.open = () => openReply({ steps, sections, strip: { activeTimeMs: 3600000, sections: sections.length, decisions: 33, filesChanged: 1 } });
+  const bodyOf = (id, forExport) => {
+    if (id === 'x1:0') return forExport ? { text: LONG_TEXT + 'END OF THE LONG ANSWER', truncated: false, size: LONG_TEXT.length + 22 } : { text: LONG_TEXT.slice(0, 80), truncated: true, size: LONG_TEXT.length + 22 };
+    if (id === 'e1:0') return Object.assign({ title: 'Edit', input: 'C:/proj/a.txt', path: 'C:/proj/a.txt' }, forExport ? {} : { result: 'the file was changed' });
+    if (id === 'b1:0') return Object.assign({ title: 'Bash', input: '$ npm test' }, forExport ? {} : { result: 'all green' });
+    if (id === 'q1:0') return { questions: [{ header: 'Approach', question: 'Which way should we go?', multiSelect: false, answered: true,
+      options: [{ label: 'Option A', description: 'the simple route', chosen: true }, { label: 'Option B', description: 'the thorough route', chosen: false }] }] };
+    if (id === 'p1:0') return { text: '# The plan\n\n1. do it', approved: true, truncated: false, size: 20 };
+    if (id === 'x2:0') return { text: '## Result\n\nSee https://example.com/doc and `C:/proj/a.txt`.\n\n```\n# not a heading\n```', truncated: false, size: 80 };
+    return { text: 'body of ' + id, truncated: false, size: 10 };
+  };
+  fake.bodies = (ids, msg) => ids.map((id) => Object.assign({ stepId: id }, bodyOf(id, Boolean(msg && msg.forExport))));
+  fake.notes.set('n1', { id: 'n1', stepId: 'x2:0', at: 1, text: 'check this claim', sent: [] });
+  return sections;
+}
+
+/** Opens the fixture and catches what the page would download or print. */
+async function exportPage() {
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 33 && x.rowsInView > 0, 'first paint, at the end');
+  await page.eval('window.__saved = []; saveInBrowser = function (name, text) { window.__saved.push({ name: name, text: text }); };'
+    + ' window.__printed = []; window.__printCalls = 0;'
+    + ' window.open = function () { return { document: { open: function () {}, write: function (h) { window.__printed.push(h); }, close: function () {} }, focus: function () {}, print: function () { window.__printCalls += 1; }, close: function () {} }; }; true');
+  page.exportAs = async (format) => {
+    const before = await page.eval('window.__saved.length + window.__printed.length');
+    await page.click('#exportBtn');
+    await page.click('#exportMenu [data-export="' + format + '"]');
+    for (let i = 0; i < 200; i++) { if ((await page.eval('window.__saved.length + window.__printed.length')) > before) break; await sleep(50); }
+    return page.eval(format === 'pdf' ? 'window.__printed[window.__printed.length - 1]' : 'window.__saved[window.__saved.length - 1]');
+  };
+  return page;
+}
+
+test('page: Export as Markdown writes out the whole story, also the sections the reader has not drawn, with every text whole', opts, async () => {
+  exportFixture();
+  const page = await exportPage();
+  // the reader holds the cut text of the long answer, as it shows it
+  await page.eval('(function () { document.getElementById("step-x1:0").scrollIntoView(); document.getElementById("reader").dispatchEvent(new Event("scroll")); return true; })()');
+  for (let i = 0; i < 100 && !(await page.eval('Boolean(state.bodies["x1:0"])')); i++) await sleep(50);
+  const saved = await page.exportAs('md');
+  assert.ok(saved, 'a file was handed to the browser');
+  assert.equal(saved.name, 'Fixture session.md');
+  const text = saved.text;
+  assert.ok(text.indexOf('# Fixture session\n') === 0, 'the title heads the file');
+  assert.ok(/the whole story/.test(text.split('\n')[2]), 'the line under the title says what the file holds: ' + text.split('\n')[2]);
+  assert.equal(text.split('\n').filter((l) => /^## /.test(l)).length, 33, 'one heading per section that holds something (the empty start of the session has none)');
+  assert.ok(text.indexOf('body of t0x0:0') !== -1, 'a text of the first turn, far from what the reader drew');
+  assert.ok(text.indexOf('END OF THE LONG ANSWER') !== -1, 'a text the page shows cut is written whole');
+  assert.ok(text.indexOf('> body of u30:0') !== -1, 'your message, quoted');
+  assert.ok(text.indexOf('Edited a.txt, ran a command ($ npm test)') !== -1, 'the Work line in words');
+  assert.ok(text.indexOf('2m · 2 tool calls · 1 file changed') !== -1, 'the facts line of the section');
+  assert.ok(text.indexOf('- [x] **Option A** (your choice): the simple route') !== -1 && text.indexOf('- [ ] **Option B**: the thorough route') !== -1, 'the question as asked, your choice marked');
+  assert.ok(text.indexOf('\n#### Result\n') !== -1 && text.indexOf('\n### The plan\n') !== -1, 'headings inside a text are made smaller than the headings of the file');
+  assert.ok(text.indexOf('\n# not a heading\n') !== -1, 'a line inside a code block is left as it is');
+  assert.ok(text.indexOf('*You approved this plan.*') !== -1);
+  assert.ok(text.indexOf('> Note: check this claim') !== -1, 'the note under its step');
+  assert.equal(text.indexOf('~~~'), -1, 'no list of tool calls while Tool calls is off');
+  assert.equal(text.indexOf('all green'), -1, 'and never a tool result');
+  // what the export asked the service for
+  const asked = fake.calls.filter((m) => m && m.type === 'bodies' && m.forExport);
+  const ids = [].concat(...asked.map((m) => m.stepIds));
+  assert.ok(asked.length >= 2, 'the texts are collected in more than one request: ' + asked.length);
+  assert.ok(ids.indexOf('u0:0') !== -1 && ids.indexOf('t29x19:0') !== -1 && ids.indexOf('e1:0') !== -1);
+  assert.equal(ids.indexOf('r1:0'), -1, 'a reasoning step has no text to read');
+  assert.equal(new Set(ids).size, ids.length, 'no step is asked for twice');
+  // the reader still shows the cut text with its button: the export did not touch what the page holds
+  assert.equal(await page.eval('Boolean(state.bodies["x1:0"] && state.bodies["x1:0"].truncated)'), true);
+  // with Tool calls on, the calls are listed with what they ran
+  await page.click('#allTools');
+  const withTools = (await page.exportAs('md')).text;
+  assert.ok(withTools.indexOf('- `Bash`\n  ~~~\n  $ npm test\n  ~~~') !== -1, 'the call and its command: ' + withTools.slice(withTools.indexOf('Edited a.txt'), withTools.indexOf('Edited a.txt') + 300));
+  assert.equal(withTools.indexOf('all green'), -1, 'still no tool result');
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: under Decisions the export holds what Decisions shows: your messages, the questions and the plans', opts, async () => {
+  exportFixture();
+  const page = await exportPage();
+  await page.click('#decisions');
+  await page.until((x) => x.decisionsOn === true, 'the decisions view');
+  const saved = await page.exportAs('md');
+  assert.equal(saved.name, 'Fixture session (decisions).md');
+  const text = saved.text;
+  assert.ok(/decisions only/.test(text.split('\n')[2]), text.split('\n')[2]);
+  assert.equal(text.split('\n').filter((l) => /^## /.test(l)).length, 33, 'the sections Decisions lists, without the start of the session');
+  assert.ok(text.indexOf('> body of u0:0') !== -1 && text.indexOf('- [x] **Option A**') !== -1 && text.indexOf('### The plan') !== -1);
+  assert.equal(text.indexOf('body of t0x0:0'), -1, 'no text of Claude');
+  assert.equal(text.indexOf('Edited a.txt'), -1, 'no Work line');
+  const asked = [].concat(...fake.calls.filter((m) => m && m.type === 'bodies' && m.forExport).map((m) => m.stepIds));
+  assert.equal(asked.indexOf('t0x0:0'), -1, 'and the texts it leaves out are not read');
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: Export as PDF in a browser opens the story as a page of its own and prints it: every section, formatted, nothing to click and no script', opts, async () => {
+  const sections = exportFixture();
+  const page = await exportPage();
+  const html = await page.exportAs('pdf');
+  assert.ok(html, 'a page was written into the window that was opened');
+  assert.equal(await page.eval('window.__printCalls'), 1, 'and printed');
+  assert.ok(/^<!DOCTYPE html>\s*<html[^>]*class="export"/.test(html), html.slice(0, 120));
+  assert.equal((html.match(/data-sec-index="/g) || []).length, sections.length, 'every section is in the page');
+  assert.ok(html.indexOf('END OF THE LONG ANSWER') !== -1, 'with the texts whole');
+  assert.ok(html.indexOf('<title>Fixture session</title>') !== -1);
+  assert.equal(/<script/i.test(html), false, 'no script');
+  assert.equal(/<button/i.test(html), false, 'no button');
+  assert.equal(/<textarea|<input/i.test(html), false);
+  assert.ok(html.indexOf('<style>') !== -1 && html.indexOf('html.export') !== -1, 'it carries its own style, with the rules for paper');
+  assert.ok(/<a [^>]*href="https:\/\/example\.com\/doc"/.test(html), 'a web link stays a link');
+  assert.ok(/<a class="lnk code"[^>]*title="C:\/proj\/a\.txt"/.test(html) && !/href="#"/.test(html), 'a path is shown, and no link leads nowhere');
+  assert.ok(html.indexOf('class="qopt chosen"') !== -1 && html.indexOf('check this claim') !== -1, 'the question card and the note are there');
+  // the page parses back to what it shows: the rows of the last turns, drawn as in the tab
+  const rows = await page.eval('(function () { var d = new DOMParser().parseFromString(window.__printed[0], "text/html"); return { rows: d.querySelectorAll(".row").length, bold: d.querySelectorAll(".md .h").length, sub: (d.querySelector(".sub") || {}).textContent }; })()');
+  assert.ok(rows.rows > 600, 'rows in the page: ' + rows.rows);
+  assert.ok(rows.bold >= 2, 'headings inside the texts are rendered');
+  assert.ok(/the whole story/.test(rows.sub), rows.sub);
+  await page.close();
+}, { timeout: 60000 });
+
+test('page in the VS Code panel: Export hands the story to the host, which saves the Markdown where the dialog says and prints a real PDF', opts, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-export-'));
+  const file = path.join(dir, A + '.jsonl');
+  fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, LONG_ANSWER), rUser(3, 'and the rest?'), rText(4, 'All of it is done.')].map((l) => JSON.stringify(l) + '\n').join(''));
+  const { provider } = host.boot({
+    transcriptIndex: () => new Map([[A, file]]),
+    transcriptFacts: () => ({ tokens: null, title: 'Webview session', customTitle: null, lastPrompt: null }),
+  }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  fake.panel = host.vscode.__panels[0];
+  try {
+    const page = await openPage(A, '/steps-webview');
+    await page.until((x) => x.bodyTexts.some((t) => t.indexOf('All of it is done.') !== -1), 'the story');
+    const mdFile = path.join(dir, 'out.md');
+    host.vscode.__saveTarget = host.vscode.Uri.file(mdFile);
+    await page.click('#exportBtn');
+    await page.click('#exportMenu [data-export="md"]');
+    let s = await page.until((x) => x.notices.some((n) => n.indexOf('Saved ') === 0), 'the line that says where the file went');
+    assert.ok(s.notices.some((n) => n.indexOf(mdFile) !== -1), JSON.stringify(s.notices));
+    const text = fs.readFileSync(mdFile, 'utf8');
+    assert.ok(text.indexOf('# Webview session\n') === 0 && text.indexOf('That is the end of the answer.') !== -1 && text.indexOf('> and the rest?') !== -1, text.slice(0, 300));
+    assert.equal(path.basename(host.vscode.__saveDialogs[0].defaultUri.fsPath), 'Webview session.md');
+    // the PDF: the page's own rendering, printed by a browser of this machine
+    const pdfFile = path.join(dir, 'out.pdf');
+    host.vscode.__saveTarget = host.vscode.Uri.file(pdfFile);
+    const noticesBefore = s.notices.length;
+    await page.click('#exportBtn');
+    await page.click('#exportMenu [data-export="pdf"]');
+    s = await page.until((x) => x.notices.length > noticesBefore && x.notices.slice(noticesBefore).some((n) => n.indexOf('Saved ') === 0 || n.indexOf('failed') !== -1), 'the answer to the PDF export');
+    assert.ok(s.notices.slice(noticesBefore).some((n) => n.indexOf(pdfFile) !== -1), JSON.stringify(s.notices.slice(noticesBefore)));
+    const bytes = fs.readFileSync(pdfFile);
+    assert.equal(bytes.slice(0, 5).toString('latin1'), '%PDF-');
+    assert.ok(/\/Title\s*\(Webview session\)/.test(bytes.toString('latin1')), 'the PDF carries the title of the session');
+    await page.close();
+  } finally {
+    fake.panel.dispose();
+    fake.panel = null;
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+}, { timeout: 120000 });
 
 // -- narrow layout -------------------------------------------------------------------------
 

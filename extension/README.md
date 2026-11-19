@@ -185,6 +185,14 @@ are while it grows.
   is gone.
 - **Subagents** show the task they were given and the report they sent back, as formatted
   text. Their inner steps are not shown.
+- **Export** saves the story of the view you are in as **Markdown** or as a **PDF**: the
+  whole story, or what Decisions or Notes show of it, with the tool calls listed when **Tool
+  calls** is on. Every text is written whole; tool results are left out. The Markdown keeps
+  the texts as they were written, with your messages and notes quoted. The PDF is the story
+  as the tab draws it, printed by Chrome, Edge or Chromium on your machine (set the
+  environment variable `SESSION_BOARD_BROWSER` to name another Chromium-based browser).
+  Without one, the story is saved as an `.html` page and opened in your browser, to be
+  printed to PDF from there.
 
 What the story cannot show: Claude Code stores most reasoning as an empty block, so the Work
 line says "Thought for 18 s" and no more. The short updates between tool calls are stored in

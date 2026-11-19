@@ -11,7 +11,8 @@
     --you: #0b62c4; --plan: #7a3fc4; --err: #c0392b; --note: #b7791f; --hit: #b45309; --new: #1f8a52;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    /* an exported page is paper: it keeps the light colours whatever the reader's scheme */
+    :root:not(.export) {
       --bg: #1e1e1e; --fg: #d4d4d4; --dim: #8b8f98; --faint: #6a6e77; --line: #33363c;
       --panel: #252629; --rail: #202124; --accent: #4da3ff; --mark: #6b5a12;
       --you: #4da3ff; --plan: #b48cf2; --err: #f08a7c; --note: #e0b252; --hit: #e8b24d; --new: #5fcf96;
@@ -197,6 +198,29 @@
   .allnotes-bar.show { display: flex; }
   .allnotes-bar .n { color: var(--note); font-weight: 600; }
 
+  .export-wrap { position: relative; display: inline-flex; }
+  .export-menu { position: absolute; right: 0; top: 100%; margin-top: 3px; z-index: 6; display: flex; flex-direction: column; gap: 2px; padding: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: 5px; box-shadow: 0 6px 18px rgba(0,0,0,.25); white-space: nowrap; }
+  .export-menu[hidden] { display: none; }
+  .export-menu button { text-align: left; border-color: transparent; }
+
+  /* The story written out as a page of its own (the PDF export): the rows as the tab draws
+     them, on paper. Nothing scrolls, nothing is folded, long lines wrap. */
+  html.export, html.export body { height: auto; }
+  html.export body { display: block; padding: 0 4px; }
+  html.export h1 { font-size: 17px; }
+  html.export .sub { margin-bottom: 6px; }
+  html.export .reader { overflow: visible; padding: 0; }
+  html.export .reader-inner { max-width: none; }
+  html.export .you-msg.folded-you, html.export .report-body { max-height: none; overflow: visible; }
+  html.export .you-msg.folded-you::after, html.export .report-body::after { display: none; }
+  html.export pre.mdcode, html.export pre.fold { overflow: visible; max-height: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+  html.export .md table { display: table; }
+  html.export a.lnk { cursor: auto; }
+  html.export a.lnk:not([href]) { color: inherit; text-decoration: none; }   /* a path: text on paper, not a link */
+  html.export .sec-head { break-after: avoid; }
+  html.export .row .meta { break-after: avoid; }
+  @page { margin: 16mm 14mm; }
+
   @media (max-width: 760px) {
     header { padding: 8px 10px; }
     .bar input[type=search] { flex-basis: 100px; min-width: 70px; }
@@ -228,6 +252,13 @@
     <button id="decisions" title="Show only your messages, answered questions and approved plans">Decisions</button>
     <label class="sw" title="Show the tool calls under every Work line"><input type="checkbox" id="allTools"> Tool calls</label>
     <label class="sw" title="Stay at the end as new steps arrive"><input type="checkbox" id="follow" checked> Follow</label>
+    <span class="export-wrap">
+      <button id="exportBtn" title="Save the story of this view as a file" aria-haspopup="true" aria-expanded="false">Export</button>
+      <span class="export-menu" id="exportMenu" hidden>
+        <button data-export="md" title="The story as text, for an editor or a note">Markdown (.md)</button>
+        <button data-export="pdf" title="The story as this tab draws it, on pages">PDF (.pdf)</button>
+      </span>
+    </span>
   </div>
   <div class="strip" id="strip"></div>
 </header>
@@ -615,6 +646,7 @@ function linkNode(text, kind, target, code) {
   a.className = 'lnk' + (code ? ' code' : '');
   a.href = '#';
   a.title = target;
+  a.setAttribute('data-kind', kind);   // an export keeps a web link as a link and shows a path as text
   a.textContent = text;
   a.addEventListener('click', function (ev) {
     ev.preventDefault();
@@ -2259,6 +2291,322 @@ function closeDrawer() {
   document.getElementById('railCar').textContent = '▸';
 }
 document.getElementById('railToggle').addEventListener('click', toggleDrawer);
+
+// -- export: the story of the view in use, as Markdown or as a page for a PDF ---------------
+
+var EXPORT_BATCH = 120;   // steps asked for in one request while an export reads its texts
+
+/* The steps whose bodies an export of these sections reads: what the view in use draws of
+   them, each once. A reasoning step and a block of an unknown kind have no text to read. */
+function exportStepIds(secs) {
+  var seen = Object.create(null);
+  var ids = [];
+  function want(id) {
+    if (!id || seen[id]) return;
+    var c = state.compactById && state.compactById[id];
+    if (c && (c.kind === 'reasoning' || c.kind === 'other')) return;
+    seen[id] = true;
+    ids.push(id);
+  }
+  secs.forEach(function (sec) {
+    want(sec.openerId);
+    drawnBody(sec).forEach(function (row) {
+      if (row.items) row.items.forEach(want); else want(row.stepId);
+    });
+  });
+  return ids;
+}
+
+/* Reads the bodies an export needs, a batch at a time: every text whole, a tool call without
+   its result (forExport). They are kept apart from what the reader holds, which stays the
+   texts as it shows them. Rejects when the transcript changes under the export. */
+function collectExportBodies(ids, onProgress) {
+  var generation = state.generation;
+  var bodies = Object.create(null);
+  var at = 0;
+  function next() {
+    if (at >= ids.length) return Promise.resolve(bodies);
+    var batch = ids.slice(at, at + EXPORT_BATCH);
+    return call({ type: 'bodies', stepIds: batch, generation: generation, forExport: true }).then(function (reply) {
+      if (!reply || !Array.isArray(reply.items)) throw new Error((reply && reply.message) || 'the texts could not be read');
+      if (state.generation !== generation || reply.items.some(function (item) { return item.stale; })) {
+        throw new Error('the transcript changed while the texts were read; try again');
+      }
+      reply.items.forEach(function (item) { bodies[item.stepId] = item; });
+      at += batch.length;
+      onProgress(Math.min(at, ids.length), ids.length);
+      return next();
+    });
+  }
+  return next();
+}
+
+/* Runs fn with the page's state as an export wants it: the bodies read for the export, no
+   search highlight, no open note box. The builders of the rows read the state, so what they
+   build inside fn is the export's; the reader's own state is back when fn returns. */
+function withExportState(bodies, fn) {
+  var keep = { bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor };
+  state.bodies = bodies; state.query = ''; state.noteBoxFor = null;
+  try { return fn(); }
+  finally { state.bodies = keep.bodies; state.query = keep.query; state.noteBoxFor = keep.noteBoxFor; }
+}
+
+function exportName() {
+  return state.title + (state.lens === 'decisions' ? ' (decisions)' : state.lens === 'notes' ? ' (notes)' : '');
+}
+
+/* The line under the title of an export: which session, when, which view, how much. */
+function exportByline(secs) {
+  var d = new Date();
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  var parts = ['Session ' + SESSION_ID.slice(0, 8),
+    'exported ' + d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()),
+    state.lens === 'decisions' ? 'decisions only' : state.lens === 'notes' ? 'the sections with a note' : 'the whole story'];
+  if (state.strip && state.strip.activeTimeMs) parts.push(fmtDuration(state.strip.activeTimeMs) + ' active time');
+  parts.push(secs.length + (secs.length === 1 ? ' section' : ' sections'));
+  return parts.join(' · ');
+}
+
+/* The story as a page of its own, for the PDF: every section built by the builders the reader
+   uses, serialised with the page's own style sheet. What only works in the live tab is
+   taken out (buttons, the note box); a web link keeps its address, a path is shown as text.
+   The page holds no script. */
+function buildExportPage(secs, bodies) {
+  var doc = document.implementation.createHTMLDocument(state.title);
+  doc.documentElement.className = 'export';
+  doc.documentElement.setAttribute('lang', 'en');
+  var charset = doc.createElement('meta'); charset.setAttribute('charset', 'utf-8');
+  doc.head.insertBefore(charset, doc.head.firstChild);
+  var style = doc.createElement('style');
+  style.textContent = document.querySelector('style').textContent;
+  doc.head.appendChild(style);
+  var h1 = doc.createElement('h1'); h1.textContent = state.title; doc.body.appendChild(h1);
+  var sub = doc.createElement('div'); sub.className = 'sub'; sub.textContent = exportByline(secs); doc.body.appendChild(sub);
+  var main = doc.createElement('main'); main.className = 'reader';
+  var inner = doc.createElement('div'); inner.className = 'reader-inner';
+  withExportState(bodies, function () {
+    secs.forEach(function (sec, i) { inner.appendChild(buildSectionNode(sec, i, secs)); });
+  });
+  Array.prototype.forEach.call(inner.querySelectorAll('button, textarea, input, .notebox'), function (n) {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  });
+  Array.prototype.forEach.call(inner.querySelectorAll('a.lnk'), function (a) {
+    if (a.getAttribute('data-kind') === 'url' && /^https?:\/\//i.test(a.title)) a.setAttribute('href', a.title);
+    else a.removeAttribute('href');
+  });
+  main.appendChild(inner);
+  doc.body.appendChild(main);
+  return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+}
+
+function mdOneLine(s) { return String(s == null ? '' : s).replace(/\s*\n\s*/g, ' ').trim(); }
+
+function mdQuote(text) {
+  return String(text == null ? '' : text).split('\n').map(function (l) { return l ? '> ' + l : '>'; }).join('\n');
+}
+
+/* Headings inside a text are made two levels smaller, so the headings of the file itself (its
+   title and one per section) stay its outline. A line inside a code fence is left alone. */
+function mdDemote(text) {
+  var fenced = false;
+  return String(text == null ? '' : text).split('\n').map(function (l) {
+    if (/^\s*(```|~~~)/.test(l)) { fenced = !fenced; return l; }
+    if (fenced) return l;
+    var m = /^(#{1,6})(\s+.*)$/.exec(l);
+    return m ? new Array(Math.min(6, m[1].length + 2) + 1).join('#') + m[2] : l;
+  }).join('\n');
+}
+
+/* A text as it is, indented, in a fence it cannot close itself. */
+function mdFence(text, indent) {
+  text = String(text == null ? '' : text);
+  var fence = '~~~';
+  while (text.indexOf(fence) !== -1) fence += '~';
+  return [indent + fence].concat(text.split('\n').map(function (l) { return indent + l; }), [indent + fence]).join('\n');
+}
+
+/* The story as Markdown: the same sections and rows as the view in use, in the same words (the
+   labels, the Work lines, the facts lines), with the texts as they were written. Your own
+   messages and your notes are quoted. */
+function buildExportMarkdown(secs, bodies) {
+  return withExportState(bodies, function () {
+    var out = ['# ' + mdOneLine(state.title), '', exportByline(secs), ''];
+    var notes = notesByStep();
+    function compact(id) { return (state.compactById && state.compactById[id]) || null; }
+    function textOf(id) {
+      var b = state.bodies[id];
+      var c = compact(id);
+      return (b && typeof b.text === 'string') ? b.text : ((c && c.preview) || '');
+    }
+    function stamp(label, id) {
+      var c = compact(id);
+      var t = c ? fmtClockSec(c.at) : '';
+      return '**' + label + (t ? ' · ' + t : '') + '**';
+    }
+    function note(id) { if (notes[id]) out.push(mdQuote('Note: ' + notes[id].text), ''); }
+    function question(id) {
+      var b = state.bodies[id];
+      ((b && b.questions) || []).forEach(function (q) {
+        if (q.header) out.push('*' + mdOneLine(q.header) + '*', '');
+        out.push(mdDemote(q.question || ''), '');
+        (q.options || []).forEach(function (o) {
+          out.push('- [' + (o.chosen ? 'x' : ' ') + '] **' + mdOneLine(o.label) + '**' + (o.chosen ? ' (your choice)' : '')
+            + (o.description ? ': ' + mdOneLine(o.description) : ''));
+        });
+        if ((q.options || []).length) out.push('');
+        if (q.other) out.push('Your own answer:', '', mdQuote(q.other), '');
+        if (!q.answered) out.push('*Not answered yet.*', '');
+      });
+    }
+    function work(row) {
+      var first = row.items[0];
+      out.push(stamp('Work', first) + ' ' + summarizeWork(row.items), '');
+      var files = filesTouchedIn(row.items);
+      if (files.length) {
+        out.push('Files touched:', '');
+        files.forEach(function (f) { out.push('- ' + f.kind + ': `' + f.path + '`'); });
+        out.push('');
+      }
+      row.items.forEach(function (id) {
+        var c = compact(id);
+        if (!c || c.kind !== 'subagent') return;
+        var b = state.bodies[id];
+        out.push('Subagent' + (c.title ? ' (' + mdOneLine(c.title) + ')' : '') + ': ' + mdOneLine((b && b.description) || c.preview || ''), '');
+        if (b && b.report) out.push(mdQuote(mdDemote(b.report)), '');
+      });
+      // the calls of a Work line are listed when the view lists them: Tool calls on, or this line opened
+      if (state.showAllTools || state.openWork['g-' + first]) {
+        var tools = row.items.filter(function (id) { var c = compact(id); return c && c.kind === 'tool'; });
+        tools.forEach(function (id) {
+          var c = compact(id);
+          var b = state.bodies[id];
+          out.push('- `' + mdOneLine(c.title || 'tool') + '`');
+          var input = (b && b.input) || c.preview || '';
+          if (input) out.push(mdFence(input, '  '));
+        });
+        if (tools.length) out.push('');
+      }
+      note(first);
+    }
+    secs.forEach(function (sec) {
+      var rows = drawnBody(sec);
+      if (sec.kind === 'lead' && !rows.length) return;   // nothing happened before your first message
+      var title = sectionLabel(sec);
+      if (sec.kind !== 'lead') title += ' · ' + fmtClock(sec.at) + (sec.heading ? ' · ' + mdOneLine(sec.heading) : '');
+      out.push('## ' + title, '');
+      if (sec.kind === 'you') out.push(mdQuote(textOf(sec.openerId)), '');
+      if (sec.kind === 'question') question(sec.openerId);
+      if (sec.openerId) note(sec.openerId);
+      rows.forEach(function (row) {
+        if (row.kind === 'work') { work(row); return; }
+        if (row.kind === 'interrupted') { out.push('*Interrupted*', ''); return; }
+        if (row.kind === 'question') {
+          out.push(stamp('Question and answer', row.stepId), '');
+          question(row.stepId);
+        } else if (row.kind === 'plan') {
+          out.push(stamp('Plan', row.stepId), '', mdDemote(textOf(row.stepId)), '');
+          var plan = compact(row.stepId);
+          if (plan && plan.approved) out.push('*You approved this plan.*', '');
+        } else {
+          var c = compact(row.stepId);
+          out.push(stamp(chipTextFor(c ? c.kind : row.kind), row.stepId), '', mdDemote(textOf(row.stepId)), '');
+        }
+        note(row.stepId);
+      });
+      var facts = state.lens === 'decisions' ? '' : sectionFacts(sec);
+      if (facts) out.push('*' + facts + '*', '');
+    });
+    return out.join('\n');
+  });
+}
+
+/* What a browser does with an exported file: it downloads it. */
+function saveInBrowser(name, text, type) {
+  var url = URL.createObjectURL(new Blob([text], { type: type }));
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+/* Hands the export over; resolves the line the page then shows. In VS Code the host asks
+   where to save and writes the file (a PDF is printed there by a browser of the machine).
+   A browser downloads the Markdown, and prints the page itself: the story opens in a tab
+   of its own with the print dialog, where "Save as PDF" is one of the printers. */
+function deliverExport(format, content, printWindow) {
+  var name = exportName();
+  if (vsapi) {
+    return call({ type: 'exportSave', format: format, name: name, content: content }).then(function (reply) {
+      if (reply && reply.cancelled) return 'Export cancelled.';
+      if (!reply || !reply.ok) throw new Error((reply && reply.message) || 'the file could not be saved');
+      return reply.message || 'Exported.';
+    });
+  }
+  if (format === 'md') {
+    saveInBrowser(name + '.md', content, 'text/markdown');
+    return Promise.resolve('Downloaded ' + name + '.md');
+  }
+  if (!printWindow) throw new Error('the browser did not open a window to print from');
+  printWindow.document.open();
+  printWindow.document.write(content);
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.print();
+  return Promise.resolve('The story is open in a tab of its own: choose "Save as PDF" in its print dialog.');
+}
+
+function setExportBusy(busy) {
+  var btn = document.getElementById('exportBtn');
+  btn.disabled = busy;
+  btn.textContent = busy ? 'Exporting…' : 'Export';
+}
+
+/* Export of the view in use: the whole story, or what Decisions or Notes show of it, with the
+   calls of the Work lines when Tool calls is on. */
+function runExport(format) {
+  if (state.exporting) return;
+  var secs = state.loaded ? visibleSections() : [];
+  if (!secs.length) { flashNotice('There is nothing to export in this view.'); return; }
+  // A browser lets a page open a window only while it handles a click, so the window the PDF
+  // is printed from is opened now and filled once the story is read.
+  var printWindow = (!vsapi && format === 'pdf') ? window.open('', '_blank') : null;
+  state.exporting = true;
+  setExportBusy(true);
+  var ids = exportStepIds(secs);
+  flashNotice('Export: reading the texts of ' + ids.length + ' steps');
+  collectExportBodies(ids, function (done, total) {
+    flashNotice('Export: read ' + done + ' of ' + total + ' steps');
+  }).then(function (bodies) {
+    var content = format === 'pdf' ? buildExportPage(secs, bodies) : buildExportMarkdown(secs, bodies);
+    return deliverExport(format, content, printWindow);
+  }).then(function (message) {
+    flashNotice(message);
+  }, function (e) {
+    if (printWindow) { try { printWindow.close(); } catch (_) { /* closed already */ } }
+    flashNotice('The export failed: ' + ((e && e.message) || e));
+  }).then(function () {
+    state.exporting = false;
+    setExportBusy(false);
+  });
+}
+
+(function () {
+  var btn = document.getElementById('exportBtn');
+  var menu = document.getElementById('exportMenu');
+  function show(open) { menu.hidden = !open; btn.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+  btn.addEventListener('click', function (ev) { ev.stopPropagation(); show(menu.hidden); });
+  menu.addEventListener('click', function (ev) {
+    var format = ev.target && ev.target.getAttribute ? ev.target.getAttribute('data-export') : null;
+    if (!format) return;
+    show(false);
+    runExport(format);
+  });
+  document.addEventListener('click', function (ev) { if (!menu.hidden && !menu.contains(ev.target)) show(false); });
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && !menu.hidden) { show(false); btn.focus(); } });
+})();
 
 // -- boot --------------------------------------------------------------------------------
 

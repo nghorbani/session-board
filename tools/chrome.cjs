@@ -14,17 +14,11 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 
+const { findBrowser } = require('../extension/pdf.cjs');
+
+/** Where the browser is: the same search the extension makes for its PDF export. */
 function browser() {
-  const candidates = [
-    process.env.SCREENSHOT_BROWSER,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ].filter(Boolean);
-  const hit = candidates.find((p) => fs.existsSync(p));
+  const hit = findBrowser();
   if (!hit) throw new Error('no Chromium browser found; set SCREENSHOT_BROWSER');
   return hit;
 }

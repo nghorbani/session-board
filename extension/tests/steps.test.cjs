@@ -561,6 +561,28 @@ test('a body over 200 KB is truncated with the total size reported', async () =>
   assert.equal(b.size, huge.length);
 });
 
+test('the body of a step for an export is its whole text, and a tool call comes without its result', async () => {
+  const file = newFile();
+  const huge = 'y'.repeat(250 * 1024) + ' the very end';
+  writeLines(file, [
+    userLine(uuid(1), null, 'hi'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: huge }]),
+    assistantLine(uuid(3), uuid(2), 'm2', [{ type: 'tool_use', id: 'e1', name: 'Edit', input: { file_path: 'C:/proj/a.txt' } }]),
+    toolResultLine(uuid(4), uuid(3), 'e1', 'the file was changed'),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const text = idx.steps().find((x) => x.kind === 'text');
+  const tool = idx.steps().find((x) => x.kind === 'tool');
+  const whole = idx.exportBody(text.id);
+  assert.deepEqual([whole.truncated, whole.text.length], [false, huge.length]);
+  assert.ok(whole.text.endsWith(' the very end'));
+  assert.equal(idx.body(tool.id).result, 'the file was changed', 'the body the page shows carries the result');
+  const call = idx.exportBody(tool.id);
+  assert.deepEqual([call.title, call.path, 'result' in call], ['Edit', 'C:/proj/a.txt', false], 'what a Work line is worded from, and no result');
+  assert.equal(idx.exportBody('no-such:0').stale, true);
+});
+
 test('the full text of a step is its whole text, past the 200 KB a body shows: a text, a plan, a message of the owner', async () => {
   const file = newFile();
   const tail = ' and this is the very end';

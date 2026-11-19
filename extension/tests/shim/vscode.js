@@ -55,6 +55,8 @@ const api = {
   __openedExternal: [], // every vscode.env.openExternal(uri) call
   __openedDocs: [],     // every vscode.workspace.openTextDocument(...) call
   __shownDocs: [],      // every vscode.window.showTextDocument(doc) call
+  __saveDialogs: [],    // the options of every vscode.window.showSaveDialog call
+  __saveTarget: undefined,   // what showSaveDialog resolves to (undefined = cancelled)
   __statRejects: Object.create(null),   // fsPath -> error, so a test can make workspace.fs.stat fail for a path
   __statTypes: Object.create(null),     // fsPath -> FileType (default: File) for a path that should stat ok
   __statCalls: [],                      // every fsPath workspace.fs.stat was asked about, in order
@@ -75,6 +77,9 @@ const api = {
     api.__openedExternal.length = 0;
     api.__openedDocs.length = 0;
     api.__shownDocs.length = 0;
+    api.__saveDialogs.length = 0;
+    api.__saveTarget = undefined;
+    api.workspace.workspaceFolders = [];
     for (const k of Object.keys(api.__statRejects)) delete api.__statRejects[k];
     for (const k of Object.keys(api.__statTypes)) delete api.__statTypes[k];
     api.__statCalls.length = 0;
@@ -110,6 +115,7 @@ const api = {
       return panel;
     },
     showTextDocument: async (doc) => { api.__shownDocs.push(doc); return {}; },
+    showSaveDialog: async (opts) => { api.__saveDialogs.push(opts); return api.__saveTarget; },
   },
   commands: {
     registerCommand: (id, fn) => { api.__commands[id] = fn; return disposable(); },

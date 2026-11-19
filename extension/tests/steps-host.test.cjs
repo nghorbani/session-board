@@ -407,6 +407,89 @@ test('openLink and openText sent from the panel are answered by the host, not fo
   assert.ok(panel.__posted.some((m) => m.type === 'openTextResult'));
 });
 
+// -- export ------------------------------------------------------------------------------
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+/** A panel for session A with a scripted PDF printer; `answer(requestId)` waits for a reply. */
+async function exportPanel(printer) {
+  const { provider } = boot({}, { last: last() });
+  provider.stepsService = fakeService();
+  if (printer) provider.htmlToPdf = printer;
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  const panel = vscode.__panels[0];
+  const answer = async (requestId) => {
+    for (let i = 0; i < 100 && !panel.__posted.some((m) => m.requestId === requestId); i++) await new Promise((r) => setTimeout(r, 5));
+    return panel.__posted.find((m) => m.requestId === requestId);
+  };
+  return { provider, panel, answer, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'sb-export-host-')) };
+}
+const STORY_PAGE = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Story</title></head><body><p>the story</p></body></html>';
+
+test('exportSave as Markdown asks where to save, with a name made from the title, and writes the text there', async () => {
+  const { panel, answer, dir } = await exportPanel();
+  vscode.workspace.workspaceFolders = [{ uri: { fsPath: dir } }];
+  const target = path.join(dir, 'chosen.md');
+  vscode.__saveTarget = vscode.Uri.file(target);
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e1', format: 'md', name: 'Fix: the "upload" test? <now>', content: '# The story\n\ntext' });
+  const reply = await answer('e1');
+  assert.deepEqual([reply.type, reply.ok], ['exportSaveResult', true]);
+  assert.ok(reply.message.indexOf(target) !== -1, 'the reply names the file: ' + reply.message);
+  assert.equal(fs.readFileSync(target, 'utf8'), '# The story\n\ntext');
+  const asked = vscode.__saveDialogs[0];
+  assert.equal(path.dirname(asked.defaultUri.fsPath), dir, 'the dialog starts in the workspace folder');
+  assert.equal(path.basename(asked.defaultUri.fsPath), 'Fix the upload test now.md', 'a file name without the characters a file name cannot hold');
+  assert.deepEqual(asked.filters, { Markdown: ['md'] });
+});
+
+test('exportSave with the dialog cancelled writes nothing and says so without a message', async () => {
+  const { panel, answer, dir } = await exportPanel(async () => { throw new Error('must not print'); });
+  vscode.__saveTarget = undefined;
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e1', format: 'pdf', name: 'Story', content: STORY_PAGE });
+  const reply = await answer('e1');
+  assert.deepEqual([reply.ok, reply.cancelled, reply.message], [false, true, undefined]);
+  assert.deepEqual(fs.readdirSync(dir), []);
+  // nothing to export is refused before any dialog
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e2', format: 'md', name: 'Story', content: '' });
+  assert.equal((await answer('e2')).ok, false);
+  assert.equal(vscode.__saveDialogs.length, 1);
+});
+
+test('exportSave as PDF hands the page to the printer with the chosen file, and passes a failed print on', async () => {
+  const printed = [];
+  let outcome = { ok: true };
+  const { panel, answer, dir } = await exportPanel(async (html, outFile) => { printed.push([html, outFile]); return outcome; });
+  const target = path.join(dir, 'story.pdf');
+  vscode.__saveTarget = vscode.Uri.file(target);
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e1', format: 'pdf', name: 'Story', content: STORY_PAGE });
+  const reply = await answer('e1');
+  assert.equal(reply.ok, true);
+  assert.deepEqual(printed, [[STORY_PAGE, target]]);
+  assert.deepEqual(vscode.__saveDialogs[0].filters, { PDF: ['pdf'] });
+  outcome = { ok: false, message: 'The browser wrote no PDF: it did not finish within 120 s.' };
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e2', format: 'pdf', name: 'Story', content: STORY_PAGE });
+  const failed = await answer('e2');
+  assert.deepEqual([failed.ok, failed.message], [false, 'The browser wrote no PDF: it did not finish within 120 s.']);
+});
+
+test('exportSave as PDF on a machine without a browser to print with saves the page itself, sealed, and opens it in the default browser', async () => {
+  const { panel, answer, dir } = await exportPanel(async () => ({ ok: false, noBrowser: true, message: 'No Chrome, Edge or Chromium was found to print the PDF with.' }));
+  const target = path.join(dir, 'story.pdf');
+  vscode.__saveTarget = vscode.Uri.file(target);
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e1', format: 'pdf', name: 'Story', content: STORY_PAGE });
+  const reply = await answer('e1');
+  assert.equal(reply.ok, true);
+  const page = path.join(dir, 'story.html');
+  assert.ok(reply.message.indexOf('story.html') !== -1 && /print/i.test(reply.message), 'the reply says what to do: ' + reply.message);
+  assert.equal(fs.existsSync(target), false, 'no file that is called a PDF and is none');
+  const saved = fs.readFileSync(page, 'utf8');
+  assert.ok(saved.indexOf('Content-Security-Policy') !== -1 && saved.indexOf('<p>the story</p>') !== -1);
+  assert.equal(vscode.__openedExternal.length, 1);
+  assert.equal(vscode.__openedExternal[0].fsPath, page);
+});
+
 test('revealHere without a prompt keeps its six positional arguments (regression)', async () => {
   const { provider } = boot({ exthostForPid: async () => process.pid, pidAlive: () => true }, { last: last() });
   await provider.revealHere(A);

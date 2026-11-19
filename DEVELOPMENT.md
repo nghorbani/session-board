@@ -33,6 +33,7 @@ session-board/
     steps.cjs                 transcript reader of the Steps tab: index, active path, steps, sections
     steps-service.cjs         the Steps tab's messages: open, bodies, search, follow, notes, send
     notes.cjs                 the notes store, one file per note
+    pdf.cjs                   the PDF export: finds a Chromium-based browser and prints a page with it
     steps.html                the Steps page; runs in a webview panel and in a browser
     README.md                 Marketplace page
     CHANGELOG.md              one plain line per user-visible change, grouped by version
@@ -45,8 +46,8 @@ session-board/
   build.ps1                   tests, packages the .vsix with vsce 4 and installs it
   tools/screenshot.cjs        renders the README screenshots with example data: the board from
                               index.html, the Steps tab from steps.html over the real steps service
-  tools/chrome.cjs            finds, starts, drives and stops a headless Chromium; used by the
-                              screenshot tool and by both page suites
+  tools/chrome.cjs            starts, drives and stops a headless Chromium (found by pdf.cjs's
+                              findBrowser); used by the screenshot tool and by both page suites
   tools/release-notes.cjs     prints one CHANGELOG section, used by the release workflow
   .github/workflows/release.yml   builds and attaches the .vsix to a GitHub Release on a version tag
   LICENSE                     MIT, covers the root files too
@@ -160,6 +161,9 @@ installed.
   answers, a message typed mid-turn, backward reading in chunks (progress calls and bytes
   read follow the file size, not the line count), growth, a partial last line, sections,
   active time and the figures of a section's facts line.
+- `pdf.test.cjs`: `pdf.cjs` with a function in place of the browser (the arguments, the sealed
+  page, no file left after a failed print), and one print with a browser of the machine
+  when there is one.
 - `steps-service.test.cjs`: `steps-service.cjs` with a fake timer: the first reply before the
   whole index, progress pushes spaced in time, every push carrying the compact records of the
   steps it adds, follow, search (ripgrep faked, the Node scan, the 500 cap, notes), the seen
@@ -470,6 +474,24 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     is opened in full by naming its step: `openText` with a `stepId`, which the host reads
     through `fullText`. An open note box keeps its draft in the page state, because every
     push redraws the reader.
+  - Export: both formats are built in the page, from the sections of the view in use
+    (`visibleSections`, `drawnBody`), so an export holds what the view shows, in the same
+    words. The page first reads the bodies it needs in batches with `bodies` and
+    `forExport` (every text whole, a tool call without its result; `exportBody` in
+    `steps.cjs`) into a map of its own, and puts that map in place of `state.bodies` only
+    while it builds (`withExportState`), so the reader keeps the cut texts it shows. The
+    Markdown is written by `buildExportMarkdown`. The PDF starts as a page:
+    `buildExportPage` runs every section through the row builders the reader uses and
+    serialises the result with the page's own style sheet (`html.export` rules: light
+    colours, nothing folded, nothing scrolls), without buttons and without script. In VS
+    Code the page sends `exportSave` with the content; the host asks where to save
+    (`showSaveDialog`), writes Markdown as it is, and prints a PDF through `pdf.cjs`:
+    the page is sealed with a content policy that lets nothing run or load, written to a
+    temp folder and printed by a headless Chrome, Edge or Chromium on a profile of its
+    own (`findBrowser`, `SESSION_BOARD_BROWSER` to name one). Without such a browser the
+    sealed page is saved as `.html` and opened in the default browser. A browser needs no
+    host for this: it downloads the Markdown and prints the page from a window of its own
+    (the 64 KB limit of `POST /api/steps` would not take the content anyway).
   - Links: the page sends `openLink` with a kind. `http` and `https` go to `openExternal`.
     A path is transcript text, not something the user typed: it is resolved against the
     session's folder, must then be a drive-letter path on Windows (one leading slash

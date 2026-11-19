@@ -15,6 +15,7 @@ const vscode = require('vscode');
 const core = require('./core.cjs');
 const { createNotifier } = require('./notify.cjs');
 const { createStepsService } = require('./steps-service.cjs');
+const pdf = require('./pdf.cjs');
 
 const VIEW_ID = 'sessionBoard.view';
 const escapeAttr = core.escapeAttr;
@@ -57,6 +58,13 @@ const POLL_HIDDEN_MS = 15000;
 const USAGE_VISIBLE_MS = 5 * 60 * 1000;
 const USAGE_HIDDEN_MS = 15 * 60 * 1000;
 
+/** A file name for an export, from a session title: without the characters a file name
+    cannot hold on Windows, of a length a path can take, never empty. */
+function exportFileName(name) {
+  const clean = String(name || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').replace(/^[ .]+|[ .]+$/g, '').slice(0, 80).trim();
+  return clean || 'steps';
+}
+
 class BoardProvider {
   constructor(context, log) {
     this.context = context;
@@ -82,6 +90,7 @@ class BoardProvider {
       deliver: (sessionId, text, meta) => this.deliverToSession(sessionId, text, meta),
     });
     this.stepsPanels = new Map();   // sessionId -> panel, one per session
+    this.htmlToPdf = pdf.htmlToPdf;  // the printer of the PDF export; a test puts its own here
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -629,6 +638,7 @@ class BoardProvider {
       let reply;
       if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
       else if (msg.type === 'openText') reply = await this.openStepsFullText(sessionId, msg);
+      else if (msg.type === 'exportSave') reply = await this.saveStepsExport(msg);
       else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
       // the page matches a reply to its request by this id and by nothing else
       if (reply && msg.requestId !== undefined && reply.requestId === undefined) reply = Object.assign({}, reply, { requestId: msg.requestId });
@@ -803,6 +813,63 @@ class BoardProvider {
     } catch (e) {
       return { type: 'openTextResult', ok: false, message: String((e && e.message) || e) };
     }
+  }
+
+  /**
+   * exportSave { format: 'md' | 'pdf', name, content }: the story as the Steps page wrote it
+   * out, saved where the save dialog says. Markdown is written as it is. For a PDF the
+   * content is a page that a browser of this machine prints (pdf.cjs). On a machine without
+   * such a browser the page itself is saved under the chosen name with .html and opened in
+   * the default browser, to be printed from there; both ways the page is sealed first, so
+   * nothing in it runs or loads.
+   */
+  async saveStepsExport(msg) {
+    const reply = { type: 'exportSaveResult' };
+    const format = msg.format === 'pdf' ? 'pdf' : 'md';
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    if (!content) return Object.assign(reply, { ok: false, message: 'There is nothing to export.' });
+    const folders = vscode.workspace.workspaceFolders || [];
+    const dir = folders.length && folders[0].uri && folders[0].uri.fsPath ? folders[0].uri.fsPath : require('os').homedir();
+    const target = await vscode.window.showSaveDialog({
+      title: 'Export the story',
+      defaultUri: vscode.Uri.file(path.join(dir, exportFileName(msg.name) + '.' + format)),
+      filters: format === 'pdf' ? { PDF: ['pdf'] } : { Markdown: ['md'] },
+    });
+    if (!target) return Object.assign(reply, { ok: false, cancelled: true });
+    let saved = target.fsPath;
+    try {
+      if (format === 'md') {
+        await fs.promises.writeFile(saved, content, 'utf8');
+      } else {
+        const printed = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'Printing the story to a PDF' },
+          () => this.htmlToPdf(content, saved),
+        );
+        if (!printed.ok && !printed.noBrowser) return Object.assign(reply, { ok: false, message: printed.message });
+        if (!printed.ok) {
+          const sealed = pdf.sealHtml(content);
+          if (!sealed) return Object.assign(reply, { ok: false, message: printed.message });
+          saved = saved.replace(/\.pdf$/i, '') + '.html';
+          await fs.promises.writeFile(saved, sealed, 'utf8');
+          await vscode.env.openExternal(vscode.Uri.file(saved));
+          return Object.assign(reply, { ok: true, message: 'No Chrome, Edge or Chromium was found to print the PDF with. The story is saved as '
+            + path.basename(saved) + ' and opened in your browser: print it to PDF there.' });
+        }
+      }
+    } catch (e) {
+      return Object.assign(reply, { ok: false, message: 'The export could not be written: ' + String((e && e.message) || e) });
+    }
+    this.offerSavedExport(saved, format);   // a toast with Open and Show in folder; not waited for
+    return Object.assign(reply, { ok: true, message: 'Saved ' + saved });
+  }
+
+  offerSavedExport(file, format) {
+    const uri = vscode.Uri.file(file);
+    Promise.resolve(vscode.window.showInformationMessage('Saved ' + path.basename(file), 'Open', 'Show in folder')).then(async (choice) => {
+      if (choice === 'Show in folder') await vscode.commands.executeCommand('revealFileInOS', uri);
+      else if (choice === 'Open' && format === 'pdf') await vscode.env.openExternal(uri);
+      else if (choice === 'Open') await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    }).catch((e) => { this.log.warn('export: ' + String((e && e.message) || e)); });
   }
 
   // -- ending ----------------------------------------------------------------------------
