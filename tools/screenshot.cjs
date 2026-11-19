@@ -38,26 +38,26 @@ const HOUR = 3600 * 1000;
 function session(sessionId, title, status, extra) {
   return Object.assign({
     sessionId, title, status, waitingFor: null, name: null, lastPrompt: null,
-    cwd: 'C:\\code\\acme\\webapp', window: { id: 1, label: 'webapp' }, ageMinutes: 0,
+    cwd: 'C:\\code\\acme\\webapp', window: { id: 1, label: 'webapp' }, activityAt: now, workingSince: status === 'busy' ? now - 3 * 60000 : null, lockSlot: null,
     contextTokens: 120000, pct: 13, transcriptPath: null, kind: 'interactive',
   }, extra);
 }
 
 const sessions = [
-  session('57f9950b-6af0-43b1-8cf6-df44231415d6', 'Fix flaky upload test', 'waiting', { waitingFor: 'permission prompt', ageMinutes: 4, contextTokens: 168000, pct: 18 }),
-  session('9c6e6599-150d-4902-86d7-0912fb739fb2', 'Release notes for 2.4', 'waiting', { waitingFor: 'input needed', ageMinutes: 22, contextTokens: 94000, pct: 10, cwd: 'C:\\code\\acme\\docs', window: { id: 2, label: 'docs' } }),
+  session('57f9950b-6af0-43b1-8cf6-df44231415d6', 'Fix flaky upload test', 'waiting', { waitingFor: 'permission prompt', activityAt: now - (4) * 60000, contextTokens: 168000, pct: 18 }),
+  session('9c6e6599-150d-4902-86d7-0912fb739fb2', 'Release notes for 2.4', 'waiting', { waitingFor: 'input needed', activityAt: now - (22) * 60000, contextTokens: 94000, pct: 10, cwd: 'C:\\code\\acme\\docs', window: { id: 2, label: 'docs' } }),
   session('8de2ac3e-106d-4060-8465-ad7df94a6f7c', 'Migrate auth to OAuth', 'busy', { contextTokens: 611000, pct: 66 }),
   session('8ea18419-65ce-4e4d-800a-fc1766733b8e', 'Refactor CSV importer', 'busy', { contextTokens: 872000, pct: 95, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' } }),
-  session('06011aa6-f5ad-4143-81a7-ec8d73d905d6', 'Explore vector databases', 'idle', { ageMinutes: 48, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' }, unseen: true }),
-  session('f012f188-e632-41b8-82a0-99a8e5855280', 'Spike: streaming parser', 'idle', { ageMinutes: 95, contextTokens: 210000, pct: 23, archived: true }),
-  session('5ec9d000-209b-466d-8118-6f18417f7a92', 'Nightly dependency bump', 'idle', { ageMinutes: 35, contextTokens: 76000, pct: 8, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' }, muted: true }),
+  session('06011aa6-f5ad-4143-81a7-ec8d73d905d6', 'Explore vector databases', 'idle', { activityAt: now - (48) * 60000, contextTokens: 42000, pct: 5, cwd: 'C:\\code\\acme\\research', window: { id: 2, label: 'docs' }, unseen: true, lockSlot: 0 }),
+  session('f012f188-e632-41b8-82a0-99a8e5855280', 'Spike: streaming parser', 'idle', { activityAt: now - (95) * 60000, contextTokens: 210000, pct: 23, archived: true }),
+  session('5ec9d000-209b-466d-8118-6f18417f7a92', 'Nightly dependency bump', 'idle', { activityAt: now - (35) * 60000, contextTokens: 76000, pct: 8, cwd: 'C:\\code\\acme\\api', window: { id: 3, label: 'api' }, muted: true }),
 ];
 
 const snapshot = {
-  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1, order: { mode: 'activity', show: 'open' },
+  at: now, stale: false, error: null, limits: { compact: 920000, save: 846400 }, platform: 'win32', sessions, thisWindowId: 1, order: { show: 'auto' },
   ended: [
-    { sessionId: '3f1c9a20-7b44-4c1e-9d2a-5e8f0b6a1c33', status: 'ended', live: false, title: 'Upload retry policy review', lastPrompt: null, cwd: 'C:/code/acme/webapp', transcriptPath: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/3f1c9a20.jsonl', path: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/3f1c9a20.jsonl', folder: 'C--code-acme-webapp', ageMinutes: 190, hasTranscript: true, archived: false, window: { id: 1, label: 'webapp' } },
-    { sessionId: '8b7e2d41-1a90-4f3b-8c6d-2e4a9f0c7b15', status: 'ended', live: false, title: 'Login page copy changes', lastPrompt: null, cwd: 'C:/code/acme/webapp', transcriptPath: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/8b7e2d41.jsonl', path: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/8b7e2d41.jsonl', folder: 'C--code-acme-webapp', ageMinutes: 1500, hasTranscript: true, archived: false, window: { id: 1, label: 'webapp' } },
+    { sessionId: '3f1c9a20-7b44-4c1e-9d2a-5e8f0b6a1c33', status: 'ended', live: false, title: 'Upload retry policy review', lastPrompt: null, cwd: 'C:/code/acme/webapp', transcriptPath: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/3f1c9a20.jsonl', path: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/3f1c9a20.jsonl', folder: 'C--code-acme-webapp', activityAt: now - (190) * 60000, hasTranscript: true, archived: false, window: { id: 1, label: 'webapp' } },
+    { sessionId: '8b7e2d41-1a90-4f3b-8c6d-2e4a9f0c7b15', status: 'ended', live: false, title: 'Login page copy changes', lastPrompt: null, cwd: 'C:/code/acme/webapp', transcriptPath: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/8b7e2d41.jsonl', path: 'C:/Users/dev/.claude/projects/C--code-acme-webapp/8b7e2d41.jsonl', folder: 'C--code-acme-webapp', activityAt: now - (1500) * 60000, hasTranscript: true, archived: false, window: { id: 1, label: 'webapp' } },
   ],
   usage: {
     state: 'ok', at: now - 2 * 60000, ageSeconds: 120, subscriptionType: 'max', available: true,
@@ -72,11 +72,11 @@ const snapshot = {
 };
 
 const searchRows = [
-  { sessionId: '8ea18419-65ce-4e4d-800a-fc1766733b8e', title: 'Refactor CSV importer', live: true, status: 'busy', folder: 'acme/api', cwd: 'C:\\code\\acme\\api', ageMinutes: 0, window: { id: 3, label: 'api' },
+  { sessionId: '8ea18419-65ce-4e4d-800a-fc1766733b8e', title: 'Refactor CSV importer', live: true, status: 'busy', folder: 'acme/api', cwd: 'C:\\code\\acme\\api', activityAt: now - (0) * 60000, window: { id: 3, label: 'api' },
     snippets: ['…the CSV importer chokes on quoted newlines; the new parser streams rows instead…'] },
-  { sessionId: '96655b25-aa6f-4954-8905-59d65d781f9a', title: 'CSV importer v1', live: false, folder: 'acme/api', cwd: 'C:\\code\\acme\\api', ageMinutes: 60 * 24 * 12,
+  { sessionId: '96655b25-aa6f-4954-8905-59d65d781f9a', title: 'CSV importer v1', live: false, folder: 'acme/api', cwd: 'C:\\code\\acme\\api', activityAt: now - (60 * 24 * 12) * 60000,
     snippets: ['…wrote the first CSV importer with a fixed delimiter; header row optional…', '…the CSV files from the ERP export use semicolons…'] },
-  { sessionId: '51f0fe27-2fba-40e5-89d8-62b248fa5239', title: 'Invoice export cleanup', live: false, folder: 'acme/webapp', cwd: 'C:\\code\\acme\\webapp', ageMinutes: 60 * 24 * 40,
+  { sessionId: '51f0fe27-2fba-40e5-89d8-62b248fa5239', title: 'Invoice export cleanup', live: false, folder: 'acme/webapp', cwd: 'C:\\code\\acme\\webapp', activityAt: now - (60 * 24 * 40) * 60000,
     snippets: ['…export invoices as CSV instead of XLSX for the accounting hand-off…'] },
 ];
 

@@ -29,25 +29,26 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 - **One section per VS Code window**, named after that window's workspace (its folder, or
   the name of a multi-root workspace). The window this board runs in comes first, marked
   "this window"; the others follow by activity, and sessions started outside VS Code sit
-  under **Elsewhere**. Inside a section the rows sort by what they need from you: waiting
-  (`permission prompt`, `input needed`, `dialog open`), then working, then unseen (the
-  answer ended while the board was running and you have not opened the session since;
-  opening it or sending a new prompt clears it), then idle. Every running session that is not
+  under **Elsewhere**. Inside a section the rows come in the order of Claude Code's own session list:
+  the sessions that are working sit on top, then every other session by the time of its last
+  message, yours or Claude's, newest first. A row says what it needs from you by its colour
+  and its word: waiting (`permission prompt`, `input needed`, `dialog open`), working, unseen
+  (the answer ended while the board was running and you have not opened the session since;
+  opening it or sending a new prompt clears it) or idle. Every running session that is not
   archived stays in its section, however long it has been idle; a click on the heading folds
   the whole section.
-- **Ended sessions stay until you archive them**, like Claude Code's own session list: under
-  the running ones, each window section lists the ended sessions of its folder that are not
-  archived (in Claude Code or here), newest first, marked "ended", "Untitled" when they have
-  no title. Like Claude Code, it leaves out sessions run by scripts (`claude -p`, the SDK)
+- **Ended sessions stay until you archive them**, like Claude Code's own session list: each
+  window section lists the ended sessions of its folder that are not archived (in Claude Code
+  or here) in one list with the running ones, by the time of their last message, marked
+  "ended", "Untitled" when they have no title. Like Claude Code, it leaves out sessions run by scripts (`claude -p`, the SDK)
   unless `claudeCode.claudeProcessWrapper` is set, and a git worktree's sessions show in a
   window opened on that worktree. The heading reads `1 + 18 ended`. A click resumes one in its
   window; ⤓ archives it (the transcript moves to the board's archive, so Claude Code's list
   drops it too, and search still finds it).
-- **running | open | all**: the switch in the header picks what the sections hold, board-wide
-  like the order switch. running: only the running sessions. open (the default): what Claude
-  Code lists, the running sessions and the ended ones that are not archived. all: the
-  archived ones too, after the ended ones, each with its chip ("archived" here or "archived
-  in Claude Code"); ⤒ brings back one the board archived, and a click resumes any of them.
+- **auto | running | all**: the switch in the header picks what the sections hold, board-wide.
+  auto (the default): what Claude Code lists, the running sessions and the ended ones that
+  are not archived. running: only the running sessions. all: the archived ones too, after
+  the others, each with its chip ("archived" here or "archived in Claude Code"); ⤒ brings back one the board archived, and a click resumes any of them.
 - **A typed filter says so**: while the search box holds text, a line above the sections reads
   `Filter "cuvis-ai-6c": 1 of 17 sessions`, with a clear button (Esc does the same).
 - **The number on a heading** counts the sessions in that section that wait for you (amber)
@@ -66,13 +67,13 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   the section's number, in the counts line, the title or the activity-bar badge. The flag is
   shared by every window and the browser page, survives restarts, and lasts as long as the
   session can still be resumed.
-- **Your own order**: the switch in the header picks **by activity** (the order above) or
-  **manual**. In manual mode the rows keep the order you give them: drag a row by its ⋮⋮
-  handle onto another row of the same section, or focus a row and press Alt+Up or Alt+Down.
-  Waiting and unseen rows keep their colour and their count but stay where you put them; a
-  session you have not placed yet (a new one, or one started outside the board) sits on top.
-  The order and the switch are shared by every window and the browser page and survive
-  restarts.
+- **Lock a card in place**: every card has a rail on its left edge with a grip and a lock.
+  The lock keeps the card at its place in the list (third stays third) while the others sort
+  around it, also when you write in it; click it again and the card goes back into the order.
+  Drag a card by the grip onto another card of the same section, or focus it and press
+  Alt+Up or Alt+Down: it moves there and is locked there. A locked card holds its place in
+  whatever the switch shows. Locks are shared by every window and the browser page and
+  survive restarts; a session that is archived, here or in Claude Code, loses its lock.
 - The badge on the activity-bar icon is the number of sessions waiting on you, muted ones
   excepted.
 
@@ -109,9 +110,10 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   A rename made in Claude Code shows on the board with the next poll.
 - **The bell mutes the session** and the struck bell unmutes it (see Muted above). No
   confirmation; the flag changes at once.
-- **⋮⋮ moves the session** (manual order only): drag it onto another row of its section, or
-  press Alt+Up or Alt+Down on the focused row. No confirmation; the row moves at once and
-  the whole section's order is saved.
+- **The grip moves the card, the lock holds it**: drag the grip on the left edge onto another
+  card of its section, or press Alt+Up or Alt+Down on the focused card. No confirmation; the
+  card moves at once and is locked where it lands. The lock under the grip locks a card where
+  it is, and unlocks it.
 - **✕ ends the session** and everything it started (its subagents and tool processes).
   Click once, then click `End?` within 3 s. Busy or waiting sessions ask once more; in-flight
   work is lost. The transcript stays and Claude Code's picker still offers "Resume session".

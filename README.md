@@ -45,8 +45,11 @@ shows background agents only, not the sessions you talk to.
 - **Ids you can copy.** Each row shows its agent name and "Session f8005c0d"; a click on
   either copies it (the full id for the session). ⓘ folds out the start time, process and
   transcript path, each copied by a click, and search finds a session by its id.
-- **Running, open or all.** A header switch shows only the running sessions, what Claude
-  Code's own list shows (the default: running plus ended ones not archived), or the archived
+- **Claude Code's order, and locks.** The rows come in the order of Claude Code's own list:
+  working sessions on top, then by the last message. A lock on a card keeps it in place, and
+  a card you drag by its grip stays where you drop it.
+- **Auto, running or all.** A header switch shows what Claude Code's own list shows (auto, the
+  default: running plus ended ones not archived), only the running sessions, or the archived
   ones too.
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
 - **Archive a session.** ⤓ ends it the same way and keeps it off the board. It also moves

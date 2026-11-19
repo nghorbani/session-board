@@ -65,8 +65,8 @@ per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
 `POST /api/title/suggest/<id>`, `POST /api/title/<id>?title=`, `POST /api/mute/<id>`, `POST /api/unmute/<id>`,
-`POST /api/order?ids=<comma-joined ids>`, `POST /api/order/mode?mode=activity|manual`,
-`POST /api/order/show?show=all|running`, `POST /api/archive/<id>` (an ended session).
+`POST /api/locks` (JSON body `{ set, move, clear }`),
+`POST /api/order/show?show=auto|running|all`, `POST /api/archive/<id>` (an ended session).
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
 it (`-NoInstall` stops after packaging). What to expect from VS Code (seen on 1.138): a first
@@ -329,10 +329,11 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   newest file. The host passes the wrapper setting as `snapshot({ includeProgrammatic })`; the
   browser server has no VS Code settings and always leaves them out. Until Claude Code's archive
   has been read once (`readClaudeArchived().known`), the snapshot lists no ended rows, since
-  every archived session would look ended. The header switch "running | open | all" lives in
-  `show.json` as `{ show, v: 2 }` (`setShowMode()`); a file without `v` is from 0.11.2, whose
-  "all" reads as "open" (a 0.11.2 window that writes "all" therefore shows "open" in 0.11.3
-  windows until it reloads). ⤓ on an ended row is `archivePast()`: the archive marker, then
+  every archived session would look ended. The header switch "auto | running | all" lives in
+  `show.json` as `{ show, v: 2 }` (`setShowMode()`), with `open` stored for auto: that is the
+  format boards of 0.11.3 and 0.12.0 read and write, so a window still on one of them shares
+  the switch with a newer window in both directions. A file without `v` is from 0.11.2, whose
+  "all" reads as auto. ⤓ on an ended row is `archivePast()`: the archive marker, then
   `stowTranscript()`. Typing in the search box filters the sections and, after 400 ms without a
   key, runs the title search (`startSearch(false)`); Enter adds content.
 - **Ids copy on click**: the agent name and "Session <8>" on a row, and every value in the
@@ -369,23 +370,32 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   AppUserModelID, with the session's `openUri()` as a protocol launch. A failed batch releases
   its claims and is retried once, then reported once. `SB_TOAST_LOG` writes the script to a file
   instead of spawning (tests).
-- **Manual order**: the header switch (`#sortMode`, `applyMode()`) writes
-  `%LOCALAPPDATA%\SessionBoard\sort.json` through `setSortMode()` (tmp then rename); `snapshot()`
-  reads it back as `order.mode`. In manual mode `rowOrder()` sorts a section
-  by `rank` (a row without one sits on top, newest first); by activity it is waiting,
-  busy, unseen, idle, then age. A move (the ⋮⋮ handle, HTML5 drag and drop on the handle
-  only, or Alt+Up/Down on the focused row) ends in `applyOrder(key, ids)`: the whole group's
-  ids in their new order, held in
-  `state.pendingOrder[key]` until a snapshot agrees or 10 s pass, sent as `order` to the host
-  or `POST /api/order?ids=` (comma-joined, 8000 characters at most; core caps the list at
-  500). `setOrder()` checks every id before the first write, then writes
-  `order\<id>.json` = `{ rank: index, at }`; ids outside the list keep their ranks, and a marker is
-  pruned like a mute marker. Ranks are global by id and read inside whichever section the
-  row is in, so a session resumed in another window lands somewhere plausible there until its
-  next move; two windows reordering one group at once settle on the last write. A typed
-  filter disables moving, and so does the activity mode. The per-file read runs once per
-  snapshot like the other stores; revisit it when `order\` holds about 1000 files (a 90-day
-  expiry through `readMarkers()` is the cheap mitigation).
+- **Order and locks**: `titleFromTranscript()` returns `lastMessageAt`, the time of the last
+  tail line whose top-level type is user or assistant (`lastMessageAt()`, the rule Claude
+  Code's own list uses; one more read of 4 MB when the 256 KB tail holds no whole message
+  line, else the file time stands in). `snapshot()` puts `activityAt` on every running, ended
+  and search row and `workingSince` on a busy row (the registry's `statusUpdatedAt`, the
+  moment it turned busy). The page orders a section with `byActivity()`: working rows on top
+  by `workingSince`, the rest by `activityAt`, newest first. Claude Code's webview gives one
+  `Date.now()` to every running session on each state update, so its working sessions share
+  the newest time; among several working sessions the board's order can differ from it.
+  A lock is `locks\<id>.json` = `{ slot, at }`, written tmp then rename.
+  `setLocks({ set, move, clear })` checks the whole request before the first write; `move`
+  changes a slot only where a lock exists, so a page with an old snapshot cannot bring back a
+  lock another window cleared. `reconcileLocks()` in `snapshot()` drops the lock of a session
+  archived on the board or in Claude Code (once its archive has been read) and of one that
+  is not running and has no transcript left (`transcriptGone()`, not the minute-old index).
+  The page builds one placed list per section in `groupSessions()`: `placeRows()` puts the
+  locked rows at their slots and the others around them, on the rows the switch shows, so a
+  card locked third is third on screen in running and in auto. A typed filter only hides
+  rows; archived rows that show in a section follow the placed rows, without a rail. The lock
+  button, a drop on the grip (HTML5 drag and drop on the grip only) and Alt+Up/Down end in
+  `sendLocks()`: `set` for the card, `move` for the other locked cards of the section whose
+  place changed, held in `state.pendingLocks` under a `seq` until a snapshot agrees or 10 s
+  pass, sent as `locks` to the host (reply `locksResult { ok, seq }`) or as
+  `POST /api/locks`. A lock belongs to the session: in another window's section it sits at
+  the same place number. Two windows changing locks at once settle on the last write.
+  `order\` and `sort.json` of 0.10.0 to 0.12.0 stay on disk and are never read.
 - **Titles**: the board keeps none of its own (0.10.x boards wrote `titles\<id>.json`; it is
   no longer read and is left on disk). ✎ sends `retitle`; `suggestTitle()` collects the last six prompts and the
   newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB
