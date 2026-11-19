@@ -314,7 +314,12 @@ function createStepIndex(file, deps) {
     }
     if (!o || !TREE_TYPES.has(o.type) || !o.uuid) return;
     const node = makeNode(o, offset, length);
-    const specs = stepSpecsOf(o);
+    // A line that parses can still hold a block of a shape nothing here expects (a tool input
+    // that is a number, a list of questions that is a string). Such a line shows no step and
+    // is counted as unreadable; it stays a node, so the steps behind it keep their ancestry,
+    // and the lines after it are read as usual.
+    let specs = [];
+    try { specs = stepSpecsOf(o); } catch (_) { unreadable += 1; }
     if (specs.length) { node.at = o.timestamp || ''; node.specs = specs; }
     nodes.set(o.uuid, node);
     const content = o.message ? o.message.content : null;
@@ -323,7 +328,7 @@ function createStepIndex(file, deps) {
         for (const b of content) {
           if (!b || b.type !== 'tool_result') continue;
           const t = resultText(b.content);
-          toolResults.set(b.tool_use_id, { offset, length });
+          toolResults.set(b.tool_use_id, { offset, length, isError: b.is_error === true });
           if (touched) touched.add(b.tool_use_id);
           const agMatch = /agentId:\s*([^\s).]+)/.exec(t);
           if (agMatch) agentIdOfToolUse.set(b.tool_use_id, agMatch[1]);
@@ -664,6 +669,12 @@ function createStepIndex(file, deps) {
         const step = Object.assign({ id: node.uuid + ':' + sp.bi, at: node.at, kind: sp.kind, nodeUuid: node.uuid, blockIndex: sp.bi, generation }, sp.fields);
         if (sp.kind === 'plan') step.approved = resultFact(step.toolUseId, (c) => resultText(c).indexOf('approved') !== -1, false);
         else if (sp.kind === 'question') step.rawAnswers = resultFact(step.toolUseId, parseAnswers, []);
+        else if (sp.kind === 'tool') {
+          // a call whose result came back as an error did not do what it names: an Edit that
+          // failed changed no file
+          const result = toolResults.get(step.toolUseId);
+          if (result && result.isError) step.failed = true;
+        }
         out.push(step);
       }
     }
@@ -945,7 +956,7 @@ function buildSections(stepsArr, bodyFn, wholeFn) {
         const st = byId.get(id);
         if (!st || (st.kind !== 'tool' && st.kind !== 'subagent')) continue;
         sec.toolCalls++;
-        if (st.kind === 'tool' && (st.title === 'Edit' || st.title === 'Write')) {
+        if (st.kind === 'tool' && (st.title === 'Edit' || st.title === 'Write') && !st.failed) {
           const file = st.path !== undefined ? st.path : (bodyFn(id) || {}).path;
           if (file) { filesChangedAll.add(file); filesChangedHere.add(file); }
         }

@@ -919,7 +919,11 @@ function transcriptGone(sessionId) {
     try { dirs = fs.readdirSync(root, { withFileTypes: true }); }
     catch (e) { if (e && e.code === 'ENOENT') continue; return false; }
     for (const d of dirs) {
-      if (d.isDirectory() && fs.existsSync(path.join(root, d.name, sessionId + '.jsonl'))) return false;
+      if (!d.isDirectory()) continue;
+      // the same holds one level down: a project folder that cannot be looked into
+      // (no access, a drive that answers late) may well hold the transcript
+      try { fs.statSync(path.join(root, d.name, sessionId + '.jsonl')); return false; }
+      catch (e) { if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue; return false; }
     }
   }
   return true;
@@ -2051,9 +2055,13 @@ function writeSteerClaim(text) {
 function takeSteerClaim(claimId) {
   let file;
   try { file = steerClaimFile(claimId); } catch (_) { return null; }
+  // Taken by renaming it: of two takers of one claim only one rename succeeds, so the text
+  // reaches one of them however their reads fall. A name left behind is swept with the claims.
+  const mine = file + '.taken-' + process.pid + '-' + crypto.randomBytes(4).toString('hex');
+  try { fs.renameSync(file, mine); } catch (_) { return null; }
   let rec = null;
-  try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
-  try { fs.unlinkSync(file); } catch (_) { /* already gone */ }
+  try { rec = JSON.parse(fs.readFileSync(mine, 'utf8')); } catch (_) { rec = null; }
+  try { fs.unlinkSync(mine); } catch (_) { /* already gone */ }
   if (!rec || typeof rec !== 'object' || typeof rec.text !== 'string') return null;
   const age = Date.now() - (Number(rec.at) || 0);
   if (!(age >= 0 && age < STEER_CLAIM_MAX_AGE_MS)) return null;

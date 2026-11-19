@@ -173,4 +173,27 @@ test('snapshot: the window label is the heartbeat name, else the folder vote; an
   assert.equal(a.window.label, 'webapp', 'no heartbeat: the vote');
 });
 
+test('snapshot: notes survive while the folder of their transcript cannot be read; "cannot look" is not "gone"', async () => {
+  registry('idle'); agents('idle');
+  await core.snapshot();   // the list of transcripts is read here and kept for a minute
+  const E = 'eeeeeeee-1111-4222-8333-444444444444';
+  const locked = path.join(projectsDir, 'locked');
+  fs.mkdirSync(locked, { recursive: true });
+  fs.writeFileSync(path.join(locked, E + '.jsonl'), JSON.stringify({ type: 'ai-title', aiTitle: 'Locked away', sessionId: E }) + '\n');
+  core.notesStore.add(E, 'x:0', 'a note on a session whose folder is locked for a moment');
+  // the folder denies every look into it, as a folder without access rights does
+  const inside = (p) => String(p).startsWith(locked + path.sep);
+  const denied = () => Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+  const real = { existsSync: fs.existsSync, statSync: fs.statSync, readdirSync: fs.readdirSync };
+  fs.existsSync = (p) => (inside(p) ? false : real.existsSync(p));
+  fs.statSync = (p, ...rest) => { if (inside(p)) throw denied(); return real.statSync(p, ...rest); };
+  fs.readdirSync = (p, ...rest) => { if (String(p) === locked) throw denied(); return real.readdirSync(p, ...rest); };
+  try {
+    await core.snapshot();
+  } finally {
+    Object.assign(fs, real);
+  }
+  assert.equal(core.notesStore.list(E).length, 1, 'the note is still there when the folder can be read again');
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

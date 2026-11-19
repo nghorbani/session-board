@@ -23,7 +23,8 @@ const { createNotesStore } = require('./notes.cjs');
 const SEARCH_CAP = 500;
 
 function uuidOk(sessionId) {
-  return typeof sessionId === 'string' && /^[0-9a-f-]{8,64}$/i.test(sessionId);
+  // a whole session id, as core.cjs's UUID_RE and the routes of server.cjs take it
+  return typeof sessionId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId);
 }
 
 /* "HH:MM" in local time, the same way the page's fmtClock reads a step's timestamp; an
@@ -60,6 +61,9 @@ function buildNotesSendAllText(items) {
   return items.map((it) => buildNoteSendText(it.at, it.stepText, it.noteText)).join('\n\n');
 }
 
+// a progress push is followed by a pause of at least this many times what it took to build
+const PROGRESS_COST_FACTOR = 20;
+
 function createStepsService(deps) {
   deps = deps || {};
   const fs = deps.fs || nodeFs;
@@ -88,7 +92,7 @@ function createStepsService(deps) {
      page shows, e.g. "In the chat box and on the clipboard."); never throws. */
   const deliver = deps.deliver || (async () => ({ ok: false, message: 'no send-to-session transport configured' }));
 
-  const sessions = new Map(); // sessionId -> { index, file, subscribers: Set, timer, searchRun }
+  const sessions = new Map(); // sessionId -> { index, file, subscribers: Set, timer, searchRuns }
 
   function seenDir() { return path.join(dataDir, 'steps-seen'); }
   function seenFile(sessionId) { return path.join(seenDir(), sessionId + '.json'); }
@@ -137,12 +141,20 @@ function createStepsService(deps) {
      pass for the same bytes. */
   function ensureSession(sessionId) {
     let s = sessions.get(sessionId);
-    if (s && s.index) return Promise.resolve(s);
+    if (s && s.index) {
+      // The transcript may have moved since (a session stowed, or brought back): then the
+      // index of the old place is dropped and a new one is built on the file where it is now.
+      const at = fs.existsSync(s.file) ? s.file : resolveTranscript(sessionId);
+      if (!at || at === s.file) return Promise.resolve(s);
+      stopFollow(s);
+      s.index = null;
+      s.movedTold = false;
+    }
     const file = resolveTranscript(sessionId);
     if (!file) return Promise.resolve(null);
     const idx = createStepIndex(file, { fs, chunkBytes, tailBytes });
     if (s) { s.index = idx; s.file = file; } else {
-      s = { index: idx, file, subscribers: new Set(), timer: null, searchRun: null };
+      s = { index: idx, file, subscribers: new Set(), timer: null, searchRuns: new Map() };
       sessions.set(sessionId, s);
     }
     s.indexing = true;
@@ -154,6 +166,7 @@ function createStepsService(deps) {
     return new Promise((resolveFirstPaint) => {
       let firstPaintSeen = false;
       let lastProgressAt = null;
+      let progressGapMs = progressIntervalMs;
       const takeFirstPaint = () => { if (!firstPaintSeen) { firstPaintSeen = true; resolveFirstPaint(s); } };
       // indexingDone only turns false, and startFollow only starts polling, once this settles:
       // idx.poll() reads forward from the index's own sizeSeen, which open() does not set until
@@ -167,10 +180,16 @@ function createStepsService(deps) {
         // finished and a caller reading s.indexing right after first paint would see stale
         // (true) state for a file that is in fact already fully indexed.
         if (frac >= tailFraction && frac < 1) takeFirstPaint();
-        if (sameSlot() && (lastProgressAt === null || now() - lastProgressAt >= progressIntervalMs)) {
-          lastProgressAt = now();
+        if (sameSlot() && (lastProgressAt === null || now() - lastProgressAt >= progressGapMs)) {
+          const began = now();
           const { sections, strip } = buildSections(idx.steps(), idx.body, idx.fullText);
           push(sessionId, { type: 'stepsProgress', sessionId, generation: idx.generation(), fraction: frac, done: false, sections, strip, steps: freshCompact(s, idx.steps()) });
+          // A push carries the whole list of sections, and building it takes longer the more
+          // of the transcript is in (hundreds of milliseconds on one of 2 GB). The pause
+          // before the next one grows with that cost, so the pushes take a small share of the
+          // host's time however large the transcript is.
+          lastProgressAt = now();
+          progressGapMs = Math.max(progressIntervalMs, PROGRESS_COST_FACTOR * (lastProgressAt - began));
         }
       }).then(() => {
         takeFirstPaint();   // settling is always a cue too, however small the file or short the pass
@@ -192,13 +211,31 @@ function createStepsService(deps) {
   function startFollow(sessionId, s) {
     if (s.timer != null) return;
     s.timer = setIntervalFn(async () => {
+      // a slot released while a tick was waiting (the last viewer closed) has nobody to tell
+      if (sessions.get(sessionId) !== s) { stopFollow(s); return; }
+      if (s.indexing) return;   // the backward pass still owns sizeSeen; wait for it to finish once
+      // One poll at a time. A poll that finds the file replaced reads the new one in chunks
+      // and gives the loop back between them; a tick that came then would start a second
+      // read on the same index, of the whole file in one piece.
+      if (s.polling) return;
+      s.polling = true;
+      const index = s.index;
       try {
-        // a slot released while a tick was waiting (the last viewer closed) has nobody to tell
-        if (sessions.get(sessionId) !== s) { stopFollow(s); return; }
-        if (s.indexing) return;   // the backward pass still owns sizeSeen; wait for it to finish once
-        const res = await s.index.poll();
+        tellNotesChanged(sessionId, s);
+        const res = await index.poll();
+        // The viewer may have closed and another opened while the poll ran, or an open may
+        // have put a new index in place: what this poll found belongs to an index nobody
+        // looks at any more.
+        if (sessions.get(sessionId) !== s || s.index !== index) return;
         if (!fs.existsSync(s.file)) {
-          push(sessionId, { type: 'stepsChanged', sessionId, error: 'transcript moved or removed' });
+          // Stowing a session or bringing it back moves its transcript. The viewer is told
+          // once and opens the session again, which finds the file at its new place.
+          const at = resolveTranscript(sessionId);
+          if (at && at !== s.file) {
+            if (!s.movedTold) { s.movedTold = true; push(sessionId, { type: 'stepsChanged', sessionId, moved: true }); }
+          } else {
+            push(sessionId, { type: 'stepsChanged', sessionId, error: 'transcript moved or removed' });
+          }
           return;
         }
         // A result that came in for a step already shown (an answer, an approval, a tool's
@@ -219,7 +256,9 @@ function createStepsService(deps) {
           });
         }
       } catch (e) {
-        push(sessionId, { type: 'stepsChanged', sessionId, error: errorMessage(e) });
+        if (sessions.get(sessionId) === s && s.index === index) push(sessionId, { type: 'stepsChanged', sessionId, error: errorMessage(e) });
+      } finally {
+        s.polling = false;
       }
     }, pollIntervalMs);
   }
@@ -249,7 +288,7 @@ function createStepsService(deps) {
     // what "open" hands the page per step: enough to render a row without a body() round trip.
     // generation travels with it so a later body request for this exact step can be told apart
     // from a same-id step born of a fresh index (steps.cjs's own stale check, see body()).
-    return stepsArr.map((s) => ({ id: s.id, kind: s.kind, at: s.at, preview: s.preview, title: s.title, approved: s.approved, durationMs: s.durationMs, blockType: s.blockType, generation: s.generation }));
+    return stepsArr.map((s) => ({ id: s.id, kind: s.kind, at: s.at, preview: s.preview, title: s.title, approved: s.approved, durationMs: s.durationMs, blockType: s.blockType, failed: s.failed, generation: s.generation }));
   }
 
   // ---------------------------------------------------------------------------------------
@@ -286,7 +325,7 @@ function createStepsService(deps) {
       // are provisional until a stepsProgress push with done:true lands.
       indexing: Boolean(s.indexing),
       seenStepId: readSeen(sessionId),
-      notes: notesSafe(sessionId),
+      notes: notesTold(sessionId),
     });
   }
 
@@ -296,8 +335,28 @@ function createStepsService(deps) {
     try { return notes.list(sessionId); } catch (_) { return []; }
   }
 
+  /* Reads the list and remembers it as what this session's viewers were told last. */
+  function notesTold(sessionId) {
+    const list = notesSafe(sessionId);
+    const s = sessions.get(sessionId);
+    if (s) s.notesSig = JSON.stringify(list);
+    return list;
+  }
+
   function pushNotesChanged(sessionId) {
-    push(sessionId, { type: 'notesChanged', sessionId, notes: notesSafe(sessionId) });
+    push(sessionId, { type: 'notesChanged', sessionId, notes: notesTold(sessionId) });
+  }
+
+  /* Notes are files that every window writes. A viewer learns of a note that another window
+     kept, changed or deleted by a look at the list with each tick: it is told when the list
+     differs from the one it was told last. */
+  function tellNotesChanged(sessionId, s) {
+    const list = notesSafe(sessionId);
+    const sig = JSON.stringify(list);
+    if (s.notesSig === undefined) { s.notesSig = sig; return; }
+    if (sig === s.notesSig) return;
+    s.notesSig = sig;
+    push(sessionId, { type: 'notesChanged', sessionId, notes: list });
   }
 
   async function handleBody(msg) {
@@ -488,8 +547,14 @@ function createStepsService(deps) {
      input summary, say) is not found, because the stored transcript never carries that joined
      string as a contiguous run of bytes for ripgrep or the Node fallback to hit. */
   function stepVisibleText(s, stepId) {
-    const b = s.index.body(stepId);
+    let b = s.index.body(stepId);
     if (!b) return '';
+    // a text the body shows cut is searched whole: the words behind the cut are in the
+    // transcript, and a heading may show them
+    if (b.truncated) {
+      const whole = s.index.fullText(stepId);
+      if (whole && typeof whole.text === 'string') b = whole;
+    }
     if (typeof b.text === 'string') return b.text;
     const parts = [];
     if (b.title) parts.push(b.title);
@@ -522,15 +587,23 @@ function createStepsService(deps) {
         '-e', q, '-e', (rg.jsonEscaped ? rg.jsonEscaped(q) : q), s.file];
       const r = await rg.run(rgInfo.path, args, { signal: controller.signal });
       if (controller.signal.aborted) return { cancelled: true };
-      const offsets = [];
-      for (const ln of String((r && r.stdout) || '').split('\n')) {
-        if (!ln) continue;
-        const i = ln.indexOf(':');
-        if (i === -1) continue;
-        const off = Number(ln.slice(0, i));
-        if (Number.isFinite(off)) offsets.push(off);
+      // Exit 0 is "found" and 1 is "nothing found". Anything else is an error, or ripgrep
+      // stopped at the limit of what it may print (a common word in a large transcript):
+      // what it printed so far may miss hits, so the transcript is scanned instead.
+      if (!r || (typeof r.code === 'number' && r.code !== 0 && r.code !== 1)) {
+        candidateIds = await nodeScan(s, stepsArr, q, controller.signal);
+        if (controller.signal.aborted) return { cancelled: true };
+      } else {
+        const offsets = [];
+        for (const ln of String(r.stdout || '').split('\n')) {
+          if (!ln) continue;
+          const i = ln.indexOf(':');
+          if (i === -1) continue;
+          const off = Number(ln.slice(0, i));
+          if (Number.isFinite(off)) offsets.push(off);
+        }
+        candidateIds = stepsAtOffsets(s, stepsArr, offsets);
       }
-      candidateIds = stepsAtOffsets(s, stepsArr, offsets);
     } else {
       // Node fallback: a streaming scan of the file, matching the same two forms.
       candidateIds = await nodeScan(s, stepsArr, q, controller.signal);
@@ -539,23 +612,26 @@ function createStepsService(deps) {
 
     const confirmed = [];
     const ql = q.toLowerCase();
+    // capped: the list is full and something that may be a hit was left unlooked at
+    let capped = false;
     for (const id of candidateIds) {
       if (controller.signal.aborted) return { cancelled: true };
+      if (confirmed.length >= SEARCH_CAP) { capped = true; break; }
       const visible = stepVisibleText(s, id).toLowerCase();
       if (visible.indexOf(ql) !== -1) confirmed.push(id);
-      if (confirmed.length >= SEARCH_CAP) break;
     }
     // Notes are searched too: a hit in a note's text lands on the step the
     // note is attached to, same as any other hit on that step.
-    if (ql && confirmed.length < SEARCH_CAP) {
+    if (ql && !capped) {
       const seen = new Set(confirmed);
       for (const note of notesSafe(sessionId)) {
         if (seen.has(note.stepId)) continue;
-        if (String(note.text || '').toLowerCase().indexOf(ql) !== -1) { confirmed.push(note.stepId); seen.add(note.stepId); }
-        if (confirmed.length >= SEARCH_CAP) break;
+        if (String(note.text || '').toLowerCase().indexOf(ql) === -1) continue;
+        if (confirmed.length >= SEARCH_CAP) { capped = true; break; }
+        confirmed.push(note.stepId);
+        seen.add(note.stepId);
       }
     }
-    const capped = confirmed.length >= SEARCH_CAP && candidateIds.length > confirmed.length;
     return { type: 'searchResult', sessionId, requestId, query: q, stepIds: confirmed, capped };
   }
 
@@ -633,22 +709,29 @@ function createStepsService(deps) {
     const s = sessions.get(sessionId);
     const requestId = msg.requestId;
     if (!s) return { type: 'searchResult', sessionId, requestId, query: String(msg.query || ''), stepIds: [], capped: false, message: 'session not open' };
-    if (s.searchRun) s.searchRun.controller.abort();
+    // One search per viewer. A new query of a viewer replaces the one it had running; the
+    // search of another viewer of the same session (a second browser tab) is left alone.
+    const viewer = String(msg.viewerId || '');
+    if (!s.searchRuns) s.searchRuns = new Map();
+    const running = s.searchRuns.get(viewer);
+    if (running) running.abort();
     const controller = new AbortController();
-    s.searchRun = { controller };
+    s.searchRuns.set(viewer, controller);
     try {
       const res = await runSearch(sessionId, s, msg.query, requestId, controller);
       if (res.cancelled) return { type: 'searchResult', sessionId, requestId, query: String(msg.query || ''), stepIds: [], capped: false, cancelled: true };
       return res;
     } finally {
-      if (s.searchRun && s.searchRun.controller === controller) s.searchRun = null;
+      if (s.searchRuns.get(viewer) === controller) s.searchRuns.delete(viewer);
     }
   }
 
   function handleCancelSearch(msg) {
     const sessionId = String(msg.sessionId || '');
     const s = sessions.get(sessionId);
-    if (s && s.searchRun) { s.searchRun.controller.abort(); s.searchRun = null; }
+    const viewer = String(msg.viewerId || '');
+    const running = s && s.searchRuns ? s.searchRuns.get(viewer) : null;
+    if (running) { running.abort(); s.searchRuns.delete(viewer); }
     return { type: 'cancelSearchResult', ok: true, sessionId };
   }
 
@@ -687,7 +770,7 @@ function createStepsService(deps) {
     if (!s) {
       // a subscriber may arrive before open() if the transport wires it up first; create the
       // slot lazily so startFollow has somewhere to record its timer once open() runs.
-      s = { index: null, file: resolveTranscript(sessionId), subscribers: new Set(), timer: null, searchRun: null };
+      s = { index: null, file: resolveTranscript(sessionId), subscribers: new Set(), timer: null, searchRuns: new Map() };
       sessions.set(sessionId, s);
     }
     s.subscribers.add(cb);

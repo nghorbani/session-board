@@ -1090,4 +1090,254 @@ test('buildNotesSendAllText on an empty list is an empty string', () => {
   assert.equal(svcMod.buildNotesSendAllText([]), '');
 });
 
+// -- findings of the review before the merge -------------------------------------------------
+
+/* A transcript that is replaced by a larger one: the poll that notices it reads the new file
+   from its end, a chunk at a time, and gives the loop back between chunks. */
+function replacedTranscript(deps) {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'first version')]);
+  deps.__files.set(A, file);
+  const replace = () => {
+    fs.unlinkSync(file);
+    const objs = [userLine(uuid(1), null, 'second version')];
+    for (let i = 2; i <= 120; i++) objs.push(assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' ' + 'x'.repeat(3000) }]));
+    writeLines(file, objs);
+  };
+  return { file, replace };
+}
+
+test('a follow tick that comes while the poll before it still runs does not start a second read of the transcript', async () => {
+  let largestRead = 0;
+  const watched = Object.assign({}, fs, { readSync: (fd, buf, off, len, pos) => { if (len > largestRead) largestRead = len; return fs.readSync(fd, buf, off, len, pos); } });
+  const deps = makeDeps({ fs: watched, chunkBytes: 4096, tailBytes: 4096 });
+  const { file, replace } = replacedTranscript(deps);
+  const svc = svcMod.createStepsService(deps);
+  svc.subscribe(A, () => {});
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  replace();
+  largestRead = 0;
+  const first = deps.__timer.fireAll();    // notices the new file and starts to read it
+  const second = deps.__timer.fireAll();   // the next tick, a second later, while that read goes on
+  await Promise.all([first, second]);
+  assert.ok(fs.statSync(file).size > 300 * 1024);
+  assert.ok(largestRead <= 64 * 1024, 'no read took the whole file in one piece: ' + largestRead + ' bytes');
+});
+
+test('a poll that ends after its viewer was closed tells nothing to the viewer that opened next', async () => {
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096 });
+  const { replace } = replacedTranscript(deps);
+  const svc = svcMod.createStepsService(deps);
+  const closeFirst = svc.subscribe(A, () => {});
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  replace();
+  const oldPoll = deps.__timer.fireAll();   // runs for a while: the new file is read in chunks
+  closeFirst();                             // the tab is closed meanwhile
+  const got = [];
+  svc.subscribe(A, (msg) => got.push(msg));   // and opened again
+  const reopened = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  await oldPoll;
+  assert.equal(reopened.ok, true);
+  const foreign = got.filter((m) => m.type === 'stepsChanged' && m.generation !== undefined && m.generation !== reopened.generation);
+  assert.deepEqual(foreign.map((m) => m.generation), [], 'no push of the old index reached the new viewer');
+  assert.equal(got.some((m) => m.type === 'stepsChanged' && m.error), false, 'and no error of it either');
+});
+
+test('a transcript that was moved (stowed or restored) is found again: the viewer is told, and a new open follows the file at its new place', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello'), assistantLine(uuid(2), uuid(1), 'm2', [{ type: 'text', text: 'first answer' }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  svc.subscribe(A, (msg) => pushes.push(msg));
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const moved = newFile();
+  fs.renameSync(file, moved);
+  deps.__files.set(A, moved);
+  await deps.__timer.fireAll();
+  const told = pushes.filter((m) => m.type === 'stepsChanged');
+  assert.equal(told.some((m) => m.moved === true), true, 'the viewer is told that the transcript moved: ' + JSON.stringify(told));
+  assert.equal(told.some((m) => m.error), false, 'not that it is gone');
+  await deps.__timer.fireAll();
+  assert.equal(pushes.filter((m) => m.moved === true).length, 1, 'and told once');
+  const again = await svc.handle({ type: 'open', requestId: 'r2', sessionId: A });
+  assert.equal(again.ok, true);
+  assert.equal(again.steps.length, 2);
+  const text = again.steps.find((st) => st.kind === 'text');
+  const bodies = await svc.handle({ type: 'bodies', requestId: 'r3', sessionId: A, stepIds: [text.id], generation: again.generation });
+  assert.equal(bodies.items[0].text, 'first answer', 'the texts are read from the new place');
+  pushes.length = 0;
+  fs.appendFileSync(moved, line(userLine(uuid(3), uuid(2), 'and now?')));
+  await deps.__timer.fireAll();
+  assert.equal(pushes.some((m) => m.type === 'stepsChanged' && (m.appended || []).length === 1), true, 'and the file is followed there');
+});
+
+test('a transcript that is gone from every place is still reported as gone', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  svc.subscribe(A, (msg) => pushes.push(msg));
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  fs.unlinkSync(file);
+  deps.__files.delete(A);
+  await deps.__timer.fireAll();
+  assert.equal(pushes.some((m) => m.type === 'stepsChanged' && /moved or removed/.test(String(m.error))), true);
+});
+
+test('search finds words that lie behind the 200 KB a body shows', async () => {
+  const file = newFile();
+  const paste = '<pasted_content id="ab12">\n' + 'a line of a long log\n'.repeat(13000) + '</pasted_content>\n';
+  writeLines(file, [userLine(uuid(1), null, paste + 'Why does this fail?'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'because' }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const you = opened.steps.find((st) => st.kind === 'you');
+  const res = await svc.handle({ type: 'search', requestId: 's1', sessionId: A, query: 'Why does this fail' });
+  assert.deepEqual(res.stepIds, [you.id], 'the heading the page shows can be searched for');
+});
+
+test('two viewers of one session search at the same time without cancelling each other; a viewer still replaces its own search', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'find the needle'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'a haystack' }])]);
+  let letGo = null;
+  const held = new Promise((resolve) => { letGo = resolve; });
+  let probes = 0;
+  const deps = makeDeps();
+  // the first search is slow to start, the ones after it are not
+  deps.rg.probe = async () => { probes += 1; if (probes === 1) await held; return { path: null }; };
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const slow = svc.handle({ type: 'search', requestId: 's1', sessionId: A, viewerId: 'tab-one', query: 'needle' });
+  const quick = await svc.handle({ type: 'search', requestId: 's2', sessionId: A, viewerId: 'tab-two', query: 'haystack' });
+  assert.equal(quick.stepIds.length, 1);
+  letGo();
+  const first = await slow;
+  assert.equal(Boolean(first.cancelled), false, 'the search of the other tab was not cancelled');
+  assert.equal(first.stepIds.length, 1);
+  // clearing the box in one tab leaves the other tab's search alone as well
+  let letGo2 = null;
+  const held2 = new Promise((resolve) => { letGo2 = resolve; });
+  probes = 0;
+  deps.rg.probe = async () => { probes += 1; if (probes === 1) await held2; return { path: null }; };
+  const slow2 = svc.handle({ type: 'search', requestId: 's3', sessionId: A, viewerId: 'tab-one', query: 'needle' });
+  await svc.handle({ type: 'cancelSearch', requestId: 'c1', sessionId: A, viewerId: 'tab-two' });
+  letGo2();
+  assert.equal(Boolean((await slow2).cancelled), false);
+  // the same viewer typing on: its earlier search is dropped
+  let letGo3 = null;
+  const held3 = new Promise((resolve) => { letGo3 = resolve; });
+  probes = 0;
+  deps.rg.probe = async () => { probes += 1; if (probes === 1) await held3; return { path: null }; };
+  const stale = svc.handle({ type: 'search', requestId: 's4', sessionId: A, viewerId: 'tab-one', query: 'need' });
+  const fresh = await svc.handle({ type: 'search', requestId: 's5', sessionId: A, viewerId: 'tab-one', query: 'needle' });
+  letGo3();
+  assert.equal((await stale).cancelled, true);
+  assert.equal(fresh.stepIds.length, 1);
+});
+
+test('a ripgrep run that failed or was cut short is not taken for the whole answer: the transcript is scanned instead', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'the marker word appears here'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'and the marker word appears here too' }]),
+  ]);
+  const firstHit = fs.readFileSync(file).indexOf('marker');
+  const deps = makeDeps();
+  deps.rg.probe = async () => ({ path: 'rg' });
+  // stopped at its output limit: what it printed so far names the first hit only
+  deps.rg.run = async () => ({ code: -1, stdout: firstHit + ':marker\n', stderr: 'stdout maxBuffer length exceeded', killed: true });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const res = await svc.handle({ type: 'search', requestId: 's1', sessionId: A, query: 'marker' });
+  assert.equal(res.stepIds.length, 2, 'both steps are found');
+});
+
+test('a session id that is not a full id is refused by the service and by the notes store', async () => {
+  const deps = makeDeps();
+  const svc = svcMod.createStepsService(deps);
+  const added = await svc.handle({ type: 'noteAdd', requestId: 'n1', sessionId: '--------', stepId: 'x:0', text: 'a note under a made-up id' });
+  assert.equal(added.ok, false);
+  const seen = await svc.handle({ type: 'seen', requestId: 'n2', sessionId: 'deadbeef', stepId: 'x:0' });
+  assert.equal(seen.ok, false);
+  assert.equal(fs.existsSync(path.join(deps.dataDir, 'notes', '--------')), false, 'nothing was written for it');
+  const { createNotesStore } = require('../notes.cjs');
+  assert.throws(() => createNotesStore({ dataDir: deps.dataDir }).add('--------', 'x:0', 'text'), /not a session id/);
+});
+
+test('search says that there are more hits than it lists also when the hits are in notes', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  const { createNotesStore } = require('../notes.cjs');
+  const store = createNotesStore({ dataDir: deps.dataDir });
+  for (let i = 0; i < 501; i++) store.add(A, 'step-' + i + ':0', 'the same remark');
+  const res = await svc.handle({ type: 'search', requestId: 's1', sessionId: A, query: 'same remark' });
+  assert.equal(res.stepIds.length, 500);
+  assert.equal(res.capped, true);
+});
+
+test('a note that another window kept, changed or deleted reaches this viewer with the next tick', async () => {
+  const file = newFile();
+  writeLines(file, [userLine(uuid(1), null, 'hello')]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  svc.subscribe(A, (msg) => pushes.push(msg));
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  await deps.__timer.fireAll();
+  assert.equal(pushes.some((m) => m.type === 'notesChanged'), false, 'nothing changed: nothing is told');
+  // the other window writes to the same folder through a store of its own
+  const { createNotesStore } = require('../notes.cjs');
+  const other = createNotesStore({ dataDir: deps.dataDir });
+  const note = other.add(A, opened.steps[0].id, 'kept in the other window');
+  await deps.__timer.fireAll();
+  let told = pushes.filter((m) => m.type === 'notesChanged');
+  assert.equal(told.length, 1);
+  assert.deepEqual(told[0].notes.map((n) => n.text), ['kept in the other window']);
+  other.edit(A, note.id, 'changed in the other window');
+  await deps.__timer.fireAll();
+  told = pushes.filter((m) => m.type === 'notesChanged');
+  assert.equal(told[told.length - 1].notes[0].text, 'changed in the other window');
+  other.delete(A, note.id);
+  await deps.__timer.fireAll();
+  told = pushes.filter((m) => m.type === 'notesChanged');
+  assert.deepEqual(told[told.length - 1].notes, []);
+  const before = told.length;
+  await deps.__timer.fireAll();
+  assert.equal(pushes.filter((m) => m.type === 'notesChanged').length, before, 'and told once per change');
+});
+
+test('progress pushes of the indexing get rarer when building one is slow, so they never take most of the time', async () => {
+  const file = newFile();
+  const objs = [];
+  for (let i = 1; i <= 200; i++) {
+    objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
+  }
+  writeLines(file, objs);
+  // a clock that moves 100 ms with every look at it: a push that costs "100 ms" to build
+  let clock = 0;
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096, progressIntervalMs: 0, now: () => { clock += 100; return clock; } });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  let doneSeen;
+  const donePromise = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => { if (msg.type === 'stepsProgress') { pushes.push(msg); if (msg.done) doneSeen(); } });
+  await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  await donePromise;
+  assert.equal(pushes[pushes.length - 1].done, true, 'the end is always told');
+  assert.ok(pushes.length >= 2 && pushes.length <= 20, 'a slow push is followed by a pause: ' + pushes.length + ' pushes for about 100 chunks');
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

@@ -18,7 +18,8 @@
 const nodeFs = require('fs');
 const path = require('path');
 
-const SESSION_ID_RE = /^[0-9a-f-]{8,64}$/i;
+// a whole session id, as core.cjs's UUID_RE and the routes of server.cjs take it
+const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NOTE_ID_RE = /^[0-9a-f]{32}$/;           // crypto.randomBytes(16).toString('hex')
 const TEXT_MAX = 16 * 1024;
 
@@ -124,12 +125,14 @@ function createNotesStore(deps) {
     sessionId = checkSessionId(sessionId);
     noteId = checkNoteId(noteId);
     const dir = sessionDir(sessionId);
+    const prefix = noteId + '.';
+    // The mark first, before anything else is looked at, then the files: see edit(). An edit
+    // that finishes before the mark is an edit followed by this delete; one that finishes
+    // after it sees the mark and reports the note gone.
+    let removed = fs.existsSync(noteFile(sessionId, noteId));
+    if (removed) { try { fs.writeFileSync(tombFile(sessionId, noteId), ''); } catch (_) { /* the removal below still runs */ } }
     let names = [];
     try { names = fs.readdirSync(dir); } catch (_) { names = []; }
-    const prefix = noteId + '.';
-    let removed = false;
-    // the mark first, then the files: see edit()
-    if (names.length) { try { fs.writeFileSync(tombFile(sessionId, noteId), ''); } catch (_) { /* the removal below still runs */ } }
     const cutoff = now() - TOMB_KEEP_MS;
     for (const name of names) {
       if (name.endsWith('.deleted') && name !== noteId + '.deleted') {
@@ -201,6 +204,8 @@ function createNotesStore(deps) {
       core.cjs's pruneDead shape (liveIds, transcripts) but over directories, not single
       marker files, since a session's notes are several files at once. */
   function pruneDead(liveIds, transcripts, confirmGone) {
+    // no look at the disk, no delete: the two lists alone are not enough (see below)
+    if (typeof confirmGone !== 'function') return;
     const root = notesRoot();
     let sessionIds = [];
     try { sessionIds = fs.readdirSync(root); } catch (_) { return; }
@@ -210,7 +215,7 @@ function createNotesStore(deps) {
       if (transcripts && transcripts.has && transcripts.has(sessionId)) continue;
       // `transcripts` may be a list read a while ago. Notes are text someone wrote, so before
       // they go the caller looks at the disk itself; anything but a clear "gone" keeps them.
-      if (confirmGone && confirmGone(sessionId) !== true) continue;
+      if (confirmGone(sessionId) !== true) continue;
       try { fs.rmSync(path.join(root, sessionId), { recursive: true, force: true }); } catch (_) { /* leave it for the next pass */ }
     }
   }

@@ -123,4 +123,21 @@ test('writeSteerClaim prunes claims older than a minute when a new one is writte
   assert.equal(fs.existsSync(oldFile), false, 'the stale claim file was swept on the next write');
 });
 
+test('takeSteerClaim: two takers of one claim at the same moment, and the text goes to one of them only', () => {
+  const claimId = core.writeSteerClaim('hand this over once');
+  // the second taker arrives when the first has read the claim and not yet removed it
+  const realUnlink = fs.unlinkSync;
+  let second = 'not run';
+  fs.unlinkSync = (file, ...rest) => {
+    if (second === 'not run' && String(file).indexOf(path.join(core.DATA_DIR, 'steers')) === 0) {
+      second = null;   // guards against the nested call coming back here
+      second = core.takeSteerClaim(claimId);
+    }
+    return realUnlink(file, ...rest);
+  };
+  let first;
+  try { first = core.takeSteerClaim(claimId); } finally { fs.unlinkSync = realUnlink; }
+  assert.deepEqual([first, second].filter((t) => t !== null), ['hand this over once'], 'one taker got the text: ' + JSON.stringify([first, second]));
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

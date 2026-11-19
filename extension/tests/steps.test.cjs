@@ -930,3 +930,44 @@ test('"[Request interrupted by user for tool use]" is recognised the same way', 
   assert.ok(marker, 'the step was built');
   assert.equal(marker.kind, 'interrupted');
 });
+
+test('an Edit that failed is marked as failed, and a section counts only the files that were changed', async () => {
+  const file = newFile();
+  const edit = (id, target) => ({ type: 'tool_use', id, name: 'Edit', input: { file_path: target, old_string: 'a', new_string: 'b' } });
+  const refused = toolResultLine(uuid(3), uuid(2), 'e1', 'String to replace not found in file.');
+  refused.message.content[0].is_error = true;
+  writeLines(file, [
+    userLine(uuid(1), null, 'change both files'),
+    assistantLine(uuid(2), uuid(1), 'm2', [edit('e1', 'C:/proj/a.txt')]),
+    refused,
+    assistantLine(uuid(4), uuid(3), 'm4', [edit('e2', 'C:/proj/b.txt')]),
+    toolResultLine(uuid(5), uuid(4), 'e2', 'The file has been updated.'),
+    assistantLine(uuid(6), uuid(5), 'm6', [{ type: 'text', text: 'done' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const tools = idx.steps().filter((s) => s.kind === 'tool');
+  assert.deepEqual(tools.map((s) => Boolean(s.failed)), [true, false], 'the first edit failed, the second went through');
+  const { sections, strip } = steps.buildSections(idx.steps(), idx.body, idx.fullText);
+  assert.equal(sections.find((sec) => sec.kind === 'you').filesChanged, 1, 'one file was changed in this section');
+  assert.equal(strip.filesChanged, 1, 'and one in the session');
+});
+
+test('a line whose tool input has an unexpected shape does not stop the indexing, and the steps around it keep their place', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, 'ask me something'),
+    assistantLine(uuid(2), uuid(1), 'm2', [{ type: 'tool_use', id: 'q1', name: 'AskUserQuestion', input: { questions: 'not a list' } }]),
+    assistantLine(uuid(3), uuid(2), 'm3', [{ type: 'tool_use', id: 'q2', name: 'AskUserQuestion', input: { questions: [null, 7, { question: 5, options: 'none' }] } }]),
+    assistantLine(uuid(4), uuid(3), 'm4', [{ type: 'tool_use', id: 'x1', name: 'Agent', input: 7 }, { type: 'tool_use', id: 'x2', name: 'ExitPlanMode', input: null }]),
+    assistantLine(uuid(5), uuid(4), 'm5', [{ type: 'text', text: 'the text after the odd lines' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const all = idx.steps();
+  assert.equal(all[0].kind, 'you', 'the message in front of the odd lines is still on the path');
+  assert.deepEqual(all.filter((s) => s.kind === 'text').map((s) => idx.body(s.id).text), ['the text after the odd lines']);
+  // every step can be read and put into sections without a throw
+  for (const s of all) idx.body(s.id);
+  steps.buildSections(all, idx.body, idx.fullText);
+});

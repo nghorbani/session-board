@@ -228,13 +228,39 @@ test('two writers adding notes to the same session at once both survive', async 
 
 // -- prune -----------------------------------------------------------------------------------
 
+test('delete: an edit that lands after the delete has begun is told the note is gone, never that it was kept', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-notes-'));
+  const editing = createNotesStore({ dataDir });
+  const note = editing.add(A, 'u1:0', 'first words');
+  // another window edits at the worst moment: right after the delete has listed the folder
+  let edited = 'not run';
+  const racing = Object.assign({}, fs, {
+    readdirSync: (...args) => {
+      const names = fs.readdirSync(...args);
+      if (edited === 'not run') edited = editing.edit(A, note.id, 'edited meanwhile');
+      return names;
+    },
+  });
+  const deleting = createNotesStore({ dataDir, fs: racing });
+  assert.equal(deleting.delete(A, note.id), true, 'the delete says it removed the note');
+  assert.equal(edited, null, 'the edit does not report a note the delete then takes away');
+  assert.deepEqual(editing.list(A), []);
+});
+
+test('pruneDead: without a check of the disk nothing is removed', () => {
+  const { store } = freshStore();
+  store.add(B, 'u1:0', 'a list of transcripts alone is not enough to delete what someone wrote');
+  store.pruneDead(new Set(), new Map());
+  assert.equal(store.list(B).length, 1);
+});
+
 test('pruneDead: a session\'s notes are removed only once its transcript is gone from both roots', () => {
   const { dataDir, store } = freshStore();
   store.add(A, 'u1:0', 'keep me while the transcript is live');
   store.add(B, 'u1:0', 'this session has no transcript anywhere');
 
   // A is still live; B has no transcript in either root: only B's notes go.
-  store.pruneDead(new Set([A]), new Map());
+  store.pruneDead(new Set([A]), new Map(), () => true);
   assert.equal(fs.existsSync(path.join(dataDir, 'notes', A)), true);
   assert.equal(fs.existsSync(path.join(dataDir, 'notes', B)), false);
 });
@@ -242,7 +268,7 @@ test('pruneDead: a session\'s notes are removed only once its transcript is gone
 test('pruneDead: a transcript in the stowed root (not live) still keeps the notes', () => {
   const { dataDir, store } = freshStore();
   store.add(A, 'u1:0', 'ended but transcript stowed');
-  store.pruneDead(new Set(), new Map([[A, '/stowed/path/' + A + '.jsonl']]));
+  store.pruneDead(new Set(), new Map([[A, '/stowed/path/' + A + '.jsonl']]), () => true);
   assert.equal(fs.existsSync(path.join(dataDir, 'notes', A)), true);
 });
 
@@ -259,5 +285,5 @@ test('pruneDead: with a check of the disk given, notes go only when that check a
 
 test('pruneDead: nothing to prune when the notes root does not exist yet', () => {
   const { store } = freshStore();
-  assert.doesNotThrow(() => store.pruneDead(new Set(), new Map()));
+  assert.doesNotThrow(() => store.pruneDead(new Set(), new Map(), () => true));
 });
