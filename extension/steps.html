@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Steps</title>
-<style>
+<style id="pageStyle">
   :root {
     --bg: #ffffff; --fg: #1f2328; --dim: #6b7280; --faint: #9aa1ab; --line: #e2e5ea;
     --panel: #f5f6f8; --rail: #fafafb; --accent: #0b62c4; --mark: #ffe58a;
@@ -2426,7 +2426,8 @@ function buildExportPage(view, secs, bodies) {
   var charset = doc.createElement('meta'); charset.setAttribute('charset', 'utf-8');
   doc.head.insertBefore(charset, doc.head.firstChild);
   var style = doc.createElement('style');
-  style.textContent = document.querySelector('style').textContent;
+  // by its id: in a VS Code webview the first style sheet of the document is VS Code's own
+  style.textContent = document.getElementById('pageStyle').textContent;
   doc.head.appendChild(style);
   var h1 = doc.createElement('h1'); h1.textContent = state.title; doc.body.appendChild(h1);
   var sub = doc.createElement('div'); sub.className = 'sub'; doc.body.appendChild(sub);

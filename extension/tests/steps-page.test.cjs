@@ -125,12 +125,22 @@ const WEBVIEW_BRIDGE = '<script>'
   + ' __wvAfter = res.seq; res.messages.forEach(function (m) { window.postMessage(m, "*"); }); }).catch(function () {}); }, 60);'
   + '</scr' + 'ipt>';
 
+// VS Code puts a style sheet of its own in front of everything in the head of a webview
+// (its pre/index.html: newDocument.head.prepend(defaultStyles), id "_defaultStyles"), so the
+// page's own sheet is not the first one of the document there. An excerpt of it:
+const VSCODE_DEFAULT_STYLES = '<style id="_defaultStyles">'
+  + 'html { scrollbar-color: var(--vscode-scrollbarSlider-background) var(--vscode-editor-background); }'
+  + ' body { overscroll-behavior-x: none; background-color: transparent; color: var(--vscode-editor-foreground);'
+  + ' font-family: var(--vscode-font-family); font-weight: var(--vscode-font-weight); font-size: var(--vscode-font-size); margin: 0; padding: 0 20px; }'
+  + ' img, video { max-width: 100%; max-height: 100%; }'
+  + '</style>';
+
 async function serve(req, res) {
   const u = new URL(req.url, 'http://127.0.0.1:' + PORT);
   if (fake.panel && u.pathname === '/steps-webview') {
     const html = fake.panel.webview.html
       .replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, '')
-      .replace('<meta charset="utf-8">', '<meta charset="utf-8">' + WEBVIEW_BRIDGE)
+      .replace('<meta charset="utf-8">', VSCODE_DEFAULT_STYLES + '<meta charset="utf-8">' + WEBVIEW_BRIDGE)
       .replace('function flashNotice(text) {', 'function flashNotice(text) { (window.__notices = window.__notices || []).push(text);');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(html);
@@ -1636,6 +1646,10 @@ test('page in the VS Code panel: Export hands the story to the host, which saves
   }, { last: { sessions: [], ended: [], limits: {}, usage: null } });
   await provider.onMessage({ type: 'steps', sessionId: A });
   fake.panel = host.vscode.__panels[0];
+  // the page the host is handed for the PDF, on its way to the real printer
+  const print = provider.htmlToPdf;
+  let handed = null;
+  provider.htmlToPdf = (html, out, deps) => { handed = html; return print(html, out, deps); };
   try {
     const page = await openPage(A, '/steps-webview');
     await page.until((x) => x.bodyTexts.some((t) => t.indexOf('All of it is done.') !== -1), 'the story');
@@ -1659,6 +1673,12 @@ test('page in the VS Code panel: Export hands the story to the host, which saves
     const bytes = fs.readFileSync(pdfFile);
     assert.equal(bytes.slice(0, 5).toString('latin1'), '%PDF-');
     assert.ok(/\/Title\s*\(Webview session\)/.test(bytes.toString('latin1')), 'the PDF carries the title of the session');
+    // it is drawn with the page's own style sheet, not with the one VS Code puts in front of it
+    assert.ok(handed && handed.indexOf('html.export') !== -1, 'the page for the PDF carries the rules of the Steps page');
+    assert.equal(handed.indexOf('--vscode-scrollbarSlider-background'), -1, 'and not the style sheet of the webview');
+    const drawn = await inExportedPage(handed, '(function () { var y = document.querySelector(".you-msg"); return { font: getComputedStyle(document.body).fontFamily, you: y ? getComputedStyle(y).whiteSpace : "no message" }; })()');
+    assert.ok(/Segoe UI/.test(drawn.font), 'the text is set in the page\'s font: ' + drawn.font);
+    assert.equal(drawn.you, 'pre-wrap', 'your message keeps its lines');
     await page.close();
   } finally {
     fake.panel.dispose();
