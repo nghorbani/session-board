@@ -219,6 +219,11 @@
   html.export a.lnk:not([href]) { color: inherit; text-decoration: none; }   /* a path: text on paper, not a link */
   html.export .sec-head { break-after: avoid; }
   html.export .row .meta { break-after: avoid; }
+  /* Nothing is wider than the paper. A browser shrinks the whole page to fit its widest part,
+     so one long path, a wide table or a long line of code would make every text small. */
+  html.export body { overflow-wrap: anywhere; }
+  html.export .md table { max-width: 100%; }
+  html.export .you-msg, html.export .restate, html.export pre { min-width: 0; max-width: 100%; }
   @page { margin: 16mm 14mm; }
 
   /* On paper the parts are told apart by colour. Each kind of row has one: the tab's own where

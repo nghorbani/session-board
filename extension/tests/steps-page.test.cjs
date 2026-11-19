@@ -1636,10 +1636,11 @@ test('page: an export leaves the report of a subagent out until the calls of its
 }, { timeout: 60000 });
 
 /** Loads a page written for the PDF into a tab of its own and evaluates expr in it. */
-async function inExportedPage(html, expr) {
+async function inExportedPage(html, expr, width) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
   try {
     const { sessionId: cdpSessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    if (width) await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false }, cdpSessionId);
     const run = async (expression) => {
       const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, cdpSessionId);
       if (r.exceptionDetails) throw new Error('exported page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
@@ -1707,6 +1708,30 @@ test('page: the page for the PDF is in colour: your messages, Claude, work, erro
   assert.ok(parseFloat(c.barClaudeWidth) >= 2, c.barClaudeWidth);
   assert.ok(c.chosen !== grey && c.chosen !== clear, 'your choice is tinted: ' + c.chosen);
   assert.ok(c.heading !== c.text, 'a heading inside a text is in colour: ' + c.heading);
+});
+
+test('page: the page for the PDF is never wider than the paper: a long token, a wide table and a long line of code wrap', opts, async () => {
+  const token = 'C:/a/very/long/path/' + 'segment_of_a_name/'.repeat(30) + 'file.py';
+  const wide = '| ' + Array.from({ length: 14 }, (_, i) => 'column_number_' + i).join(' | ') + ' |\n|' + '---|'.repeat(14) + '\n| '
+    + Array.from({ length: 14 }, (_, i) => 'a_cell_value_that_is_long_' + i).join(' | ') + ' |';
+  const steps = [step('u1:0', 'you'), step('x1:0', 'text'), step('a1:0', 'subagent', { title: 'Explore', preview: 'Scout' })];
+  const sections = [section('lead', 'Session start', null, []),
+    section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }, { kind: 'work', items: ['a1:0'] }])];
+  fake.open = () => openReply({ steps, sections });
+  fake.bodies = (ids) => ids.map((id) => {
+    if (id === 'u1:0') return { stepId: id, text: 'look at ' + token, truncated: false, size: 700 };
+    if (id === 'x1:0') return { stepId: id, text: 'The file is `' + token + '`.\n\n' + wide + '\n\n```\n' + 'x = 1; '.repeat(120) + '\n```', truncated: false, size: 2000 };
+    if (id === 'a1:0') return { stepId: id, title: 'Explore', description: 'Scout', prompt: '', report: 'Found `' + token + '`.\n\n' + wide };
+    return { stepId: id, text: 'body of ' + id, truncated: false, size: 10 };
+  });
+  const page = await exportPage((x) => x.sectionHeadings.length >= 2 && x.rowsInView > 0);
+  await page.click('#allTools');   // with the report of the subagent in
+  const html = await page.exportAs('pdf');
+  await page.close();
+  assert.ok(html && html.indexOf('column_number_13') !== -1 && html.indexOf('Found') !== -1, 'the page for the PDF, with the table and the report');
+  // A4 less the margins of the page is about 688 px
+  const w = await inExportedPage(html, '({ page: document.documentElement.scrollWidth, paper: window.innerWidth })', 688);
+  assert.ok(w.page <= w.paper, 'nothing reaches past the paper, or a browser shrinks every text to fit it: ' + JSON.stringify(w));
 });
 
 test('page in the VS Code panel: Export hands the story to the host, which saves the Markdown where the dialog says and prints a real PDF', opts, async () => {
