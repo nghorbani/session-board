@@ -189,7 +189,9 @@ are while it grows.
   whole story, or what Decisions or Notes show of it, with the tool calls listed when **Tool
   calls** is on. Every text is written whole; tool results are left out. The Markdown keeps
   the texts as they were written, with your messages and notes quoted. The PDF is the story
-  as the tab draws it, printed by Chrome, Edge or Chromium on your machine (set the
+  as the tab draws it, on a white page with a colour for each part (your messages, Claude's
+  texts, the work, questions and plans, notes, errors), printed by Chrome, Edge or Chromium
+  on your machine (set the
   environment variable `SESSION_BOARD_BROWSER` to name another Chromium-based browser).
   Without one, the story is saved as an `.html` page and opened in your browser, to be
   printed to PDF from there.

@@ -1379,9 +1379,9 @@ function exportFixture() {
 }
 
 /** Opens the fixture and catches what the page would download or print. */
-async function exportPage() {
+async function exportPage(ready) {
   const page = await openPage(A);
-  await page.until((x) => x.sectionHeadings.length >= 33 && x.rowsInView > 0, 'first paint, at the end');
+  await page.until(ready || ((x) => x.sectionHeadings.length >= 33 && x.rowsInView > 0), 'first paint, at the end');
   await page.eval('window.__saved = []; saveInBrowser = function (name, text) { window.__saved.push({ name: name, text: text }); };'
     + ' window.__printed = []; window.__printCalls = 0;'
     + ' window.open = function () { return { document: { open: function () {}, write: function (h) { window.__printed.push(h); }, close: function () {} }, focus: function () {}, print: function () { window.__printCalls += 1; }, close: function () {} }; }; true');
@@ -1551,6 +1551,80 @@ test('page: Export as PDF in a browser opens the story as a page of its own and 
   assert.ok(/the whole story/.test(rows.sub), rows.sub);
   await page.close();
 }, { timeout: 60000 });
+
+/** Loads a page written for the PDF into a tab of its own and evaluates expr in it. */
+async function inExportedPage(html, expr) {
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+  try {
+    const { sessionId: cdpSessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const run = async (expression) => {
+      const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, cdpSessionId);
+      if (r.exceptionDetails) throw new Error('exported page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
+      return r.result.value;
+    };
+    const { frameTree } = await cdp.send('Page.getFrameTree', {}, cdpSessionId);
+    await cdp.send('Page.setDocumentContent', { frameId: frameTree.frame.id, html }, cdpSessionId);
+    return await run(expr);
+  } finally {
+    await cdp.send('Target.closeTarget', { targetId });
+  }
+}
+
+test('page: the page for the PDF is in colour: your messages, Claude, work, errors, questions, plans and notes each have a colour of their own, and printing keeps them', opts, async () => {
+  const steps = [step('u1:0', 'you'), step('x1:0', 'text'), step('e1:0', 'tool', { title: 'Edit' }), step('er1:0', 'error'),
+    step('q1:0', 'question'), step('p1:0', 'plan', { approved: true })];
+  const sections = [section('lead', 'Session start', null, []),
+    section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }, { kind: 'work', items: ['e1:0'] }, { kind: 'error', stepId: 'er1:0' }]),
+    section('question', 'Option A', 'q1:0', [{ kind: 'plan', stepId: 'p1:0' }])];
+  fake.open = () => openReply({ steps, sections });
+  fake.bodies = (ids) => ids.map((id) => {
+    if (id === 'e1:0') return { stepId: id, title: 'Edit', input: 'C:/proj/a.txt', path: 'C:/proj/a.txt' };
+    if (id === 'q1:0') return { stepId: id, questions: [{ header: 'Approach', question: 'Which way?', multiSelect: false, answered: true,
+      options: [{ label: 'Option A', description: 'simple', chosen: true }, { label: 'Option B', description: 'thorough', chosen: false }] }] };
+    if (id === 'p1:0') return { stepId: id, text: '# The plan\n\n1. do it', approved: true, truncated: false, size: 20 };
+    if (id === 'x1:0') return { stepId: id, text: '## Found\n\n- one\n\nUse `retry.js`.', truncated: false, size: 30 };
+    return { stepId: id, text: 'body of ' + id, truncated: false, size: 10 };
+  });
+  fake.notes.set('n1', { id: 'n1', stepId: 'x1:0', at: 1, text: 'check this claim', sent: [] });
+  const page = await exportPage((x) => x.sectionHeadings.length >= 2 && x.rowsInView > 0);
+  const html = await page.exportAs('pdf');
+  await page.close();
+  assert.ok(html, 'the page for the PDF');
+  const c = await inExportedPage(html, `(function () {
+    var of = function (sel, prop) { var e = document.querySelector(sel); return e ? getComputedStyle(e)[prop] : 'no element ' + sel; };
+    var root = getComputedStyle(document.documentElement);
+    return {
+      adjust: root.printColorAdjust || root.webkitPrintColorAdjust,
+      paper: of('body', 'backgroundColor'),
+      headYou: of('.sec-head.k-you', 'backgroundColor'), headQuestion: of('.sec-head.k-question', 'backgroundColor'),
+      you: of('.row.k-you .you-msg', 'backgroundColor'), youBar: of('.row.k-you .you-msg', 'borderLeftColor'),
+      chipClaude: of('.row.k-claude:not(.k-error) .chip', 'backgroundColor'), chipWork: of('.row.k-work .chip', 'backgroundColor'),
+      chipError: of('.row.k-error .chip', 'backgroundColor'), chipPlan: of('.row.k-plan .chip', 'backgroundColor'),
+      chipInk: of('.row.k-claude .chip', 'color'),
+      barClaude: of('.row.k-claude:not(.k-error) .body', 'borderLeftColor'), barClaudeWidth: of('.row.k-claude:not(.k-error) .body', 'borderLeftWidth'),
+      work: of('.row.k-work .body', 'backgroundColor'), plan: of('.row.k-plan .body', 'backgroundColor'),
+      chosen: of('.qopt.chosen', 'backgroundColor'), note: of('.saved-note', 'backgroundColor'),
+      heading: of('.row.k-claude .md .h', 'color'), text: of('.row.k-claude .md p', 'color'),
+    };
+  })()`);
+  const clear = 'rgba(0, 0, 0, 0)';
+  const grey = 'rgb(245, 246, 248)';   // the one panel grey everything had before
+  assert.equal(c.adjust, 'exact', 'a print dialog keeps the colours');
+  assert.equal(c.paper, 'rgb(255, 255, 255)', 'on a white page');
+  const chips = [c.chipClaude, c.chipWork, c.chipError, c.chipPlan];
+  chips.forEach((v) => assert.ok(/^rgb\(/.test(v) && v !== grey, 'a chip is filled with the colour of its kind: ' + JSON.stringify(c)));
+  assert.equal(new Set(chips).size, 4, 'Claude, Work, Error and Plan each have their own: ' + JSON.stringify(chips));
+  assert.equal(c.chipInk, 'rgb(255, 255, 255)', 'with white letters');
+  const fills = [c.you, c.work, c.plan, c.note];
+  fills.forEach((v) => assert.ok(/^rgb\(/.test(v) && v !== grey && v !== c.paper, 'a tinted part: ' + JSON.stringify(c)));
+  assert.equal(new Set(fills).size, 4, 'your message, the work, a plan and a note are told apart by their tint: ' + JSON.stringify(fills));
+  assert.ok(c.headYou !== clear && c.headQuestion !== clear && c.headYou !== c.headQuestion, 'the head of a section has the colour of what opened it: ' + c.headYou + ' / ' + c.headQuestion);
+  assert.equal(c.youBar, 'rgb(11, 98, 196)', 'your message carries your colour on its edge');
+  assert.equal(c.barClaude, c.chipClaude, 'a text of Claude has the edge of its chip');
+  assert.ok(parseFloat(c.barClaudeWidth) >= 2, c.barClaudeWidth);
+  assert.ok(c.chosen !== grey && c.chosen !== clear, 'your choice is tinted: ' + c.chosen);
+  assert.ok(c.heading !== c.text, 'a heading inside a text is in colour: ' + c.heading);
+});
 
 test('page in the VS Code panel: Export hands the story to the host, which saves the Markdown where the dialog says and prints a real PDF', opts, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-export-'));

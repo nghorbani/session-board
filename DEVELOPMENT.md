@@ -488,7 +488,10 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     except inside a code fence, which only its own marker closes. The PDF starts as a page:
     `buildExportPage` runs every section through the row builders the reader uses and
     serialises the result with the page's own style sheet (`html.export` rules: light
-    colours, nothing folded, nothing scrolls), without buttons and without script. In VS
+    colours, nothing folded, nothing scrolls), without buttons and without script. On
+    paper each kind of row has a colour of its own (a filled chip, a tint, an edge; the
+    `--claude`, `--work` and `*-tint` values exist only under `html.export`), and
+    `print-color-adjust: exact` keeps them when a print dialog would drop backgrounds. In VS
     Code the page sends `exportSave` with the content; the host asks where to save
     (`showSaveDialog`), writes Markdown as it is, and prints a PDF through `pdf.cjs`:
     the page is sealed with a content policy that lets nothing run or load, written to a

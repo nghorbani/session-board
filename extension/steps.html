@@ -221,6 +221,42 @@
   html.export .row .meta { break-after: avoid; }
   @page { margin: 16mm 14mm; }
 
+  /* On paper the parts are told apart by colour. Each kind of row has one: the tab's own where
+     the tab has one (you, questions and plans, notes, errors), and one more each for Claude and
+     for the work, which share the tab's accent and its grey. A chip is filled, a part has a
+     tint and an edge. The colours carry meaning, so a print dialog must not leave them out. */
+  html.export {
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    --claude: #0f766e; --work: #566070; --code: #9a3412;
+    --you-tint: #e6f0fb; --claude-tint: #e0f2ef; --plan-tint: #f1e9fb; --work-tint: #eef0f3;
+    --note-tint: #fdf2d9; --err-tint: #fbe9e6; --code-tint: #fbf0e8;
+  }
+  html.export h1 { color: var(--you); }
+  html.export .sec-head { padding: 6px 10px; background: var(--you-tint); border-radius: 5px 5px 0 0; }
+  html.export .sec-head.k-question, html.export .sec-head.k-approve { background: var(--plan-tint); border-bottom-color: var(--plan); }
+  html.export .restate { background: var(--you-tint); border-left: 4px solid var(--you); }
+  html.export .row.k-qa .restate { background: var(--plan-tint); border-left-color: var(--plan); }
+  html.export .row .chip { color: #fff; background: var(--work); border-color: var(--work); }
+  html.export .row.k-claude .chip { background: var(--claude); border-color: var(--claude); }
+  html.export .row.k-error .chip { background: var(--err); border-color: var(--err); }
+  html.export .row.k-qa .chip, html.export .row.k-plan .chip { background: var(--plan); border-color: var(--plan); }
+  html.export .row.k-claude .body { border-left: 3px solid var(--claude); padding-left: 10px; }
+  html.export .row.k-error .body { border-left-color: var(--err); background: var(--err-tint); padding: 6px 10px; border-radius: 0 4px 4px 0; }
+  html.export .row.k-work .body { border-left: 3px solid var(--work); background: var(--work-tint); padding: 6px 10px; border-radius: 0 4px 4px 0; }
+  html.export .row.k-plan .body { background: var(--plan-tint); padding: 8px 10px; border-radius: 0 4px 4px 0; }
+  html.export .qcard { border-left: 3px solid var(--plan); padding-left: 10px; }
+  html.export .qopt.chosen { background: var(--you-tint); }
+  html.export .qopt-tag { color: #fff; background: var(--you); }
+  html.export .saved-note { background: var(--note-tint); color: #8a5a10; padding: 6px 10px; border-radius: 0 4px 4px 0; }
+  html.export .row.k-claude .md .h, html.export .row.k-claude .md .bullet { color: var(--claude); }
+  html.export .row.k-plan .md .h, html.export .row.k-plan .md .bullet { color: var(--plan); }
+  html.export .md code, html.export a.code, html.export a.lnk.code:not([href]) { color: var(--code); background: var(--code-tint); border-color: #f1dccd; }
+  html.export .md th { background: var(--claude-tint); }
+  html.export .row.k-plan .md th { background: #e2d3f6; }
+  html.export .wn { color: var(--work); font-weight: 600; }
+  /* a block inside a tinted part stands out as white */
+  html.export .row.k-work .worklist, html.export .row.k-work pre.fold, html.export .row.k-plan pre.mdcode, html.export .row.k-error pre.mdcode { background: #fff; }
+
   @media (max-width: 760px) {
     header { padding: 8px 10px; }
     .bar input[type=search] { flex-basis: 100px; min-width: 70px; }
@@ -1533,7 +1569,7 @@ function buildClaudeRow(row) {
   var stepId = row.stepId;
   var compact = state.compactById ? state.compactById[stepId] : null;
   var kind = compact ? compact.kind : row.kind;
-  div.className = 'row ' + stepKindClass(kind);
+  div.className = 'row ' + stepKindClass(kind) + (kind === 'error' ? ' k-error' : '');
   div.setAttribute('data-step', stepId);
   div.id = 'step-' + stepId;
   var meta = document.createElement('div'); meta.className = 'meta';
