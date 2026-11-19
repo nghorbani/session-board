@@ -800,10 +800,30 @@ function createStepIndex(file, deps) {
 // inside a Work line that names the kind, so a changed transcript format shows up on the page
 const QUIET_KINDS = new Set(['tool', 'reasoning', 'subagent', 'other']);
 
+/* A paste arrives wrapped in <pasted_content id="..."> ... </pasted_content>, in front of or
+   between the words typed with it. Returns what stands outside the paste blocks, and what the
+   first block holds; a block cut off before its closing tag runs to the end of the text. */
+function splitPaste(text) {
+  let pasted = null;
+  const own = String(text || '').replace(/<pasted_content\b[^>]*>([\s\S]*?)(?:<\/pasted_content>|$)/g, (_, inner) => {
+    if (pasted === null) pasted = inner;
+    return '\n';
+  });
+  return { own: own.trim(), pasted: String(pasted || '').trim() };
+}
+
 function headingForYou(step, bodyFn) {
   // the preview is the start of the same text and longer than any heading, so it serves
   // without a read; a step that carries none (a caller's own record) is read
   const text = step.preview || ((bodyFn(step.id) || {}).text);
+  if (String(text || '').indexOf('<pasted_content') !== -1) {
+    // A paste: the heading is what you typed with it, which may stand after the paste and so
+    // past the preview (the message is read for it); a message that is nothing but a paste
+    // is headed by the start of the pasted text. The wrapper tag is never the heading.
+    const parts = splitPaste((bodyFn(step.id) || {}).text || text);
+    if (parts.own) return firstSentence(parts.own, 90) || 'Message';
+    return 'Pasted: ' + (firstSentence(parts.pasted, 80) || 'text');
+  }
   return firstSentence(text, 90) || 'Message';
 }
 function headingForQuestion(step, bodyFn) {

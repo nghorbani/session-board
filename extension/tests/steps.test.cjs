@@ -805,6 +805,22 @@ test('a you message whose content is a list of blocks (text plus a pasted image)
   assert.ok(youSection.heading.indexOf('what do you make of this') !== -1, 'the heading uses the text part');
 });
 
+test('a message that holds a paste is headed by your own words, or by the start of the pasted text, never by the wrapper tag', async () => {
+  const file = newFile();
+  writeLines(file, [
+    userLine(uuid(1), null, '<pasted_content id="ab12">\nRename the upload helper and its tests.\nThen run the suite.\n</pasted_content>'),
+    assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'on it' }]),
+    // the words typed after a paste that is longer than a preview
+    userLine(uuid(3), uuid(2), '<pasted_content id="ab12">\n' + 'a line of a long log\n'.repeat(40) + '</pasted_content>\nwhy does this fail?'),
+    assistantLine(uuid(4), uuid(3), 'm2', [{ type: 'text', text: 'because' }]),
+  ]);
+  const idx = steps.createStepIndex(file);
+  await idx.open();
+  const { sections } = steps.buildSections(idx.steps(), idx.body.bind(idx));
+  const heads = sections.filter((s) => s.kind === 'you').map((s) => s.heading);
+  assert.deepEqual(heads, ['Pasted: Rename the upload helper and its tests.', 'why does this fail?']);
+});
+
 test('a you message that is only a pasted image (no text block) reads as "(image)", not empty or "[object Object]"', async () => {
   const file = newFile();
   writeLines(file, [

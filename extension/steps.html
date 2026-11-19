@@ -987,6 +987,11 @@ function renderRail() {
     var entry = document.createElement('div');
     entry.className = 'sec-entry k-' + sec.kind;
     entry.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    // what an entry of the outline is, for whoever hovers it
+    entry.title = sec.kind === 'you' ? 'A message of yours; the story continues from here'
+      : sec.kind === 'question' ? 'Your answer to a question; the story continues from here'
+      : sec.kind === 'approve' ? 'A plan you approved; the story continues from here'
+      : 'What happened before your first message';
     if (sectionHasHit(sec)) entry.classList.add('has-hit');
     var dot = document.createElement('span'); dot.className = 'dot';
     var col = document.createElement('div'); col.className = 'body-col';
