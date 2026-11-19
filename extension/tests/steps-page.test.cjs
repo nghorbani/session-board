@@ -1590,6 +1590,51 @@ test('page: Export as PDF in a browser opens the story as a page of its own and 
   await page.close();
 }, { timeout: 60000 });
 
+test('page: an export leaves the report of a subagent out until the calls of its Work line are listed, and shows a pasted message without the tags around the paste', opts, async () => {
+  const steps = [step('u1:0', 'you'), step('a1:0', 'subagent', { title: 'Explore', preview: 'Scout the code' }), step('b1:0', 'tool', { title: 'Bash' }),
+    step('x1:0', 'text'), step('u2:0', 'you')];
+  const sections = [section('lead', 'Session start', null, []),
+    section('you', 'Task', 'u1:0', [{ kind: 'work', items: ['a1:0', 'b1:0'] }, { kind: 'text', stepId: 'x1:0' }]),
+    section('you', 'Look at this log:', 'u2:0', [])];
+  fake.open = () => openReply({ steps, sections });
+  fake.bodies = (ids, msg) => ids.map((id) => {
+    if (id === 'u1:0') return { stepId: id, text: '\n\n<pasted_content id="ab12">\n## Task\n\nDo the thing.\n</pasted_content id="ab12">', truncated: false, size: 80 };
+    if (id === 'u2:0') return { stepId: id, text: 'Look at this log:\n<pasted_content id="cd34">\nline one\n</pasted_content id="cd34">\nWhy?', truncated: false, size: 80 };
+    if (id === 'a1:0') return { stepId: id, title: 'Explore', description: 'Scout the code', prompt: 'look around', report: '## Report\n\nREPORT TEXT of the scout' };
+    if (id === 'b1:0') return Object.assign({ stepId: id, title: 'Bash', input: '$ npm test' }, msg && msg.forExport ? {} : { result: 'all green' });
+    return { stepId: id, text: 'body of ' + id, truncated: false, size: 10 };
+  });
+  const page = await exportPage((x) => x.sectionHeadings.length >= 3 && x.rowsInView > 0);
+  // the tab itself holds the report, folded, and shows the message as it was sent
+  for (let i = 0; i < 100 && !(await page.eval('Boolean(document.querySelector(".report-body"))')); i++) await sleep(50);
+  assert.equal(await page.eval('document.querySelector(".report-body").textContent.indexOf("REPORT TEXT") !== -1'), true, 'the tab shows the report');
+  let md = (await page.exportAs('md')).text;
+  let html = await page.exportAs('pdf');
+  assert.ok(md.indexOf('Subagent (Explore): Scout the code') !== -1 && html.indexOf('Scout the code') !== -1, 'the Work line says a subagent was sent out, and for what: ' + md);
+  assert.equal(md.indexOf('REPORT TEXT'), -1, 'the Markdown leaves its report out');
+  assert.equal(html.indexOf('REPORT TEXT'), -1, 'and so does the page for the PDF');
+  // your messages, without the tags Claude Code wraps a paste in
+  assert.equal(md.indexOf('pasted_content'), -1, md);
+  assert.equal(html.indexOf('pasted_content'), -1);
+  assert.ok(md.indexOf('\n> ## Task\n>\n> Do the thing.\n') !== -1, 'a message that is a paste starts with the pasted text: ' + md);
+  assert.ok(md.indexOf('\n> Look at this log:\n> Pasted:\n> line one\n>\n> Why?\n') !== -1, 'after typed words a line says where the pasted text starts, and an empty line where it ends: ' + md);
+  // the report opened in the tab: the export holds it
+  await page.click('.report-box .showall');
+  md = (await page.exportAs('md')).text;
+  html = await page.exportAs('pdf');
+  assert.ok(md.indexOf('REPORT TEXT of the scout') !== -1 && html.indexOf('REPORT TEXT of the scout') !== -1, 'an opened report is written out');
+  await page.click('.report-box .showall');
+  assert.equal((await page.exportAs('md')).text.indexOf('REPORT TEXT'), -1, 'closed again, it is left out again');
+  // Tool calls on: the calls are listed, and with them what the subagent sent back
+  await page.click('#allTools');
+  md = (await page.exportAs('md')).text;
+  html = await page.exportAs('pdf');
+  assert.ok(md.indexOf('REPORT TEXT of the scout') !== -1 && html.indexOf('REPORT TEXT of the scout') !== -1, 'with Tool calls on the report is in');
+  // in the tab the message is as it was
+  assert.equal(await page.eval('document.getElementById("step-u1:0").textContent.indexOf("pasted_content") !== -1'), true, 'the tab is unchanged');
+  await page.close();
+}, { timeout: 60000 });
+
 /** Loads a page written for the PDF into a tab of its own and evaluates expr in it. */
 async function inExportedPage(html, expr) {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });

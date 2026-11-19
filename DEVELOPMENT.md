@@ -483,12 +483,20 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     A transcript that is still being indexed is not exported. The page reads the bodies it
     needs in batches with `bodies` and `forExport` (every text whole, a tool call without
     its result; `exportBody` in `steps.cjs`) into a map of its own, which stands in for
-    `state.bodies` while it builds, so the reader keeps the cut texts it shows. The
+    `state.bodies` while it builds, so the reader keeps the cut texts it shows. A message
+    of yours goes into that map without the `pasted_content` tags around a paste
+    (`withoutPasteTags`). The report of a subagent is the result of a call: an export
+    writes it only where the view lists what the Work line ran or the report was opened
+    (`reportShown`; `state.buildingExport` is true only inside `withExportState`, unlike
+    `state.exporting`, which spans the whole run and its waits). The
     Markdown is written by `buildExportMarkdown`; headings inside a text are made smaller,
     except inside a code fence, which only its own marker closes. The PDF starts as a page:
     `buildExportPage` runs every section through the row builders the reader uses and
     serialises the result with the page's own style sheet (`html.export` rules: light
-    colours, nothing folded, nothing scrolls), without buttons and without script. On
+    colours, nothing folded, nothing scrolls), without buttons and without script. The
+    sheet is taken by its id (`pageStyle`): in a VS Code webview the first style sheet of
+    the document is one VS Code puts there, and the page suite's webview route puts an
+    excerpt of it in front for that reason. On
     paper each kind of row has a colour of its own (a filled chip, a tint, an edge; the
     `--claude`, `--work` and `*-tint` values exist only under `html.export`), and
     `print-color-adjust: exact` keeps them when a print dialog would drop backgrounds. In VS

@@ -232,6 +232,7 @@
     --note-tint: #fdf2d9; --err-tint: #fbe9e6; --code-tint: #fbf0e8;
   }
   html.export h1 { color: var(--you); }
+  html.export .you-msg { font-weight: 400; }   /* the tint marks it as yours; a long message reads better in normal weight */
   html.export .sec-head { padding: 6px 10px; background: var(--you-tint); border-radius: 5px 5px 0 0; }
   html.export .sec-head.k-question, html.export .sec-head.k-approve { background: var(--plan-tint); border-bottom-color: var(--plan); }
   html.export .restate { background: var(--you-tint); border-left: 4px solid var(--you); }
@@ -364,6 +365,7 @@ var state = {
   curHit: -1,
   openWork: Object.create(null),   // stepId or work-group key -> true while its detail list is open
   openReports: Object.create(null),
+  buildingExport: false,   // true only while an export builds its output (withExportState), never across a wait
   drawerOpen: false,
   atBottom: true,
   atTop: true,
@@ -1817,7 +1819,7 @@ function fillWorkBody(body, items, key) {
     body.appendChild(filesDiv);
   }
   var subagentIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'subagent'; });
-  subagentIds.forEach(function (id) { body.appendChild(buildSubagentBlock(id)); });
+  subagentIds.forEach(function (id) { body.appendChild(buildSubagentBlock(id, key)); });
 
   var toolIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'tool'; });
   if (toolIds.length) {
@@ -1855,7 +1857,7 @@ function buildWorkListItem(stepId) {
   return wrap;
 }
 
-function buildSubagentBlock(stepId) {
+function buildSubagentBlock(stepId, workKey) {
   var box = document.createElement('div'); box.className = 'report-box';
   var c = state.compactById && state.compactById[stepId];
   var b = state.bodies[stepId];
@@ -1865,7 +1867,7 @@ function buildSubagentBlock(stepId) {
   putText(wb, (b && b.description) || (c && c.preview) || '', state.query);
   item.appendChild(wn); item.appendChild(wb);
   box.appendChild(item);
-  if (b && b.report) {
+  if (b && b.report && reportShown(stepId, workKey)) {
     var reportBody = document.createElement('div'); reportBody.className = 'report-body md' + (state.openReports[stepId] ? ' open' : '');
     md(reportBody, b.report);
     if (state.query) hl(reportBody, state.query);
@@ -2380,7 +2382,11 @@ function collectExportBodies(ids, onProgress) {
       if (state.generation !== generation || reply.items.some(function (item) { return item.stale; })) {
         throw new Error('the transcript changed while the texts were read; try again');
       }
-      reply.items.forEach(function (item) { bodies[item.stepId] = item; });
+      reply.items.forEach(function (item) {
+        var c = state.compactById && state.compactById[item.stepId];
+        if (c && c.kind === 'you' && typeof item.text === 'string') item.text = withoutPasteTags(item.text);
+        bodies[item.stepId] = item;
+      });
       at += batch.length;
       onProgress(Math.min(at, ids.length), ids.length);
       return next();
@@ -2392,9 +2398,30 @@ function collectExportBodies(ids, onProgress) {
 /* The view an export is of, taken when it starts: reading its texts takes a while, and the
    tab may be switched to another view meanwhile. */
 function exportView() {
-  var openWork = Object.create(null);
-  Object.keys(state.openWork).forEach(function (k) { openWork[k] = state.openWork[k]; });
-  return { lens: state.lens, showAllTools: state.showAllTools, openWork: openWork };
+  function copy(of) {
+    var c = Object.create(null);
+    Object.keys(of).forEach(function (k) { c[k] = of[k]; });
+    return c;
+  }
+  return { lens: state.lens, showAllTools: state.showAllTools, openWork: copy(state.openWork), openReports: copy(state.openReports) };
+}
+
+/* A message of yours as an export shows it: without the tags Claude Code wraps a paste in.
+   Where words were typed in front of a paste, a line says where the pasted text starts. */
+function withoutPasteTags(text) {
+  text = String(text == null ? '' : text);
+  if (text.indexOf('<pasted_content') === -1) return text;
+  return text.replace(/<pasted_content\b[^>\n]*>[ \t]*\r?\n?/g, function (tag, at) {
+    return text.slice(0, at).trim() ? 'Pasted:\n' : '';
+  }).replace(/[ \t]*<\/pasted_content\b[^>\n]*>/g, '').replace(/^\s*\n/, '').replace(/\s+$/, '');
+}
+
+/* Whether the report a subagent sent back is written out. The tab always holds it, folded.
+   A report is the result of a call, and an export leaves results out: it holds a report only
+   where the view lists what the Work line ran (Tool calls on, or that line opened) or where
+   the report itself was opened. */
+function reportShown(stepId, workKey) {
+  return !state.buildingExport || state.showAllTools || Boolean(state.openWork[workKey]) || Boolean(state.openReports[stepId]);
 }
 
 /* Runs fn with the page's state as an export wants it: the view it was started in, the
@@ -2403,10 +2430,11 @@ function exportView() {
    rows), so what runs inside fn is the export's; the reader's own state is back when fn
    returns. fn must not wait for anything. */
 function withExportState(view, bodies, fn) {
-  var keep = { lens: state.lens, showAllTools: state.showAllTools, openWork: state.openWork,
-    bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor };
+  var keep = { lens: state.lens, showAllTools: state.showAllTools, openWork: state.openWork, openReports: state.openReports,
+    bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor, buildingExport: state.buildingExport };
   state.lens = view.lens; state.showAllTools = view.showAllTools; state.openWork = view.openWork;
-  state.bodies = bodies || state.bodies; state.query = ''; state.noteBoxFor = null;
+  state.openReports = view.openReports || state.openReports;
+  state.bodies = bodies || state.bodies; state.query = ''; state.noteBoxFor = null; state.buildingExport = true;
   try { return fn(); }
   finally { Object.keys(keep).forEach(function (k) { state[k] = keep[k]; }); }
 }
@@ -2542,7 +2570,7 @@ function buildExportMarkdown(view, secs, bodies) {
         if (!c || c.kind !== 'subagent') return;
         var b = state.bodies[id];
         out.push('Subagent' + (c.title ? ' (' + mdOneLine(c.title) + ')' : '') + ': ' + mdOneLine((b && b.description) || c.preview || ''), '');
-        if (b && b.report) out.push(mdQuote(mdDemote(b.report)), '');
+        if (b && b.report && reportShown(id, 'g-' + first)) out.push(mdQuote(mdDemote(b.report)), '');
       });
       // the calls of a Work line are listed when the view lists them: Tool calls on, or this line opened
       if (state.showAllTools || state.openWork['g-' + first]) {

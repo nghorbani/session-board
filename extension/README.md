@@ -187,7 +187,9 @@ are while it grows.
   text. Their inner steps are not shown.
 - **Export** saves the story of the view you are in as **Markdown** or as a **PDF**: the
   whole story, or what Decisions or Notes show of it, with the tool calls listed when **Tool
-  calls** is on. Every text is written whole; tool results are left out. The Markdown keeps
+  calls** is on. Every text is written whole; tool results are left out, and so is the report
+  of a subagent unless **Tool calls** is on or you opened that report or its Work line.
+  Your own messages are shown without the tags Claude Code puts around a paste. The Markdown keeps
   the texts as they were written, with your messages and notes quoted. The PDF is the story
   as the tab draws it, on a white page with a colour for each part (your messages, Claude's
   texts, the work, questions and plans, notes, errors), printed by Chrome, Edge or Chromium
