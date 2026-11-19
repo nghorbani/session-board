@@ -40,6 +40,14 @@ test('the steps message opens one panel per session, titled with the session\'s 
   assert.equal(vscode.__panels[0].title, 'Steps: My session');
 });
 
+test('the Steps tab opens in the editor group in use, as one more tab there, not in a new group beside it', async () => {
+  const service = fakeService();
+  const { provider } = boot({}, { last: last() });
+  provider.stepsService = service;
+  await provider.onMessage({ type: 'steps', sessionId: A });
+  assert.equal(vscode.__panels[0].__showOptions, vscode.ViewColumn.Active);
+});
+
 test('asking again for the same session reveals the existing panel instead of creating a new one', async () => {
   const service = fakeService();
   const { provider } = boot({}, { last: last() });

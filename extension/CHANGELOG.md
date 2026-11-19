@@ -2,7 +2,7 @@
 
 ## 0.12.0
 
-- Steps: a new row button (≡) opens a session's story in its own editor tab, beside the chat. It reads the session's transcript and shows what the chat scrolls away: your messages, the texts Claude Code printed, the short updates between tool calls, questions with your answers, and plans. A running session is followed live
+- Steps: a new row button (≡) opens a session's story in an editor tab of its own, in the editor group you are in (drag the tab to the side to read it next to the chat). It reads the session's transcript and shows what the chat scrolls away: your messages, the texts Claude Code printed, the short updates between tool calls, questions with your answers, and plans. A running session is followed live
 - The story is cut into sections, one per input of yours, headed in your own words. Tool calls fold into one "Work" line per run that says what was done; "Details" opens the calls with their commands and results. A section that did work ends in a line with its active time, tool calls and files changed
 - A question shows as it was asked: header, full text, every option with its description, and your choice marked
 - Texts are rendered as Markdown. A link to a web page opens in the browser, a folder in Explorer, a file in the editor, a Markdown file in the preview. Network paths are refused and copied instead; a path outside the session's folder, the workspace and your home folder asks first

@@ -667,7 +667,7 @@ function boardArchived(s) { var by = archivedBy(s); return by === 'board' || by 
 
 // -- actions -------------------------------------------------------------------------------
 
-/** The Steps button: a webview panel next to the chat in VS Code, a new browser tab otherwise
+/** The Steps button: a tab in the editor group in use in VS Code, a new browser tab otherwise
     (the server embeds its own token into that page the same way it does for this one). */
 function openSteps(sid) {
   if (vsapi) { send({ type: 'steps', sessionId: sid }); return; }

@@ -607,14 +607,16 @@ class BoardProvider {
    * "Steps: <title>", wired so page messages reach stepsService.handle and service pushes
    * (follow, indexing progress) reach the panel. Everything the service holds for this
    * session (its index, its follow timer) is released once the panel is disposed and no
-   * other subscriber is left.
+   * other subscriber is left. The panel opens as one more tab in the editor group in use,
+   * where the chat tab is; it does not split the editor area (a tab can be dragged to the
+   * side when both are wanted at once).
    */
   async openSteps(sessionId) {
     const existing = this.stepsPanels.get(sessionId);
     if (existing) { existing.reveal(); return; }
     const title = this.stepsSessionTitle(sessionId) || sessionId.slice(0, 8);
     const panel = vscode.window.createWebviewPanel(
-      'sessionBoard.steps', 'Steps: ' + title, vscode.ViewColumn.Beside,
+      'sessionBoard.steps', 'Steps: ' + title, vscode.ViewColumn.Active,
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
     );
     this.stepsPanels.set(sessionId, panel);

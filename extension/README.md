@@ -141,9 +141,10 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
 ## Steps
 
 The chat shows a session's latest text and replaces the lines it printed between tool calls.
-≡ on a row opens that session's story in an editor tab of its own, beside the chat, read from
-the session's transcript on disk. A running session is followed live; untick **Follow** to
-stay where you are while it grows.
+≡ on a row opens that session's story in an editor tab of its own, read from the session's
+transcript on disk. The tab opens in the editor group you are in; drag it to the side to read
+it next to the chat. A running session is followed live; untick **Follow** to stay where you
+are while it grows.
 
 ![The Steps tab of a session, with an example story](https://github.com/nghorbani/session-board/raw/HEAD/extension/media/steps.png)
 

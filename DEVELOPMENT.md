@@ -402,8 +402,9 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   (tmp then rename). It answers `claude-owned` for a session running in a window or in a
   terminal whose registry record says `nameSource: "user"`.
 
-- **Steps**: ≡ sends `steps`; the host opens one webview panel per session beside the chat
-  (`retainContextWhenHidden`, not restored after a reload) on `steps.html` and passes every
+- **Steps**: ≡ sends `steps`; the host opens one webview panel per session as a tab in the
+  editor group in use (`ViewColumn.Active`, so the editor area is not split;
+  `retainContextWhenHidden`, not restored after a reload) on `steps.html` and passes every
   page message to `createStepsService().handle()`, whose pushes go back through
   `subscribe()`. `server.cjs` mounts the same service behind `POST /api/steps` (JSON body,
   64 KB, the one route that parses a body) and `GET /api/steps/poll?session=&after=<seq>`.

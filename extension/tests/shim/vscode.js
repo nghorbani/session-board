@@ -105,6 +105,7 @@ const api = {
     withProgress: (opts, fn) => fn({ report() {} }, { isCancellationRequested: false, onCancellationRequested: () => disposable() }),
     createWebviewPanel: (viewType, title, showOptions, opts) => {
       const panel = makePanel(viewType, title, opts);
+      panel.__showOptions = showOptions;   // the editor column the panel was asked to open in
       api.__panels.push(panel);
       return panel;
     },
