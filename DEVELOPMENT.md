@@ -476,11 +476,16 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     push redraws the reader.
   - Export: both formats are built in the page, from the sections of the view in use
     (`visibleSections`, `drawnBody`), so an export holds what the view shows, in the same
-    words. The page first reads the bodies it needs in batches with `bodies` and
-    `forExport` (every text whole, a tool call without its result; `exportBody` in
-    `steps.cjs`) into a map of its own, and puts that map in place of `state.bodies` only
-    while it builds (`withExportState`), so the reader keeps the cut texts it shows. The
-    Markdown is written by `buildExportMarkdown`. The PDF starts as a page:
+    words, the notes off the current path of the Notes view included. The view (lens, Tool
+    calls, opened Work lines) is taken once when the export starts (`exportView`) and put
+    in place of the state only while the export picks its sections and builds
+    (`withExportState`), so a switch of the tab while the texts are read changes nothing.
+    A transcript that is still being indexed is not exported. The page reads the bodies it
+    needs in batches with `bodies` and `forExport` (every text whole, a tool call without
+    its result; `exportBody` in `steps.cjs`) into a map of its own, which stands in for
+    `state.bodies` while it builds, so the reader keeps the cut texts it shows. The
+    Markdown is written by `buildExportMarkdown`; headings inside a text are made smaller,
+    except inside a code fence, which only its own marker closes. The PDF starts as a page:
     `buildExportPage` runs every section through the row builders the reader uses and
     serialises the result with the page's own style sheet (`html.export` rules: light
     colours, nothing folded, nothing scrolls), without buttons and without script. In VS
@@ -488,8 +493,11 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     (`showSaveDialog`), writes Markdown as it is, and prints a PDF through `pdf.cjs`:
     the page is sealed with a content policy that lets nothing run or load, written to a
     temp folder and printed by a headless Chrome, Edge or Chromium on a profile of its
-    own (`findBrowser`, `SESSION_BOARD_BROWSER` to name one). Without such a browser the
-    sealed page is saved as `.html` and opened in the default browser. A browser needs no
+    own (`findBrowser`, `SESSION_BOARD_BROWSER` to name one); the PDF is copied to its
+    place only when it starts and ends as one. The host looks for the browser before it
+    asks where to save: without one the dialog asks for an `.html` file and says why, the
+    sealed page is saved there and opened in the default browser. The only file an export
+    writes is the one the dialog named. A browser needs no
     host for this: it downloads the Markdown and prints the page from a window of its own
     (the 64 KB limit of `POST /api/steps` would not take the content anyway).
   - Links: the page sends `openLink` with a kind. `http` and `https` go to `openExternal`.

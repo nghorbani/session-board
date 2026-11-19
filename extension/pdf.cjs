@@ -66,17 +66,25 @@ function runBrowser(exe, args, timeoutMs) {
   });
 }
 
-function isPdf(file) {
+/** A file that starts and ends as a PDF does. A browser stopped in the middle of its print
+    can leave one that only starts like it. */
+function isWholePdf(file) {
   try {
     const fd = fs.openSync(file, 'r');
-    try { const head = Buffer.alloc(5); fs.readSync(fd, head, 0, 5, 0); return head.toString('latin1') === '%PDF-'; }
-    finally { fs.closeSync(fd); }
+    try {
+      const size = fs.fstatSync(fd).size;
+      const head = Buffer.alloc(5);
+      fs.readSync(fd, head, 0, 5, 0);
+      const tail = Buffer.alloc(Math.min(size, 1024));
+      fs.readSync(fd, tail, 0, tail.length, size - tail.length);
+      return head.toString('latin1') === '%PDF-' && tail.toString('latin1').indexOf('%%EOF') !== -1;
+    } finally { fs.closeSync(fd); }
   } catch (_) { return false; }
 }
 
 /**
  * Prints `html` to `outFile`. The browser works in a temp folder of its own (the sealed page,
- * a fresh profile, the PDF), and the PDF is copied out only when it is one, so a failed print
+ * a fresh profile, the PDF), and the PDF is copied out only when it is a whole one, so a failed print
  * leaves nothing at `outFile`. `deps`: findBrowser, run(exe, args, timeoutMs), timeoutMs.
  */
 async function htmlToPdf(html, outFile, deps) {
@@ -99,7 +107,7 @@ async function htmlToPdf(html, outFile, deps) {
       pathToFileURL(page).href,
     ];
     const res = await (deps.run || runBrowser)(exe, args, timeoutMs);
-    if (!isPdf(printed)) return { ok: false, message: 'The browser wrote no PDF' + (res && res.error ? ': ' + res.error : '') + '.' };
+    if (!isWholePdf(printed)) return { ok: false, message: 'The browser wrote no PDF' + (res && res.error ? ': ' + res.error : '') + '.' };
     fs.copyFileSync(printed, outFile);
     return { ok: true };
   } catch (e) {

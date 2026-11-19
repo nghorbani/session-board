@@ -205,7 +205,7 @@ function createStepsService(deps) {
         // output) adds no step, but it changes what that step says and can open a section.
         const updated = res.updated || [];
         if (!res.appended.length && !updated.length && res.reset === null) return;
-        const { sections, strip } = buildSections(s.index.steps(), s.index.body);
+        const { sections, strip } = buildSections(s.index.steps(), s.index.body, s.index.fullText);
         const generation = s.index.generation();
         if (res.reset !== null && res.reset !== undefined) {
           // the path changed further back: ids may answer to other steps now, so send them all
@@ -272,7 +272,7 @@ function createStepsService(deps) {
     if (sessions.get(sessionId) !== s) return Object.assign(reply, { ok: false, message: 'the viewer closed before the transcript was read' });
     startFollow(sessionId, s);
     const stepsArr = s.index.steps();
-    const { sections, strip } = buildSections(stepsArr, s.index.body);
+    const { sections, strip } = buildSections(stepsArr, s.index.body, s.index.fullText);
     return Object.assign(reply, {
       ok: true,
       title: sessionTitle(sessionId) || null,

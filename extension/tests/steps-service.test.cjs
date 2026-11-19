@@ -199,6 +199,18 @@ test('bodies: one round trip loads the texts of several steps at once', async ()
   assert.equal(res.items[2].text, 'second message');
 });
 
+test('a section is headed by the words typed after a paste, also when the paste is longer than the 200 KB a body shows', async () => {
+  const file = newFile();
+  const paste = '<pasted_content id="ab12">\n' + 'a line of a long log\n'.repeat(13000) + '</pasted_content>\n';
+  assert.ok(paste.length > 250 * 1024);
+  writeLines(file, [userLine(uuid(1), null, paste + 'Why does this fail?'), assistantLine(uuid(2), uuid(1), 'm1', [{ type: 'text', text: 'because' }])]);
+  const deps = makeDeps();
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  assert.equal(opened.sections.find((sec) => sec.kind === 'you').heading, 'Why does this fail?');
+});
+
 test('bodies for an export: whole texts past the 200 KB cut, tool calls without their results', async () => {
   const file = newFile();
   const huge = 'y'.repeat(250 * 1024) + ' the very end';

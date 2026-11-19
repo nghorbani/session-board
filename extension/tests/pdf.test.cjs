@@ -30,7 +30,7 @@ function printingBrowser(seen) {
     const url = args[args.length - 1];
     seen.page = fs.readFileSync(require('url').fileURLToPath(url), 'utf8');
     seen.workDir = path.dirname(arg(args, '--print-to-pdf'));
-    fs.writeFileSync(arg(args, '--print-to-pdf'), '%PDF-1.4 a printed story');
+    fs.writeFileSync(arg(args, '--print-to-pdf'), '%PDF-1.4 a printed story\n%%EOF\n');
     return { error: null };
   };
 }
@@ -50,7 +50,7 @@ test('htmlToPdf prints the sealed page with a headless browser on a profile of i
   const seen = {};
   const res = await pdf.htmlToPdf(PAGE, out, { findBrowser: () => 'C:/browser/app.exe', run: printingBrowser(seen) });
   assert.deepEqual(res, { ok: true });
-  assert.equal(fs.readFileSync(out, 'utf8'), '%PDF-1.4 a printed story');
+  assert.equal(fs.readFileSync(out, 'utf8'), '%PDF-1.4 a printed story\n%%EOF\n');
   assert.equal(seen.exe, 'C:/browser/app.exe');
   assert.ok(seen.args.some((a) => a.indexOf('--headless') === 0), 'headless: ' + seen.args.join(' '));
   assert.ok(arg(seen.args, '--user-data-dir'), 'a profile of its own, never the one the owner browses with');
@@ -84,6 +84,14 @@ test('htmlToPdf says why when the browser wrote no PDF, and leaves no file behin
     run: async (exe, args) => { fs.writeFileSync(arg(args, '--print-to-pdf'), 'not a pdf'); return { error: null }; },
   });
   assert.equal(junk.ok, false);
+  assert.equal(fs.existsSync(out), false);
+  // a PDF the browser was stopped in the middle of: it starts like one and has no end
+  const cut = await pdf.htmlToPdf(PAGE, out, {
+    findBrowser: () => 'C:/browser/app.exe',
+    run: async (exe, args) => { fs.writeFileSync(arg(args, '--print-to-pdf'), '%PDF-1.4 half a story'); return { error: 'it did not finish within 120 s' }; },
+  });
+  assert.equal(cut.ok, false);
+  assert.ok(cut.message.indexOf('did not finish within 120 s') !== -1, cut.message);
   assert.equal(fs.existsSync(out), false);
 });
 

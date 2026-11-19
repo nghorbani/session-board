@@ -413,11 +413,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-/** A panel for session A with a scripted PDF printer; `answer(requestId)` waits for a reply. */
-async function exportPanel(printer) {
+/** A panel for session A with a scripted PDF printer, on a machine that has a browser to
+    print with unless `browser` is null; `answer(requestId)` waits for a reply. */
+async function exportPanel(printer, browser) {
   const { provider } = boot({}, { last: last() });
   provider.stepsService = fakeService();
   if (printer) provider.htmlToPdf = printer;
+  provider.findPdfBrowser = () => (browser === undefined ? 'C:/browser/app.exe' : browser);
   await provider.onMessage({ type: 'steps', sessionId: A });
   const panel = vscode.__panels[0];
   const answer = async (requestId) => {
@@ -474,20 +476,40 @@ test('exportSave as PDF hands the page to the printer with the chosen file, and 
   assert.deepEqual([failed.ok, failed.message], [false, 'The browser wrote no PDF: it did not finish within 120 s.']);
 });
 
-test('exportSave as PDF on a machine without a browser to print with saves the page itself, sealed, and opens it in the default browser', async () => {
-  const { panel, answer, dir } = await exportPanel(async () => ({ ok: false, noBrowser: true, message: 'No Chrome, Edge or Chromium was found to print the PDF with.' }));
-  const target = path.join(dir, 'story.pdf');
-  vscode.__saveTarget = vscode.Uri.file(target);
+test('exportSave as PDF on a machine without a browser to print with asks where to save the page itself, saves it sealed and opens it in the default browser', async () => {
+  const printed = [];
+  const { panel, answer, dir } = await exportPanel(async (html, outFile) => { printed.push(outFile); return { ok: true }; }, null);
+  const page = path.join(dir, 'story.html');
+  vscode.__saveTarget = vscode.Uri.file(page);
   panel.__fireMessage({ type: 'exportSave', requestId: 'e1', format: 'pdf', name: 'Story', content: STORY_PAGE });
   const reply = await answer('e1');
   assert.equal(reply.ok, true);
-  const page = path.join(dir, 'story.html');
   assert.ok(reply.message.indexOf('story.html') !== -1 && /print/i.test(reply.message), 'the reply says what to do: ' + reply.message);
-  assert.equal(fs.existsSync(target), false, 'no file that is called a PDF and is none');
+  // the dialog asked for the file that is written: a page, under a name that says so
+  const asked = vscode.__saveDialogs[0];
+  assert.equal(path.basename(asked.defaultUri.fsPath), 'Story.html');
+  assert.deepEqual(asked.filters, { 'Web page': ['html'] });
+  assert.ok(/no chrome, edge or chromium/i.test(asked.title), 'and its title says why: ' + asked.title);
+  assert.deepEqual(printed, [], 'nothing is printed');
+  assert.deepEqual(fs.readdirSync(dir), ['story.html'], 'the one file the dialog named, and no file that is called a PDF');
   const saved = fs.readFileSync(page, 'utf8');
   assert.ok(saved.indexOf('Content-Security-Policy') !== -1 && saved.indexOf('<p>the story</p>') !== -1);
   assert.equal(vscode.__openedExternal.length, 1);
   assert.equal(vscode.__openedExternal[0].fsPath, page);
+  // cancelled: nothing more is written or opened
+  vscode.__saveTarget = undefined;
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e2', format: 'pdf', name: 'Story', content: STORY_PAGE });
+  assert.deepEqual([(await answer('e2')).cancelled, fs.readdirSync(dir).length, vscode.__openedExternal.length], [true, 1, 1]);
+});
+
+test('exportSave as PDF writes no other file when the print finds no browser after all', async () => {
+  const { panel, answer, dir } = await exportPanel(async () => ({ ok: false, noBrowser: true, message: 'No Chrome, Edge or Chromium was found to print the PDF with.' }));
+  vscode.__saveTarget = vscode.Uri.file(path.join(dir, 'story.pdf'));
+  panel.__fireMessage({ type: 'exportSave', requestId: 'e1', format: 'pdf', name: 'Story', content: STORY_PAGE });
+  const reply = await answer('e1');
+  assert.deepEqual([reply.ok, reply.message], [false, 'No Chrome, Edge or Chromium was found to print the PDF with.']);
+  assert.deepEqual(fs.readdirSync(dir), [], 'no file beside the one the dialog named');
+  assert.equal(vscode.__openedExternal.length, 0);
 });
 
 test('revealHere without a prompt keeps its six positional arguments (regression)', async () => {

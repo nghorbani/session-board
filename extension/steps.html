@@ -2341,14 +2341,26 @@ function collectExportBodies(ids, onProgress) {
   return next();
 }
 
-/* Runs fn with the page's state as an export wants it: the bodies read for the export, no
-   search highlight, no open note box. The builders of the rows read the state, so what they
-   build inside fn is the export's; the reader's own state is back when fn returns. */
-function withExportState(bodies, fn) {
-  var keep = { bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor };
-  state.bodies = bodies; state.query = ''; state.noteBoxFor = null;
+/* The view an export is of, taken when it starts: reading its texts takes a while, and the
+   tab may be switched to another view meanwhile. */
+function exportView() {
+  var openWork = Object.create(null);
+  Object.keys(state.openWork).forEach(function (k) { openWork[k] = state.openWork[k]; });
+  return { lens: state.lens, showAllTools: state.showAllTools, openWork: openWork };
+}
+
+/* Runs fn with the page's state as an export wants it: the view it was started in, the
+   bodies read for it (when given), no search highlight, no open note box. Everything that
+   says what a view shows reads the state (visibleSections, drawnBody, the builders of the
+   rows), so what runs inside fn is the export's; the reader's own state is back when fn
+   returns. fn must not wait for anything. */
+function withExportState(view, bodies, fn) {
+  var keep = { lens: state.lens, showAllTools: state.showAllTools, openWork: state.openWork,
+    bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor };
+  state.lens = view.lens; state.showAllTools = view.showAllTools; state.openWork = view.openWork;
+  state.bodies = bodies || state.bodies; state.query = ''; state.noteBoxFor = null;
   try { return fn(); }
-  finally { state.bodies = keep.bodies; state.query = keep.query; state.noteBoxFor = keep.noteBoxFor; }
+  finally { Object.keys(keep).forEach(function (k) { state[k] = keep[k]; }); }
 }
 
 function exportName() {
@@ -2371,7 +2383,7 @@ function exportByline(secs) {
    uses, serialised with the page's own style sheet. What only works in the live tab is
    taken out (buttons, the note box); a web link keeps its address, a path is shown as text.
    The page holds no script. */
-function buildExportPage(secs, bodies) {
+function buildExportPage(view, secs, bodies) {
   var doc = document.implementation.createHTMLDocument(state.title);
   doc.documentElement.className = 'export';
   doc.documentElement.setAttribute('lang', 'en');
@@ -2381,10 +2393,12 @@ function buildExportPage(secs, bodies) {
   style.textContent = document.querySelector('style').textContent;
   doc.head.appendChild(style);
   var h1 = doc.createElement('h1'); h1.textContent = state.title; doc.body.appendChild(h1);
-  var sub = doc.createElement('div'); sub.className = 'sub'; sub.textContent = exportByline(secs); doc.body.appendChild(sub);
+  var sub = doc.createElement('div'); sub.className = 'sub'; doc.body.appendChild(sub);
   var main = doc.createElement('main'); main.className = 'reader';
   var inner = doc.createElement('div'); inner.className = 'reader-inner';
-  withExportState(bodies, function () {
+  withExportState(view, bodies, function () {
+    sub.textContent = exportByline(secs);
+    if (state.lens === 'notes') buildOrphanNotes(inner);   // as the Notes view shows them, in front
     secs.forEach(function (sec, i) { inner.appendChild(buildSectionNode(sec, i, secs)); });
   });
   Array.prototype.forEach.call(inner.querySelectorAll('button, textarea, input, .notebox'), function (n) {
@@ -2408,12 +2422,17 @@ function mdQuote(text) {
 /* Headings inside a text are made two levels smaller, so the headings of the file itself (its
    title and one per section) stay its outline. A line inside a code fence is left alone. */
 function mdDemote(text) {
-  var fenced = false;
+  var fence = null;   // inside a code block: the character and the length of the marker that opened it
   return String(text == null ? '' : text).split('\n').map(function (l) {
-    if (/^\s*(```|~~~)/.test(l)) { fenced = !fenced; return l; }
-    if (fenced) return l;
-    var m = /^(#{1,6})(\s+.*)$/.exec(l);
-    return m ? new Array(Math.min(6, m[1].length + 2) + 1).join('#') + m[2] : l;
+    var m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l);
+    if (fence) {
+      // only a marker of the same character, at least as long and with nothing after it, closes
+      if (m && m[1].charAt(0) === fence.ch && m[1].length >= fence.len && !m[2].trim()) fence = null;
+      return l;
+    }
+    if (m) { fence = { ch: m[1].charAt(0), len: m[1].length }; return l; }
+    var h = /^(#{1,6})(\s+.*)$/.exec(l);
+    return h ? new Array(Math.min(6, h[1].length + 2) + 1).join('#') + h[2] : l;
   }).join('\n');
 }
 
@@ -2428,10 +2447,12 @@ function mdFence(text, indent) {
 /* The story as Markdown: the same sections and rows as the view in use, in the same words (the
    labels, the Work lines, the facts lines), with the texts as they were written. Your own
    messages and your notes are quoted. */
-function buildExportMarkdown(secs, bodies) {
-  return withExportState(bodies, function () {
+function buildExportMarkdown(view, secs, bodies) {
+  return withExportState(view, bodies, function () {
     var out = ['# ' + mdOneLine(state.title), '', exportByline(secs), ''];
     var notes = notesByStep();
+    // the Notes view shows, in front, the notes whose step is no longer on the current path
+    if (state.lens === 'notes') orphanNotes().forEach(function (n) { out.push(mdQuote('Note: ' + n.text + '\n(step not on the current path)'), ''); });
     function compact(id) { return (state.compactById && state.compactById[id]) || null; }
     function textOf(id) {
       var b = state.bodies[id];
@@ -2536,8 +2557,7 @@ function saveInBrowser(name, text, type) {
    where to save and writes the file (a PDF is printed there by a browser of the machine).
    A browser downloads the Markdown, and prints the page itself: the story opens in a tab
    of its own with the print dialog, where "Save as PDF" is one of the printers. */
-function deliverExport(format, content, printWindow) {
-  var name = exportName();
+function deliverExport(format, name, content, printWindow) {
   if (vsapi) {
     return call({ type: 'exportSave', format: format, name: name, content: content }).then(function (reply) {
       if (reply && reply.cancelled) return 'Export cancelled.';
@@ -2565,23 +2585,29 @@ function setExportBusy(busy) {
 }
 
 /* Export of the view in use: the whole story, or what Decisions or Notes show of it, with the
-   calls of the Work lines when Tool calls is on. */
+   calls of the Work lines when Tool calls is on. The view is taken once, here; a switch of
+   the tab while the texts are read does not change what is exported. */
 function runExport(format) {
-  if (state.exporting) return;
-  var secs = state.loaded ? visibleSections() : [];
-  if (!secs.length) { flashNotice('There is nothing to export in this view.'); return; }
+  if (state.exporting || !state.loaded) return;
+  // a transcript still being read is not the whole story yet, and an export would not say so
+  if (state.indexing) { flashNotice('Still indexing this transcript: export once the story is whole.'); return; }
+  var view = exportView();
+  var plan = withExportState(view, null, function () {
+    var secs = visibleSections();
+    return { secs: secs, ids: exportStepIds(secs), name: exportName(), empty: !secs.length && !(state.lens === 'notes' && orphanNotes().length) };
+  });
+  if (plan.empty) { flashNotice('There is nothing to export in this view.'); return; }
   // A browser lets a page open a window only while it handles a click, so the window the PDF
   // is printed from is opened now and filled once the story is read.
   var printWindow = (!vsapi && format === 'pdf') ? window.open('', '_blank') : null;
   state.exporting = true;
   setExportBusy(true);
-  var ids = exportStepIds(secs);
-  flashNotice('Export: reading the texts of ' + ids.length + ' steps');
-  collectExportBodies(ids, function (done, total) {
+  flashNotice('Export: reading the texts of ' + plan.ids.length + ' steps');
+  collectExportBodies(plan.ids, function (done, total) {
     flashNotice('Export: read ' + done + ' of ' + total + ' steps');
   }).then(function (bodies) {
-    var content = format === 'pdf' ? buildExportPage(secs, bodies) : buildExportMarkdown(secs, bodies);
-    return deliverExport(format, content, printWindow);
+    var content = format === 'pdf' ? buildExportPage(view, plan.secs, bodies) : buildExportMarkdown(view, plan.secs, bodies);
+    return deliverExport(format, plan.name, content, printWindow);
   }).then(function (message) {
     flashNotice(message);
   }, function (e) {

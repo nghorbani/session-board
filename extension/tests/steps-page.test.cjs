@@ -1369,6 +1369,8 @@ function exportFixture() {
       options: [{ label: 'Option A', description: 'the simple route', chosen: true }, { label: 'Option B', description: 'the thorough route', chosen: false }] }] };
     if (id === 'p1:0') return { text: '# The plan\n\n1. do it', approved: true, truncated: false, size: 20 };
     if (id === 'x2:0') return { text: '## Result\n\nSee https://example.com/doc and `C:/proj/a.txt`.\n\n```\n# not a heading\n```', truncated: false, size: 80 };
+    // a code block that shows a code block: the inner fence is shorter than the outer one
+    if (id === 'x3:0') return { text: '````md\n```\n# Example title\n```\n````\n\n~~~\n# in tildes\n```\n# still in tildes\n~~~\n\n# After the blocks', truncated: false, size: 90 };
     return { text: 'body of ' + id, truncated: false, size: 10 };
   };
   fake.bodies = (ids, msg) => ids.map((id) => Object.assign({ stepId: id }, bodyOf(id, Boolean(msg && msg.forExport))));
@@ -1414,9 +1416,12 @@ test('page: Export as Markdown writes out the whole story, also the sections the
   assert.ok(text.indexOf('- [x] **Option A** (your choice): the simple route') !== -1 && text.indexOf('- [ ] **Option B**: the thorough route') !== -1, 'the question as asked, your choice marked');
   assert.ok(text.indexOf('\n#### Result\n') !== -1 && text.indexOf('\n### The plan\n') !== -1, 'headings inside a text are made smaller than the headings of the file');
   assert.ok(text.indexOf('\n# not a heading\n') !== -1, 'a line inside a code block is left as it is');
+  assert.ok(text.indexOf('````md\n```\n# Example title\n```\n````') !== -1, 'also inside a block that holds a shorter fence');
+  assert.ok(text.indexOf('~~~\n# in tildes\n```\n# still in tildes\n~~~') !== -1, 'and in a block a fence of the other kind does not close');
+  assert.ok(text.indexOf('\n### After the blocks') !== -1, 'the heading after the blocks is still made smaller');
   assert.ok(text.indexOf('*You approved this plan.*') !== -1);
   assert.ok(text.indexOf('> Note: check this claim') !== -1, 'the note under its step');
-  assert.equal(text.indexOf('~~~'), -1, 'no list of tool calls while Tool calls is off');
+  assert.equal(text.indexOf('- `Bash`'), -1, 'no list of tool calls while Tool calls is off');
   assert.equal(text.indexOf('all green'), -1, 'and never a tool result');
   // what the export asked the service for
   const asked = fake.calls.filter((m) => m && m.type === 'bodies' && m.forExport);
@@ -1432,6 +1437,75 @@ test('page: Export as Markdown writes out the whole story, also the sections the
   const withTools = (await page.exportAs('md')).text;
   assert.ok(withTools.indexOf('- `Bash`\n  ~~~\n  $ npm test\n  ~~~') !== -1, 'the call and its command: ' + withTools.slice(withTools.indexOf('Edited a.txt'), withTools.indexOf('Edited a.txt') + 300));
   assert.equal(withTools.indexOf('all green'), -1, 'still no tool result');
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: an export is of the view it was started in, also when the view is switched while its texts are read', opts, async () => {
+  exportFixture();
+  const served = fake.bodies;
+  let letGo = null;
+  const held = new Promise((resolve) => { letGo = resolve; });
+  // the texts of an export are slow, until the test lets go
+  fake.bodies = async (ids, msg) => { if (msg && msg.forExport) await held; return served(ids, msg); };
+  const page = await exportPage();
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="md"]');
+  for (let i = 0; i < 100 && !fake.calls.some((m) => m && m.type === 'bodies' && m.forExport); i++) await sleep(50);
+  await page.click('#decisions');
+  await page.click('#allTools');
+  await page.until((x) => x.decisionsOn === true, 'the view switched while the export reads');
+  letGo();
+  for (let i = 0; i < 200 && (await page.eval('window.__saved.length')) === 0; i++) await sleep(50);
+  const saved = await page.eval('window.__saved[0]');
+  assert.ok(saved, 'the export came out');
+  assert.equal(saved.name, 'Fixture session.md', 'named after the view it was started in');
+  assert.ok(/the whole story/.test(saved.text.split('\n')[2]), saved.text.split('\n')[2]);
+  assert.ok(saved.text.indexOf('body of t0x0:0') !== -1 && saved.text.indexOf('END OF THE LONG ANSWER') !== -1, 'the whole story, with its texts whole');
+  assert.equal(saved.text.indexOf('- `Bash`'), -1, 'and without the list of calls that was switched on later');
+  assert.equal((await page.sample()).decisionsOn, true, 'the tab is in the view it was switched to');
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: an export is refused while the transcript is still being indexed, since it would not hold the whole story', opts, async () => {
+  exportFixture();
+  const whole = fake.open;
+  fake.open = () => Object.assign(whole(), { indexing: true });
+  const page = await exportPage();
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="md"]');
+  const s = await page.until((x) => x.notices.some((n) => /indexing/i.test(n) && /export/i.test(n)), 'the line that says why');
+  assert.ok(s.notices.length >= 1);
+  await sleep(300);
+  assert.equal(fake.calls.some((m) => m && m.type === 'bodies' && m.forExport), false, 'no text is read for it');
+  assert.equal(await page.eval('window.__saved.length'), 0);
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: an export of Notes holds the notes whose step is no longer on the current path, as the view does', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])],
+  });
+  fake.notes.set('n-gone', { id: 'n-gone', stepId: 'gone:0', at: 1, text: 'a note on a step of an abandoned try', sent: [] });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 1 && x.notesTileNum === '1', 'the page with its one note');
+  await page.eval('window.__saved = []; saveInBrowser = function (name, text) { window.__saved.push({ name: name, text: text }); };'
+    + ' window.__printed = []; window.open = function () { return { document: { open: function () {}, write: function (h) { window.__printed.push(h); }, close: function () {} }, focus: function () {}, print: function () {}, close: function () {} }; }; true');
+  await page.click('.strip .item:nth-child(5)');
+  await page.until((x) => x.notesTileOn === true && x.savedNoteOffPath === true, 'the Notes view with the note off the path');
+  // the only note is one without a section: there is still something to export
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="md"]');
+  for (let i = 0; i < 100 && (await page.eval('window.__saved.length')) === 0; i++) await sleep(50);
+  const saved = await page.eval('window.__saved[0]');
+  assert.ok(saved, 'the export came out: ' + JSON.stringify((await page.sample()).notices));
+  assert.equal(saved.name, 'Fixture session (notes).md');
+  assert.ok(saved.text.indexOf('> Note: a note on a step of an abandoned try') !== -1 && saved.text.indexOf('step not on the current path') !== -1, saved.text);
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="pdf"]');
+  for (let i = 0; i < 100 && (await page.eval('window.__printed.length')) === 0; i++) await sleep(50);
+  const html = await page.eval('window.__printed[0]');
+  assert.ok(html && html.indexOf('a note on a step of an abandoned try') !== -1 && html.indexOf('step not on the current path') !== -1, 'the page for the PDF holds it too');
   await page.close();
 }, { timeout: 60000 });
 

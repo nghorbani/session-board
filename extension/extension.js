@@ -90,7 +90,8 @@ class BoardProvider {
       deliver: (sessionId, text, meta) => this.deliverToSession(sessionId, text, meta),
     });
     this.stepsPanels = new Map();   // sessionId -> panel, one per session
-    this.htmlToPdf = pdf.htmlToPdf;  // the printer of the PDF export; a test puts its own here
+    this.htmlToPdf = pdf.htmlToPdf;        // the printer of the PDF export, and the search for the
+    this.findPdfBrowser = pdf.findBrowser; // browser it prints with; a test puts its own here
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -819,42 +820,43 @@ class BoardProvider {
    * exportSave { format: 'md' | 'pdf', name, content }: the story as the Steps page wrote it
    * out, saved where the save dialog says. Markdown is written as it is. For a PDF the
    * content is a page that a browser of this machine prints (pdf.cjs). On a machine without
-   * such a browser the page itself is saved under the chosen name with .html and opened in
-   * the default browser, to be printed from there; both ways the page is sealed first, so
-   * nothing in it runs or loads.
+   * such a browser the dialog asks for an .html file instead and says why: the page itself
+   * is saved there and opened in the default browser, to be printed from there. Both ways
+   * the page is sealed first, so nothing in it runs or loads. The only file written is the
+   * one the dialog named.
    */
   async saveStepsExport(msg) {
     const reply = { type: 'exportSaveResult' };
     const format = msg.format === 'pdf' ? 'pdf' : 'md';
     const content = typeof msg.content === 'string' ? msg.content : '';
     if (!content) return Object.assign(reply, { ok: false, message: 'There is nothing to export.' });
+    const asPage = format === 'pdf' && !this.findPdfBrowser();
+    const ext = format === 'md' ? 'md' : asPage ? 'html' : 'pdf';
     const folders = vscode.workspace.workspaceFolders || [];
     const dir = folders.length && folders[0].uri && folders[0].uri.fsPath ? folders[0].uri.fsPath : require('os').homedir();
     const target = await vscode.window.showSaveDialog({
-      title: 'Export the story',
-      defaultUri: vscode.Uri.file(path.join(dir, exportFileName(msg.name) + '.' + format)),
-      filters: format === 'pdf' ? { PDF: ['pdf'] } : { Markdown: ['md'] },
+      title: asPage ? 'No Chrome, Edge or Chromium to print a PDF with: save the story as a page and print it from your browser' : 'Export the story',
+      defaultUri: vscode.Uri.file(path.join(dir, exportFileName(msg.name) + '.' + ext)),
+      filters: ext === 'md' ? { Markdown: ['md'] } : ext === 'pdf' ? { PDF: ['pdf'] } : { 'Web page': ['html'] },
     });
     if (!target) return Object.assign(reply, { ok: false, cancelled: true });
-    let saved = target.fsPath;
+    const saved = target.fsPath;
     try {
-      if (format === 'md') {
+      if (ext === 'md') {
         await fs.promises.writeFile(saved, content, 'utf8');
+      } else if (ext === 'html') {
+        const sealed = pdf.sealHtml(content);
+        if (!sealed) return Object.assign(reply, { ok: false, message: 'The page to save has no head.' });
+        await fs.promises.writeFile(saved, sealed, 'utf8');
+        await vscode.env.openExternal(vscode.Uri.file(saved));
+        return Object.assign(reply, { ok: true, message: 'No Chrome, Edge or Chromium was found to print a PDF with. The story is saved as '
+          + path.basename(saved) + ' and opened in your browser: print it to PDF there.' });
       } else {
         const printed = await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: 'Printing the story to a PDF' },
           () => this.htmlToPdf(content, saved),
         );
-        if (!printed.ok && !printed.noBrowser) return Object.assign(reply, { ok: false, message: printed.message });
-        if (!printed.ok) {
-          const sealed = pdf.sealHtml(content);
-          if (!sealed) return Object.assign(reply, { ok: false, message: printed.message });
-          saved = saved.replace(/\.pdf$/i, '') + '.html';
-          await fs.promises.writeFile(saved, sealed, 'utf8');
-          await vscode.env.openExternal(vscode.Uri.file(saved));
-          return Object.assign(reply, { ok: true, message: 'No Chrome, Edge or Chromium was found to print the PDF with. The story is saved as '
-            + path.basename(saved) + ' and opened in your browser: print it to PDF there.' });
-        }
+        if (!printed.ok) return Object.assign(reply, { ok: false, message: printed.message });
       }
     } catch (e) {
       return Object.assign(reply, { ok: false, message: 'The export could not be written: ' + String((e && e.message) || e) });

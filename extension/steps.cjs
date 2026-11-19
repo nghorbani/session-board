@@ -817,7 +817,7 @@ function splitPaste(text) {
   return { own: own.trim(), pasted: String(pasted || '').trim() };
 }
 
-function headingForYou(step, bodyFn) {
+function headingForYou(step, bodyFn, wholeFn) {
   // the preview is the start of the same text and longer than any heading, so it serves
   // without a read; a step that carries none (a caller's own record) is read
   const text = step.preview || ((bodyFn(step.id) || {}).text);
@@ -825,7 +825,10 @@ function headingForYou(step, bodyFn) {
     // A paste: the heading is what you typed with it, which may stand after the paste and so
     // past the preview (the message is read for it); a message that is nothing but a paste
     // is headed by the start of the pasted text. The wrapper tag is never the heading.
-    const parts = splitPaste((bodyFn(step.id) || {}).text || text);
+    // `wholeFn` reads the message to its end: a body is cut at 200 KB, and a longer paste
+    // would hide what was typed after it.
+    const whole = wholeFn ? wholeFn(step.id) : null;
+    const parts = splitPaste((whole && typeof whole.text === 'string' ? whole.text : (bodyFn(step.id) || {}).text) || text);
     if (parts.own) return firstSentence(parts.own, 90) || 'Message';
     return 'Pasted: ' + (firstSentence(parts.pasted, 80) || 'text');
   }
@@ -874,7 +877,9 @@ function activeTimeOf(idsInOrder, byId) {
   return ms;
 }
 
-function buildSections(stepsArr, bodyFn) {
+/* `bodyFn(stepId)` reads a step's body as the page shows it; `wholeFn(stepId)`, when given,
+   reads a step's whole text ({ text }), for the one heading that needs it. */
+function buildSections(stepsArr, bodyFn, wholeFn) {
   const sections = [];
   let cur = { kind: 'lead', heading: 'Session start', at: stepsArr.length ? stepsArr[0].at : '', body: [], openerId: null };
   let quiet = [];
@@ -891,7 +896,7 @@ function buildSections(stepsArr, bodyFn) {
 
   for (const s of stepsArr) {
     if (s.kind === 'you') {
-      openSection('you', headingForYou(s, bodyFn), s.at, s.id);
+      openSection('you', headingForYou(s, bodyFn, wholeFn), s.at, s.id);
       continue;
     }
     if (s.kind === 'question') {
