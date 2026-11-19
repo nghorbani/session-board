@@ -463,7 +463,20 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
     by bisection over the sorted offsets; candidates are confirmed against the text the
     page shows, 500 at most. Without ripgrep the same scan runs in Node over the bytes of
     the file, one line at a time, so memory stays at one line and offsets stay byte
-    offsets. Notes are searched too.
+    offsets. Notes are searched too. A ripgrep run that fails or stops at its output limit
+    is not taken for the whole answer: the Node scan runs instead. A candidate whose body is
+    cut at 200 KB is confirmed against its whole text. Each viewer has one search running
+    (`viewerId`): a new query replaces that viewer's own search, not the search of another
+    tab on the same session.
+  - Following: one poll at a time per session (`s.polling`), and what a poll finds is
+    dropped when its viewer closed or its index was replaced while it ran. A transcript
+    that moved (a session stowed or brought back) is not "gone": the service asks
+    `resolveTranscript` again, tells the viewer `moved` once, and the page opens the
+    session again, which builds the index on the file where it is now. With each tick the
+    service also looks at the notes of the session and tells the viewer when they differ
+    from what it told last, so a note kept in another window shows up here. During the
+    backward pass a progress push is followed by a pause of twenty times what it took to
+    build (`PROGRESS_COST_FACTOR`), which keeps the pushes rare on a very large transcript.
   - Page (`steps.html`): text is inserted as text nodes; the Markdown renderer builds DOM
     nodes and there is no `innerHTML` assignment. Both hosts serve it with a CSP whose
     script source is a per-response nonce. Only the sections around the anchor hold their
@@ -525,12 +538,15 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   - Notes (`notes.cjs`): `notes\<sessionId>\<noteId>.json` = `{ id, stepId, at, text }`, tmp
     then rename, 16 KB at most; a send is recorded as `<noteId>.sent.<at>-<random>.json`, so
     two windows never rewrite one list. An edit is last writer wins and writes only while
-    the note file exists. A delete writes `<noteId>.deleted` before it removes the files,
-    and an edit or a send record that finds that mark after its own write removes what it
-    wrote, so a delete in between never brings a note back. Notes go when the transcript is
-    gone from both roots: `snapshot()` prunes them, after `transcriptGone()` has looked at
-    the disk itself, because the filename index is up to a minute old and a root that
-    cannot be read proves nothing. The last step in view is kept in `steps-seen\<id>.json`.
+    the note file exists. A delete writes `<noteId>.deleted` first, before it looks at the
+    folder or removes a file, and an edit or a send record that finds that mark after its
+    own write removes what it wrote, so a delete in between never brings a note back and an
+    edit never reports a note the delete then takes. Notes go when the transcript is gone
+    from both roots: `snapshot()` prunes them, after `transcriptGone()` has looked at the
+    disk itself, because the filename index is up to a minute old and a root or a project
+    folder that cannot be read proves nothing (only "no such file" counts as gone;
+    `pruneDead` does nothing without that check). A step can hold more than one note (two
+    windows each kept one): the page's box edits the first and shows the others under it. The last step in view is kept in `steps-seen\<id>.json`.
   - Send to session: the text is `About your step at <HH:MM> ("<first 120 chars>"): <note>`
     and always goes to the clipboard. In the owning window `revealHere(sessionId, prompt)`
     passes it as the second argument of `claude-vscode.editor.open`, which fills the chat

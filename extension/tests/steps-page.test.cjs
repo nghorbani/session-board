@@ -111,7 +111,11 @@ function readBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
-    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (_) { resolve(null); } });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      req.__bytes = raw.length;
+      try { resolve(JSON.parse(raw.toString('utf8'))); } catch (_) { resolve(null); }
+    });
   });
 }
 
@@ -162,6 +166,7 @@ async function serve(req, res) {
       .replace('var SEEN_DEBOUNCE_MS = 1500;', 'var SEEN_DEBOUNCE_MS = 200;')
       .replace('var SEARCH_DEBOUNCE_MS = 150;', 'var SEARCH_DEBOUNCE_MS = 30;')
       .replace('var BODY_RETRY_MS = 2000;', 'var BODY_RETRY_MS = 250;')
+      .replace('var NOTICE_MS = 4000;', 'var NOTICE_MS = 300;')
       // every notice the page showed, kept for the sampler: a timeout then says what the page saw
       .replace('function flashNotice(text) {', 'function flashNotice(text) { (window.__notices = window.__notices || []).push(text);');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -179,6 +184,8 @@ async function serve(req, res) {
   if (u.pathname === '/api/steps' && req.method === 'POST') {
     if (req.headers['x-board-token'] !== TOKEN) return json(res, 403, { error: 'forbidden' });
     const msg = await readBody(req);
+    // server.cjs takes 64 KB at most; a larger body is refused before it is looked at
+    if (req.__bytes > 64 * 1024) { fake.tooLarge += 1; return json(res, 413, { error: 'body too large' }); }
     fake.calls.push(msg);
     if (!msg) return json(res, 400, { error: 'bad json' });
     // a connection that dies under a request: what a browser sees when it reuses an idle
@@ -207,6 +214,8 @@ async function serve(req, res) {
     }
     if (msg.type === 'fullText') return json(res, 200, Object.assign({ type: 'fullTextResult', stepId: msg.stepId }, fake.fullText(msg.stepId, msg)));
     if (msg.type === 'noteAdd' || msg.type === 'noteEdit' || msg.type === 'noteDelete' || msg.type === 'noteSend' || msg.type === 'notesSendAll') {
+      // a test may hold the answer to one kind of note message back
+      if (fake.holdNote && fake.holdNote[msg.type]) await fake.holdNote[msg.type];
       const reply = handleNoteMessage(msg);
       fake.pushes.push({ type: 'notesChanged', sessionId: msg.sessionId, notes: noteList() });
       return json(res, 200, reply);
@@ -356,6 +365,8 @@ test.beforeEach(() => {
   fake.beforeOpenTextReply = null;
   fake.noteReject = null;
   fake.expireOnce = false;
+  fake.tooLarge = 0;
+  fake.holdNote = null;
 });
 
 // -- transport ------------------------------------------------------------------------------
@@ -1616,6 +1627,7 @@ test('page: Export as PDF in a browser opens the story as a page of its own and 
   assert.ok(html.indexOf('END OF THE LONG ANSWER') !== -1, 'with the texts whole');
   assert.ok(html.indexOf('<title>Fixture session</title>') !== -1);
   assert.equal(/<script/i.test(html), false, 'no script');
+  assert.ok(/<meta http-equiv="Content-Security-Policy" content="default-src 'none'[^"]*">/.test(html), 'and a policy of its own that lets none run, also in the window a browser prints from');
   assert.equal(/<button/i.test(html), false, 'no button');
   assert.equal(/<textarea|<input/i.test(html), false);
   assert.ok(html.indexOf('<style>') !== -1 && html.indexOf('html.export') !== -1, 'it carries its own style, with the rules for paper');
@@ -1827,6 +1839,241 @@ test('page in the VS Code panel: Export hands the story to the host, which saves
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }, { timeout: 120000 });
+
+// -- findings of the review before the merge -------------------------------------------------
+
+test('page: a note that is being sent cannot be sent a second time from the box a redraw rebuilt, and its end does not close a box opened meanwhile', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('x1:0', 'text'), step('x2:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }, { kind: 'text', stepId: 'x2:0' }])],
+  });
+  let letGo = null;
+  fake.holdNote = { noteSend: new Promise((resolve) => { letGo = resolve; }) };
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 3, 'the rows');
+  await page.click('#step-x1\\:0 .add-note');
+  await page.eval('(function () { var t = document.querySelector(".notebox textarea"); t.value = "send this once"; t.dispatchEvent(new Event("input")); return true; })()');
+  await page.click('.notebox .row2 button.primary');
+  // the note is kept first, which redraws the reader; the send itself is still on its way
+  for (let i = 0; i < 100 && !fake.calls.some((m) => m && m.type === 'noteSend'); i++) await sleep(50);
+  await page.until((x) => x.notedRows >= 1, 'the redraw after the note was kept');
+  const during = await page.sample();
+  assert.equal(during.noteBoxOpen, true);
+  assert.equal(during.sendButtonDisabled, true, 'the rebuilt button knows that the send is running');
+  await page.eval('(function () { var b = document.querySelector(".notebox .row2 button.primary"); if (b) b.click(); return true; })()');
+  await sleep(300);
+  assert.equal(fake.calls.filter((m) => m && m.type === 'noteSend').length, 1, 'one send');
+  // meanwhile a note on another step is begun
+  await page.click('#step-x2\\:0 .add-note');
+  await page.eval('(function () { var t = document.querySelector("#step-x2\\\\:0 .notebox textarea"); t.value = "a second draft"; t.dispatchEvent(new Event("input")); return true; })()');
+  letGo();
+  await page.until((x) => x.notices.some((n) => /chat box|clipboard/i.test(n)), 'the answer to the send');
+  await sleep(200);
+  const after = await page.eval('(function () { var t = document.querySelector("#step-x2\\\\:0 .notebox textarea"); return t ? t.value : null; })()');
+  assert.equal(after, 'a second draft', 'the box opened meanwhile is still open, with what was typed into it');
+  await page.close();
+});
+
+test('page: the texts of a Work line with thousands of calls are asked for in requests that fit the limit of the server', opts, async () => {
+  const items = [];
+  const steps = [step('u1:0', 'you')];
+  for (let i = 0; i < 2000; i++) {
+    const id = '00000000-0000-4000-8000-' + String(i).padStart(12, '0') + ':0';
+    items.push(id);
+    steps.push(step(id, 'tool', { title: 'Read' }));
+  }
+  fake.open = () => openReply({ steps, sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'work', items }])] });
+  fake.bodies = (ids) => ids.map((id) => ({ stepId: id, title: 'Read', input: 'C:/proj/file.txt' }));
+  const page = await openPage(A);
+  await page.until((x) => x.workSums.length >= 1, 'the Work line');
+  for (let i = 0; i < 100 && !(await page.eval('Boolean(state.bodies[' + JSON.stringify(items[1999]) + '])')); i++) await sleep(100);
+  assert.equal(fake.tooLarge, 0, 'no request was over the 64 KB the server takes');
+  assert.equal(await page.eval('Boolean(state.bodies[' + JSON.stringify(items[0]) + '] && state.bodies[' + JSON.stringify(items[1999]) + '])'), true, 'the first and the last call have their text');
+  const asked = fake.calls.filter((m) => m && m.type === 'bodies');
+  assert.ok(asked.length >= 5 && asked.every((m) => m.stepIds.length <= 400), 'in several requests: ' + asked.map((m) => m.stepIds.length).join(', '));
+  const sum = (await page.sample()).workSums[0];
+  assert.ok(/read 2000 files/i.test(sum), 'the Work line counts them all: ' + sum);
+  await page.close();
+});
+
+test('page: a search says which viewer asks, and an answer that says "cancelled" is not shown as "no hits"', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('x1:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }])],
+  });
+  let cancelNext = false;
+  fake.search = () => (cancelNext ? { stepIds: [], capped: false, cancelled: true } : { stepIds: ['x1:0'], capped: false });
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 2, 'the rows');
+  await page.search('body');
+  await page.until((x) => x.searchCount === '1 of 1', 'the hit');
+  cancelNext = true;
+  await page.search('body of');
+  for (let i = 0; i < 100 && fake.calls.filter((m) => m && m.type === 'search').length < 2; i++) await sleep(50);
+  await sleep(300);
+  assert.notEqual((await page.sample()).searchCount, 'no hits', 'a search that another one replaced did not find nothing');
+  const searches = fake.calls.filter((m) => m && m.type === 'search');
+  assert.ok(typeof searches[0].viewerId === 'string' && searches[0].viewerId.length >= 6, 'the search names its viewer: ' + searches[0].viewerId);
+  assert.equal(searches[1].viewerId, searches[0].viewerId, 'the same one every time');
+  await page.close();
+});
+
+test('page: a search hit is shown whatever view was on, and a hit in the output of a call is unfolded', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('x1:0', 'text'), step('e1:0', 'tool', { title: 'Edit' }), step('b1:0', 'tool', { title: 'Bash' })],
+    sections: [section('lead', 'Session start', null, []),
+      section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 'x1:0' }, { kind: 'work', items: ['e1:0', 'b1:0'] }], { filesChanged: 1, toolCalls: 2 })],
+    strip: { activeTimeMs: 60000, sections: 2, decisions: 1, filesChanged: 1 },
+  });
+  fake.bodies = (ids) => ids.map((id) => {
+    if (id === 'x1:0') return { stepId: id, text: 'the needle in a text of the story', truncated: false, size: 40 };
+    if (id === 'e1:0') return { stepId: id, title: 'Edit', input: 'C:/proj/a.txt', path: 'C:/proj/a.txt', result: 'updated' };
+    if (id === 'b1:0') return { stepId: id, title: 'Bash', input: '$ ls', result: 'a listing with the haystackword in it' };
+    return { stepId: id, text: 'body of ' + id, truncated: false, size: 10 };
+  });
+  fake.search = (q) => ({ stepIds: /needle/.test(q) ? ['x1:0'] : /haystackword/.test(q) ? ['b1:0'] : [], capped: false });
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 2, 'the rows');
+  // Decisions shows no texts of the story
+  await page.click('#decisions');
+  await page.until((x) => x.decisionsOn === true, 'the decisions view');
+  await page.search('needle');
+  let s = await page.until((x) => x.searchCount === '1 of 1' && x.curHitId === 'step-x1:0', 'the hit is drawn and marked');
+  assert.equal(s.decisionsOn, false, 'the view went back to the whole story to show it');
+  // Files changed shows no story at all
+  await page.search('');
+  await page.click('.strip .item:nth-child(4)');
+  await page.until((x) => x.fileLinks.indexOf('C:/proj/a.txt') !== -1, 'the list of files');
+  await page.search('needle');
+  s = await page.until((x) => x.curHitId === 'step-x1:0', 'the hit, in the story');
+  assert.equal(await page.eval('state.lens'), 'all', 'and the view says so');
+  // a word that only the output of a command holds
+  await page.search('haystackword');
+  await page.until((x) => x.searchCount === '1 of 1', 'the hit in the output');
+  for (let i = 0; i < 100 && !(await page.eval('Boolean(document.querySelector("pre.fold mark"))')); i++) await sleep(50);
+  const shown = await page.eval('(function () { var m = document.querySelector("pre.fold mark"); if (!m) return null; var pre = m.closest("pre"); return { display: getComputedStyle(pre).display, list: getComputedStyle(pre.closest(".worklist")).display }; })()');
+  assert.ok(shown && shown.display !== 'none' && shown.list !== 'none', 'the output that holds the word is open: ' + JSON.stringify(shown));
+  await page.close();
+});
+
+test('page: a note whose step left the path can be changed and deleted, and two notes on one step are both shown and exported', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])],
+  });
+  fake.notes.set('n-gone', { id: 'n-gone', stepId: 'gone:0', at: 1, text: 'a note on a step of an abandoned try', sent: [] });
+  // two windows kept a note on the same step
+  fake.notes.set('n-a', { id: 'n-a', stepId: 't1:0', at: 2, text: 'the first window wrote this', sent: [] });
+  fake.notes.set('n-b', { id: 'n-b', stepId: 't1:0', at: 3, text: 'the second window wrote that', sent: [] });
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 2 && x.notesTileNum === '3', 'the page with its notes');
+  const both = await page.eval('Array.prototype.map.call(document.querySelectorAll("#step-t1\\\\:0 .saved-note"), function (e) { return e.textContent; })');
+  assert.ok(both.length === 2 && /first window/.test(both[0]) && /second window/.test(both[1]), 'both notes of the step: ' + JSON.stringify(both));
+  await page.eval('window.__saved = []; saveInBrowser = function (name, text) { window.__saved.push({ name: name, text: text }); }; true');
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="md"]');
+  for (let i = 0; i < 100 && (await page.eval('window.__saved.length')) === 0; i++) await sleep(50);
+  const md = (await page.eval('window.__saved[0]')).text;
+  assert.ok(md.indexOf('> Note: the first window wrote this') !== -1 && md.indexOf('> Note: the second window wrote that') !== -1, 'and both in the export: ' + md);
+  // the note without a step, in the Notes view
+  await page.click('.strip .item:nth-child(5)');
+  await page.until((x) => x.notesTileOn === true && x.savedNoteOffPath === true, 'the Notes view with the note off the path');
+  await page.eval('(function () { var off = document.querySelector(".saved-note .off-path"); off.closest(".row").querySelector(".add-note").click(); return true; })()');
+  await page.until((x) => x.noteBoxOpen === true && /abandoned try/.test(x.noteBoxText || ''), 'its box, with its text');
+  await page.eval('(function () { var t = document.querySelector(".notebox textarea"); t.value = "corrected"; t.dispatchEvent(new Event("input")); return true; })()');
+  await page.eval('(function () { var b = Array.prototype.filter.call(document.querySelectorAll(".notebox .row2 button"), function (x) { return x.textContent === "Keep note"; })[0]; b.click(); return true; })()');
+  for (let i = 0; i < 100 && fake.notes.get('n-gone').text !== 'corrected'; i++) await sleep(50);
+  assert.equal(fake.notes.get('n-gone').text, 'corrected', 'it can be changed');
+  await page.until((x) => x.noteBoxOpen === false, 'the box closed');
+  await page.eval('(function () { var off = document.querySelector(".saved-note .off-path"); off.closest(".row").querySelector(".add-note").click(); return true; })()');
+  await page.until((x) => x.noteBoxOpen === true, 'its box again');
+  await page.eval('(function () { var b = Array.prototype.filter.call(document.querySelectorAll(".notebox .row2 button"), function (x) { return x.textContent === "Delete"; })[0]; b.click(); return true; })()');
+  for (let i = 0; i < 100 && fake.notes.has('n-gone'); i++) await sleep(50);
+  assert.equal(fake.notes.has('n-gone'), false, 'and deleted');
+  await page.close();
+}, { timeout: 60000 });
+
+test('page: an edit that failed is not listed as a changed file, and the Work line says that it failed', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('e1:0', 'tool', { title: 'Edit', failed: true }), step('e2:0', 'tool', { title: 'Edit' })],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'work', items: ['e1:0', 'e2:0'] }], { filesChanged: 1, toolCalls: 2 })],
+    strip: { activeTimeMs: 60000, sections: 2, decisions: 1, filesChanged: 1 },
+  });
+  fake.bodies = (ids) => ids.map((id) => {
+    if (id === 'e1:0') return { stepId: id, title: 'Edit', input: 'C:/proj/a.txt', path: 'C:/proj/a.txt', result: 'String to replace not found in file.' };
+    if (id === 'e2:0') return { stepId: id, title: 'Edit', input: 'C:/proj/b.txt', path: 'C:/proj/b.txt', result: 'updated' };
+    return { stepId: id, text: 'body of ' + id, truncated: false, size: 10 };
+  });
+  const page = await openPage(A);
+  let s = await page.until((x) => x.workSums.length === 1 && /b\.txt/.test(x.workSums[0]), 'the Work line with its texts');
+  assert.ok(/edited b\.txt/i.test(s.workSums[0]) && /an edit failed/.test(s.workSums[0]), s.workSums[0]);
+  assert.equal(/a\.txt/.test(s.workSums[0]), false, 'the file that was not changed is not named as edited');
+  assert.deepEqual(s.fileLinks, ['b.txt'], 'files touched: the one that was changed');
+  await page.click('.strip .item:nth-child(4)');
+  s = await page.until((x) => x.fileLinks.indexOf('C:/proj/b.txt') !== -1, 'the Files changed view');
+  assert.deepEqual(s.fileLinks, ['C:/proj/b.txt']);
+  await page.close();
+});
+
+test('page: an export of Notes is of the notes it was started with, also when one is deleted while its texts are read', opts, async () => {
+  fake.open = () => openReply({
+    steps: [step('u1:0', 'you'), step('t1:0', 'text')],
+    sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])],
+  });
+  fake.notes.set('n1', { id: 'n1', stepId: 't1:0', at: 1, text: 'the note the export was started for', sent: [] });
+  const served = fake.bodies;
+  let letGo = null;
+  const held = new Promise((resolve) => { letGo = resolve; });
+  fake.bodies = async (ids, msg) => { if (msg && msg.forExport) await held; return served(ids, msg); };
+  const page = await openPage(A);
+  await page.until((x) => x.rowKinds.length >= 2 && x.notesTileNum === '1', 'the page with its note');
+  await page.eval('window.__saved = []; saveInBrowser = function (name, text) { window.__saved.push({ name: name, text: text }); }; true');
+  await page.click('.strip .item:nth-child(5)');
+  await page.until((x) => x.notesTileOn === true, 'the Notes view');
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="md"]');
+  for (let i = 0; i < 100 && !fake.calls.some((m) => m && m.type === 'bodies' && m.forExport); i++) await sleep(50);
+  // the note is deleted in another window while the texts are read
+  fake.notes.clear();
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: [] });
+  await page.until((x) => x.notesTileNum === '0', 'the page knows the note is gone');
+  letGo();
+  for (let i = 0; i < 100 && (await page.eval('window.__saved.length')) === 0; i++) await sleep(50);
+  const saved = await page.eval('window.__saved[0]');
+  assert.ok(saved, 'the export came out');
+  assert.ok(saved.text.indexOf('> Note: the note the export was started for') !== -1, 'with the note of the view it was started in: ' + saved.text);
+  await page.close();
+});
+
+test('page: a notice that follows another one does not bring the first back when it has had its time', opts, async () => {
+  const page = await openPage(A);
+  await page.until((x) => x.title === 'Fixture session', 'the page');
+  await page.eval('flashNotice("Export: reading the texts"); flashNotice("Saved the file"); true');
+  let s = await page.sample();
+  assert.equal(s.noticeText, 'Saved the file');
+  await sleep(700);   // longer than a notice stays
+  s = await page.sample();
+  assert.equal(s.noticeText, null, 'nothing is shown any more: ' + s.noticeText);
+  await page.close();
+});
+
+test('page: told that the transcript moved, the page opens the session again and shows what the new place holds', opts, async () => {
+  const steps = [step('u1:0', 'you'), step('t1:0', 'text')];
+  const sections = [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])];
+  fake.open = () => openReply({ steps, sections });
+  const page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2, 'the story');
+  // the session was stowed: its transcript lies elsewhere now, with one more turn
+  fake.open = () => openReply({
+    steps: steps.concat([step('u2:0', 'you')]),
+    sections: sections.concat([section('you', 'second', 'u2:0', [])]),
+  });
+  fake.pushes.push({ type: 'stepsChanged', sessionId: A, moved: true });
+  const s = await page.until((x) => x.sectionHeadings.length >= 3, 'the story of the new place');
+  assert.equal(fake.calls.filter((m) => m && m.type === 'open').length, 2, 'one more open');
+  assert.equal(s.error, null);
+  await page.close();
+});
 
 // -- narrow layout -------------------------------------------------------------------------
 

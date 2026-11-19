@@ -791,8 +791,6 @@ class BoardProvider {
     return base ? path.resolve(base, rawPath) : rawPath;
   }
 
-  /** openText { title, text }: an untitled document, the host side of "Open full text in an
-   *  editor tab" for a truncated body. */
   /** "Open full text" from the Steps page. The page names the step: its own copy of the text
    *  is cut at 200 KB, so the whole text is read here, through the service, from the
    *  transcript. A message that carries a text and no step is opened as it is. */
@@ -806,6 +804,7 @@ class BoardProvider {
     return this.openStepsText(title, String(full.text || ''));
   }
 
+  /** Opens a text as an untitled document in an editor tab. */
   async openStepsText(title, text) {
     try {
       const doc = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });

@@ -247,7 +247,7 @@ logged in", and a Claude Code release without that command shows no account.
   its Work line.
 - **Send to session** fills the chat box from Claude Code 2.1.322 on. With an older Claude
   Code, a session that runs outside VS Code, or a session owned by a window whose board is
-  older than 0.12.0, the text is on the clipboard and the session opens. In the browser page
+  older than 0.12.0, the text is on the clipboard for you to paste into the session. In the browser page
   it is always the clipboard. A note counts as sent only when the text reached a chat box: a
   session in another window confirms that, and when it does not within 8 seconds the tab
   says so and leaves the note unmarked.

@@ -370,6 +370,8 @@ var state = {
   curHit: -1,
   openWork: Object.create(null),   // stepId or work-group key -> true while its detail list is open
   openReports: Object.create(null),
+  noteBoxOpened: 0,                   // counts the openings of a note box
+  noteSending: Object.create(null),   // stepId -> true while its note is being sent
   buildingExport: false,   // true only while an export builds its output (withExportState), never across a wait
   drawerOpen: false,
   atBottom: true,
@@ -552,6 +554,12 @@ function onPush(msg, seq) {
     return;
   }
   if (msg.type === 'stepsChanged') {
+    if (msg.moved) {
+      // the transcript lies elsewhere now (the session was stowed or brought back): a new
+      // open finds it there, and the reader keeps its place
+      if (!state.reopening) { state.reopening = true; openSession(true); }
+      return;
+    }
     if (msg.error) { showStatus(msg.error); return; }
     adoptPush(msg);
     foldCompact(msg.steps);
@@ -928,17 +936,20 @@ function copyToClipboard(text) {
 }
 
 var noticeTimer = null;
+var NOTICE_MS = 4000;
+var INDEXING_NOTE = 'still indexing the rest of this transcript; what you see below may grow';
+/* A notice has the line for a while. When its time is over the line shows what holds then
+   (still indexing, or nothing), never the notice that stood there before this one: that one
+   was as passing as this. */
 function flashNotice(text) {
   var el = document.getElementById('indexnote');
-  var prev = el.textContent;
-  var wasShown = el.classList.contains('show');
   el.textContent = text;
   el.classList.add('show');
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(function () {
-    el.textContent = state.indexing ? 'still indexing the rest of this transcript; what you see below may grow' : prev;
-    el.classList.toggle('show', state.indexing || wasShown);
-  }, 4000);
+    el.textContent = INDEXING_NOTE;
+    el.classList.toggle('show', Boolean(state.indexing));
+  }, NOTICE_MS);
 }
 
 // -- strip (5 tiles) --------------------------------------------------------------------------
@@ -978,10 +989,16 @@ function renderStrip() {
 // -- notes: lookup, lens, jump between notes, "Send all" bar --------------------------------
 
 /** stepId -> its note (at most one note per step), rebuilt whenever state.notes changes. */
+/* The note of each step that its box edits: the first one. Two windows can each keep a note
+   on one step; the others are shown under the first and take its place as it is deleted. */
 function notesByStep() {
   var map = Object.create(null);
-  state.notes.forEach(function (n) { map[n.stepId] = n; });
+  state.notes.forEach(function (n) { if (!map[n.stepId]) map[n.stepId] = n; });
   return map;
+}
+
+function notesOfStep(stepId) {
+  return state.notes.filter(function (n) { return n.stepId === stepId; });
 }
 
 function stepIsOnPath(stepId) {
@@ -1141,17 +1158,15 @@ function orphanNotes() {
 }
 
 function buildOrphanNotes(reader) {
-  var orphans = orphanNotes();
-  if (!orphans.length) return;
-  orphans.forEach(function (n) {
-    var div = document.createElement('div');
-    div.className = 'saved-note';
-    div.textContent = 'Note: ' + n.text;
-    var off = document.createElement('span');
-    off.className = 'off-path';
-    off.textContent = 'step not on the current path';
-    div.appendChild(off);
-    reader.appendChild(div);
+  var done = Object.create(null);
+  orphanNotes().forEach(function (n) {
+    if (done[n.stepId]) return;   // the notes of one step share a row, as on the path
+    done[n.stepId] = true;
+    // a row of its own with the controls every note has, so it can be changed and deleted
+    var row = document.createElement('div');
+    row.className = 'row k-orphan';
+    addNoteUi(row, n.stepId);
+    reader.appendChild(row);
   });
 }
 
@@ -1369,6 +1384,7 @@ function addNoteUi(rowDiv, stepId) {
     ev.stopPropagation();
     state.noteBoxFor = state.noteBoxFor === stepId ? null : stepId;
     state.noteDraft = null;
+    state.noteBoxOpened += 1;   // a box opened now is another one than any box before it
     renderReader();
     queueVisibleBodies();
   });
@@ -1378,6 +1394,7 @@ function addNoteUi(rowDiv, stepId) {
   } else if (note) {
     rowDiv.appendChild(buildSavedNote(stepId, note));
   }
+  notesOfStep(stepId).slice(1).forEach(function (n) { rowDiv.appendChild(buildSavedNote(stepId, n)); });
 }
 
 function buildSavedNote(stepId, note) {
@@ -1440,7 +1457,15 @@ function buildNoteBox(stepId, existing) {
   var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
   branch.disabled = true; branch.title = 'Arrives with 0.13.0';
 
-  function afterSave() { state.noteBoxFor = null; state.noteDraft = null; renderReader(); queueVisibleBodies(); }
+  /* The box is rebuilt by every redraw, so "this box" is the box as it was opened, not this
+     element. When an operation it started is over, it closes that box. A box opened since (on
+     another step, or on this one again) is not its to close, nor is what is typed there. */
+  var opened = state.noteBoxOpened;
+  function afterSave() {
+    if (state.noteBoxFor === stepId && state.noteBoxOpened === opened) { state.noteBoxFor = null; state.noteDraft = null; }
+    renderReader();
+    queueVisibleBodies();
+  }
 
   /* Saves the box's current text (new or edited), waits for that write, then returns the saved
      note's id: noteSend needs a real noteId, so a just-typed note is kept first rather than
@@ -1460,13 +1485,18 @@ function buildNoteBox(stepId, existing) {
     if (!text) return;
     saveThenGetNoteId(text).then(function (noteId) { if (noteId) afterSave(); });
   });
+  // A send that is on its way is known to the state, not to this button: keeping the note
+  // redraws the reader, and the button built then must not send the note a second time.
+  send.disabled = Boolean(state.noteSending[stepId]);
   send.addEventListener('click', function () {
     var text = ta.value.trim();
-    if (!text) return;
+    if (!text || state.noteSending[stepId]) return;
+    state.noteSending[stepId] = true;
     send.disabled = true;
     saveThenGetNoteId(text).then(function (noteId) {
-      if (!noteId) { send.disabled = false; return; }   // nothing is sent without a kept note
+      if (!noteId) { delete state.noteSending[stepId]; send.disabled = false; return; }   // nothing is sent without a kept note
       return call({ type: 'noteSend', noteId: noteId }).then(function (reply) {
+        delete state.noteSending[stepId];
         if (reply && reply.message) flashNotice(reply.message);
         if (reply && !reply.ok && reply.message === 'On the clipboard. Paste it into the session.' && reply.text) copyToClipboard(reply.text);
         afterSave();
@@ -1764,7 +1794,7 @@ function fileBaseName(p) { return String(p || '').split(/[\\/]/).pop(); }
    "Thought for 12 s", or "Thought" when no duration was stored, rather than a bare step count. */
 function summarizeWork(items) {
   var edited = [], created = [], searches = 0, reads = 0, bash = [], subs = [], skills = [], namedOther = [], reasoningMs = 0, reasoningCount = 0;
-  var unknown = 0, unknownKinds = [];
+  var unknown = 0, unknownKinds = [], failedEdits = 0;
   items.forEach(function (id) {
     var c = state.compactById && state.compactById[id];
     if (!c) return;
@@ -1774,7 +1804,8 @@ function summarizeWork(items) {
     if (c.kind !== 'tool') return;
     var title = c.title || 'tool';
     var b = state.bodies[id];
-    if (title === 'Edit') { var ep = (b && b.path) || ''; if (ep && edited.indexOf(ep) === -1) edited.push(ep); }
+    if ((title === 'Edit' || title === 'Write') && c.failed) failedEdits++;
+    else if (title === 'Edit') { var ep = (b && b.path) || ''; if (ep && edited.indexOf(ep) === -1) edited.push(ep); }
     else if (title === 'Write') { var wp = (b && b.path) || ''; if (wp && created.indexOf(wp) === -1) created.push(wp); }
     else if (title === 'Grep' || title === 'Glob') searches++;
     else if (title === 'Read') reads++;
@@ -1787,6 +1818,7 @@ function summarizeWork(items) {
   var parts = [];
   if (created.length) parts.push('created ' + created.length + (created.length === 1 ? ' file' : ' files'));
   if (edited.length) parts.push('edited ' + (edited.length === 1 ? (fileBaseName(edited[0]) || '1 file') : edited.length + ' files'));
+  if (failedEdits) parts.push(failedEdits === 1 ? 'an edit failed' : failedEdits + ' edits failed');
   if (reads) parts.push('read ' + reads + (reads === 1 ? ' file' : ' files'));
   if (searches) parts.push('ran ' + searches + (searches === 1 ? ' search' : ' searches'));
   if (bash.length === 1) parts.push('ran a command' + (bash[0] ? ' (' + bash[0] + ')' : ''));
@@ -1808,7 +1840,8 @@ function filesTouchedIn(items) {
   items.forEach(function (id) {
     var c = state.compactById && state.compactById[id];
     var b = state.bodies[id];
-    if (c && c.kind === 'tool' && (c.title === 'Edit' || c.title === 'Write') && b && b.path) {
+    // an edit that failed changed no file
+    if (c && c.kind === 'tool' && (c.title === 'Edit' || c.title === 'Write') && !c.failed && b && b.path) {
       out.push({ kind: c.title === 'Write' ? 'new' : 'edit', path: b.path });
     }
   });
@@ -1866,6 +1899,8 @@ function buildWorkListItem(stepId) {
   if (b && b.result) {
     var btn = document.createElement('button'); btn.className = 'detailbtn'; btn.textContent = 'result';
     var pre = document.createElement('pre'); pre.className = 'fold'; pre.textContent = b.result; pre.style.display = 'none';
+    // a search hit that only the output holds: the output is open, or the hit could not be seen
+    if (state.query && String(b.result).toLowerCase().indexOf(state.query.toLowerCase()) !== -1) pre.style.display = '';
     btn.addEventListener('click', function () { pre.style.display = pre.style.display === 'none' ? '' : 'none'; });
     wrap.appendChild(btn);
     wrap.appendChild(pre);
@@ -2029,7 +2064,13 @@ function flushBodyBatch() {
    describes the step as it was. A request that failed outright is tried again a little later,
    since nothing else would ask while the reader stands still. */
 var BODY_RETRY_MS = 2000;
+var BODY_BATCH = 200;   // ids per request: a Work line can hold thousands of calls, and the browser server takes 64 KB
 function requestBodies(ids) {
+  if (ids.length > BODY_BATCH) {
+    var parts = [];
+    for (var at = 0; at < ids.length; at += BODY_BATCH) parts.push(requestBodies(ids.slice(at, at + BODY_BATCH)));
+    return Promise.all(parts).then(function (kept) { return kept.some(Boolean); });
+  }
   var generation = state.generation;
   var mark = state.invalidateSeq;
   ids.forEach(function (id) { state.bodiesPending[id] = true; });
@@ -2100,12 +2141,13 @@ function runSearch(q) {
   var requestId = ++state.searchRequestId;
   if (!q) {
     state.hits = []; state.curHit = -1; state.curHitStep = null;
-    call({ type: 'cancelSearch' });
+    call({ type: 'cancelSearch', viewerId: VIEWER_ID });
     renderAll(); updateSearchCount();
     return;
   }
-  call({ type: 'search', query: q }).then(function (reply) {
-    if (!reply || state.searchRequestId !== requestId) return;
+  call({ type: 'search', query: q, viewerId: VIEWER_ID }).then(function (reply) {
+    // a search that was cancelled found nothing out; it is not a search without hits
+    if (!reply || reply.cancelled || state.searchRequestId !== requestId) return;
     state.hits = reply.stepIds || [];
     state.curHit = state.hits.length ? 0 : -1;
     state.curHitStep = null;   // the mark of the search before; the jump below sets it on the first hit, if there is one
@@ -2116,6 +2158,10 @@ function runSearch(q) {
     if (state.curHit !== -1) jumpToHit();
   });
 }
+
+/* Names this page to the service: a search replaces the one this page had running, not the
+   search of another tab that shows the same session. */
+var VIEWER_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 function updateSearchCount() {
   var el = document.getElementById('count');
@@ -2143,7 +2189,19 @@ function jumpToHit() {
   }
 }
 
+/* Whether the view in use draws the row of this step. Decisions leaves texts and Work lines
+   out, Notes the sections without a note, and Files changed draws no story at all. */
+function stepDrawnInView(stepId) {
+  if (state.lens === 'files') return false;
+  return visibleSections().some(function (sec) {
+    if (sec.openerId === stepId) return true;
+    return drawnBody(sec).some(function (row) { return row.items ? row.items.indexOf(stepId) !== -1 : row.stepId === stepId; });
+  });
+}
+
 function scrollToStepId(stepId) {
+  // a hit or a note in a row the view does not draw: back to the whole story, which draws it
+  if (state.lens !== 'all' && !stepDrawnInView(stepId)) { state.lens = 'all'; renderStrip(); }
   // make sure the owning section is in the fully-rendered window, open any folded work list
   // that holds it, then scroll; a step bundled into a Work line is reached by its group key.
   var secs = visibleSections();
@@ -2419,7 +2477,8 @@ function exportView() {
     Object.keys(of).forEach(function (k) { c[k] = of[k]; });
     return c;
   }
-  return { lens: state.lens, showAllTools: state.showAllTools, openWork: copy(state.openWork), openReports: copy(state.openReports) };
+  return { lens: state.lens, showAllTools: state.showAllTools, openWork: copy(state.openWork), openReports: copy(state.openReports),
+    notes: state.notes.slice() };
 }
 
 /* A message of yours as an export shows it: without the tags Claude Code wraps a paste in.
@@ -2458,9 +2517,10 @@ function reportShown(stepId, workKey) {
    returns. fn must not wait for anything. */
 function withExportState(view, bodies, fn) {
   var keep = { lens: state.lens, showAllTools: state.showAllTools, openWork: state.openWork, openReports: state.openReports,
-    bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor, buildingExport: state.buildingExport };
+    notes: state.notes, bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor, buildingExport: state.buildingExport };
   state.lens = view.lens; state.showAllTools = view.showAllTools; state.openWork = view.openWork;
   state.openReports = view.openReports || state.openReports;
+  state.notes = view.notes || state.notes;
   state.bodies = bodies || state.bodies; state.query = ''; state.noteBoxFor = null; state.buildingExport = true;
   try { return fn(); }
   finally { Object.keys(keep).forEach(function (k) { state[k] = keep[k]; }); }
@@ -2492,6 +2552,12 @@ function buildExportPage(view, secs, bodies) {
   doc.documentElement.setAttribute('lang', 'en');
   var charset = doc.createElement('meta'); charset.setAttribute('charset', 'utf-8');
   doc.head.insertBefore(charset, doc.head.firstChild);
+  // The page lets nothing run or load, wherever it is opened: in the window a browser prints
+  // from as well as in the file the host hands to a printer (pdf.cjs seals that one once more).
+  var policy = doc.createElement('meta');
+  policy.setAttribute('http-equiv', 'Content-Security-Policy');
+  policy.setAttribute('content', "default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+  doc.head.insertBefore(policy, charset.nextSibling);
   var style = doc.createElement('style');
   // by its id: in a VS Code webview the first style sheet of the document is VS Code's own
   style.textContent = document.getElementById('pageStyle').textContent;
@@ -2554,7 +2620,6 @@ function mdFence(text, indent) {
 function buildExportMarkdown(view, secs, bodies) {
   return withExportState(view, bodies, function () {
     var out = ['# ' + mdOneLine(state.title), '', exportByline(secs), ''];
-    var notes = notesByStep();
     // the Notes view shows, in front, the notes whose step is no longer on the current path
     if (state.lens === 'notes') orphanNotes().forEach(function (n) { out.push(mdQuote('Note: ' + n.text + '\n(step not on the current path)'), ''); });
     function compact(id) { return (state.compactById && state.compactById[id]) || null; }
@@ -2568,7 +2633,7 @@ function buildExportMarkdown(view, secs, bodies) {
       var t = c ? fmtClockSec(c.at) : '';
       return '**' + label + (t ? ' · ' + t : '') + '**';
     }
-    function note(id) { if (notes[id]) out.push(mdQuote('Note: ' + notes[id].text), ''); }
+    function note(id) { notesOfStep(id).forEach(function (n) { out.push(mdQuote('Note: ' + n.text), ''); }); }
     function question(id) {
       var b = state.bodies[id];
       ((b && b.questions) || []).forEach(function (q) {
