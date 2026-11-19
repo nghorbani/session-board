@@ -16,7 +16,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
+const { createNotesStore } = require('./notes.cjs');
 
 const PKG = require('./package.json');
 const EXTENSION_ID = PKG.publisher + '.' + PKG.name;
@@ -799,6 +801,10 @@ const SHAPE_CHANGED = "Claude Code's usage reply changed; update Session Board";
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
 
+// Shared with steps-service.cjs (both hosts construct it with this same dataDir), so a note
+// written through the viewer and pruned here live under the one store.
+const notesStore = createNotesStore({ dataDir: DATA_DIR });
+
 // ---------------------------------------------------------------------------------------
 // Archived sessions: the board's own flag (Claude Code's archive is private to it)
 // ---------------------------------------------------------------------------------------
@@ -900,8 +906,43 @@ function transcriptsNamed(root, sessionId) {
   return out;
 }
 
+/**
+ * True only when a look at the disk right now finds no transcript of this session in either
+ * root. The filename index is a minute old at most, which is long enough for a session to
+ * start, get a note and end; and a root that cannot be read at this moment (anything but "it
+ * does not exist") says nothing about what is in it. Both cases answer false, so notes are
+ * never deleted on a stale or failed read.
+ */
+function transcriptGone(sessionId) {
+  for (const root of [PROJECTS_DIR, ARCHIVE_TRANSCRIPTS_DIR]) {
+    let dirs;
+    try { dirs = fs.readdirSync(root, { withFileTypes: true }); }
+    catch (e) { if (e && e.code === 'ENOENT') continue; return false; }
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      // the same holds one level down: a project folder that cannot be looked into
+      // (no access, a drive that answers late) may well hold the transcript
+      try { fs.statSync(path.join(root, d.name, sessionId + '.jsonl')); return false; }
+      catch (e) { if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) continue; return false; }
+    }
+  }
+  return true;
+}
+
 function liveTranscripts(sessionId) { return transcriptsNamed(PROJECTS_DIR, sessionId); }
 function stowedTranscripts(sessionId) { return transcriptsNamed(ARCHIVE_TRANSCRIPTS_DIR, sessionId); }
+
+/**
+ * Where the transcript of a session is now, or null. The filename index is a list read up to
+ * a minute ago, and only the process that moves a transcript reads it anew: another window
+ * may have stowed the session or brought it back since. A path of the index that is gone is
+ * therefore no answer; the two roots are looked at instead.
+ */
+function transcriptOf(sessionId) {
+  const listed = transcriptIndex().get(sessionId);
+  if (listed && fs.existsSync(listed)) return listed;
+  return liveTranscripts(sessionId)[0] || stowedTranscripts(sessionId)[0] || null;
+}
 
 /** Every registry record as { pid, sessionId }, pid from the file name. */
 function registryRecords() {
@@ -1883,16 +1924,42 @@ async function openUriForPid(sessionId, pid) {
   return win ? openUri(sessionId, win.windowId, boardAlive(win.exthostPid)) : null;
 }
 
-/** Bring the session's VS Code window forward on that session. */
-function focusSession(sessionId, windowId, opts) {
+/**
+ * vscode://<board>/steer?session=<id>&note=<claimId>, for the one-shot hand-over to a session
+ * owned by another window: always through the board running there (Claude Code itself has no
+ * /steer route), and only when that board is 0.12.0 or newer (the version that reads a claim at
+ * all); null otherwise, so the caller falls back to clipboard plus the existing open. The text
+ * itself never rides in the URL, only the claim id, written separately by writeSteerClaim.
+ */
+function steerUri(sessionId, windowId, viaBoard, claimId) {
+  if (!UUID_RE.test(String(sessionId)) || !Number.isInteger(windowId)) return null;
+  if (!STEER_CLAIM_ID_RE.test(String(claimId || ''))) return null;
+  if (!(typeof viaBoard === 'string' && EXTENSION_ID_RE.test(viaBoard))) return null;
+  return 'vscode://' + viaBoard + '/steer?session=' + sessionId + '&windowId=' + windowId + '&note=' + claimId;
+}
+
+/** `code --open-url <target>`, shared by every vscode:// hand-over below. */
+function openUrlViaCode(target) {
   return new Promise((resolve, reject) => {
-    const target = openUri(sessionId, windowId, opts && opts.viaBoard, opts && opts.route);
-    if (!target) return reject(new Error('refusing to build a URI from unchecked input'));
     // shell: true is required to run code.cmd; the quotes keep cmd.exe from reading `&`.
     execFile('code', ['--open-url', '"' + target + '"'], {
       env: strippedEnv(), timeout: 15000, windowsHide: true, shell: true,
     }, (err) => (err ? reject(err) : resolve(target)));
   });
+}
+
+/** Bring the session's VS Code window forward on that session. */
+function focusSession(sessionId, windowId, opts) {
+  const target = openUri(sessionId, windowId, opts && opts.viaBoard, opts && opts.route);
+  if (!target) return Promise.reject(new Error('refusing to build a URI from unchecked input'));
+  return openUrlViaCode(target);
+}
+
+/** Opens the owning window's /steer route with a fresh claim already written for it. */
+function steerToWindow(sessionId, windowId, viaBoard, claimId) {
+  const target = steerUri(sessionId, windowId, viaBoard, claimId);
+  if (!target) return Promise.reject(new Error('refusing to build a URI from unchecked input'));
+  return openUrlViaCode(target);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1948,6 +2015,117 @@ function claimNotice(sessionId, kind, at) {
 
 function releaseNotice(sessionId, kind, at) {
   try { fs.unlinkSync(noticeFile(sessionId, kind, at)); } catch (_) { /* already gone */ }
+}
+
+/*
+ * The one-shot /steer claim. A sending window that does not own the target session writes
+ * the hand-over text here (never into the URL, which another process could log or replay) and
+ * opens a vscode://<board>/steer?session=<id>&note=<claimId> URI the owning window routes to;
+ * that window reads the claim, acts on it only when it is younger than STEER_CLAIM_MAX_AGE_MS,
+ * then deletes it before acting, so a reopened or logged URI finds nothing the second time. A
+ * claim is keyed by its own random id, not the session id (two windows could steer the same
+ * session, or send and resend before the first claim is read), under DATA_DIR/steers/.
+ */
+const STEERS_DIR = path.join(DATA_DIR, 'steers');
+const STEER_CLAIM_ID_RE = /^[0-9a-f]{32}$/;
+const STEER_CLAIM_MAX_AGE_MS = 30 * 1000;
+const STEER_CLAIM_STALE_MS = 60 * 1000;   // swept on write, same as a notice's own day-old sweep
+
+function steerClaimFile(claimId) {
+  if (!STEER_CLAIM_ID_RE.test(String(claimId || ''))) throw new Error('not a claim id');
+  return path.join(STEERS_DIR, claimId + '.json');
+}
+
+/** Removes claims older than STEER_CLAIM_STALE_MS, so a long-idle window leaves nothing behind. */
+function pruneSteerClaims() {
+  let names = [];
+  try { names = fs.readdirSync(STEERS_DIR); } catch (_) { return; }
+  const cutoff = Date.now() - STEER_CLAIM_STALE_MS;
+  for (const name of names) {
+    const file = path.join(STEERS_DIR, name);
+    try { if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file); } catch (_) { /* gone or held: next time */ }
+  }
+}
+
+/** Writes the claim and returns its id; the id (never the text) is what travels in the URL. */
+function writeSteerClaim(text) {
+  fs.mkdirSync(STEERS_DIR, { recursive: true });
+  pruneSteerClaims();
+  const claimId = crypto.randomBytes(16).toString('hex');
+  const tmp = steerClaimFile(claimId) + '.tmp-' + process.pid + '-' + Date.now();
+  fs.writeFileSync(tmp, JSON.stringify({ text: String(text || ''), at: Date.now() }));
+  fs.renameSync(tmp, steerClaimFile(claimId));
+  return claimId;
+}
+
+/**
+ * Reads and deletes the claim in one step (a get-and-delete, not a peek): a malformed id, a
+ * missing file, or a claim at or past STEER_CLAIM_MAX_AGE_MS all answer null, and the file is
+ * removed either way so a stale claim never lingers for a later, wrongly-timed read. A caller
+ * never takes the hand-over text from anywhere but this return value.
+ */
+function takeSteerClaim(claimId) {
+  let file;
+  try { file = steerClaimFile(claimId); } catch (_) { return null; }
+  // Taken by renaming it: of two takers of one claim only one rename succeeds, so the text
+  // reaches one of them however their reads fall. A name left behind is swept with the claims.
+  const mine = file + '.taken-' + process.pid + '-' + crypto.randomBytes(4).toString('hex');
+  try { fs.renameSync(file, mine); } catch (_) { return null; }
+  let rec = null;
+  try { rec = JSON.parse(fs.readFileSync(mine, 'utf8')); } catch (_) { rec = null; }
+  try { fs.unlinkSync(mine); } catch (_) { /* already gone */ }
+  if (!rec || typeof rec !== 'object' || typeof rec.text !== 'string') return null;
+  const age = Date.now() - (Number(rec.at) || 0);
+  if (!(age >= 0 && age < STEER_CLAIM_MAX_AGE_MS)) return null;
+  return rec.text;
+}
+
+/*
+ * The answer to a claim. The window that took a claim writes whether the text reached its chat
+ * box (its Claude Code may be too old, or only the plain open may have worked); the sender
+ * waits for that answer before it calls a note sent. Same folder and id as the claim, read once
+ * and removed, and swept with the claims.
+ */
+const STEER_ACK_WAIT_MS = 8000;
+
+function steerAckFile(claimId) {
+  if (!STEER_CLAIM_ID_RE.test(String(claimId || ''))) throw new Error('not a claim id');
+  return path.join(STEERS_DIR, claimId + '.ack');
+}
+
+function writeSteerAck(claimId, ok) {
+  let file;
+  try { file = steerAckFile(claimId); } catch (_) { return; }
+  try {
+    fs.mkdirSync(STEERS_DIR, { recursive: true });
+    const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
+    fs.writeFileSync(tmp, JSON.stringify({ ok: Boolean(ok), at: Date.now() }));
+    fs.renameSync(tmp, file);
+  } catch (_) { /* the sender then reports the hand-over as not confirmed */ }
+}
+
+/** `{ ok }` once the window that took the claim has answered; null when it has not within
+    `timeoutMs` (STEER_ACK_WAIT_MS when left out). The answer is removed as it is read. */
+async function waitSteerAck(claimId, timeoutMs) {
+  let file;
+  try { file = steerAckFile(claimId); } catch (_) { return null; }
+  const until = Date.now() + (timeoutMs === undefined ? STEER_ACK_WAIT_MS : timeoutMs);
+  for (;;) {
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
+    if (rec && typeof rec === 'object') {
+      try { fs.unlinkSync(file); } catch (_) { /* gone already */ }
+      return { ok: rec.ok === true };
+    }
+    if (Date.now() >= until) return null;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/** Escapes a value for use inside a double-quoted HTML attribute: what both hosts put into
+    the meta tags of the pages they serve (the board token, a session id). */
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function xmlEscape(s) {
@@ -2071,6 +2249,7 @@ async function snapshot(opts) {
   forgetStatuses(liveIds);
   pruneDead(MUTED_DIR, muted, liveIds, index);
   pruneDead(ORDER_DIR, order, liveIds, index);
+  notesStore.pruneDead(liveIds, index, transcriptGone);
 
   const windows = new Map();
   for (const r of rows) {
@@ -2573,6 +2752,7 @@ module.exports = {
   EXTENSION_ID,
   UUID_RE,
   IS_WINDOWS,
+  notesStore,
   snapshot,
   lastGoodRows,
   lastSnapshotRows,
@@ -2585,6 +2765,13 @@ module.exports = {
   NOTICES_DIR,
   claimNotice,
   releaseNotice,
+  writeSteerClaim,
+  takeSteerClaim,
+  steerUri,
+  steerToWindow,
+  escapeAttr,
+  writeSteerAck,
+  waitSteerAck,
   toastXml,
   toastScript,
   showSystemToast,
@@ -2628,6 +2815,9 @@ module.exports = {
   CLAUDE_CODE_STATE_DB,
   ARCHIVE_TRANSCRIPTS_DIR,
   transcriptRoots,
+  transcriptIndex,
+  transcriptOf,
+  transcriptFacts,
   liveTranscripts,
   stowedTranscripts,
   registryRecords,
@@ -2652,6 +2842,9 @@ module.exports = {
   ARCHIVE_DIR,
   SESSIONS_DIR,
   rgProbe,
+  RG_BASE,
+  run,
+  jsonEscaped,
   sessionIndex,
   searchSessions,
   idQuery,

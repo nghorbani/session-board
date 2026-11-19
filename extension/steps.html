@@ -1,0 +1,2830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steps</title>
+<style id="pageStyle">
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --dim: #6b7280; --faint: #9aa1ab; --line: #e2e5ea;
+    --panel: #f5f6f8; --rail: #fafafb; --accent: #0b62c4; --mark: #ffe58a;
+    --you: #0b62c4; --plan: #7a3fc4; --err: #c0392b; --note: #b7791f; --hit: #b45309; --new: #1f8a52;
+  }
+  @media (prefers-color-scheme: dark) {
+    /* an exported page is paper: it keeps the light colours whatever the reader's scheme */
+    :root:not(.export) {
+      --bg: #1e1e1e; --fg: #d4d4d4; --dim: #8b8f98; --faint: #6a6e77; --line: #33363c;
+      --panel: #252629; --rail: #202124; --accent: #4da3ff; --mark: #6b5a12;
+      --you: #4da3ff; --plan: #b48cf2; --err: #f08a7c; --note: #e0b252; --hit: #e8b24d; --new: #5fcf96;
+    }
+  }
+  body.vscode {
+    --bg: var(--vscode-editor-background, #1e1e1e);
+    --fg: var(--vscode-foreground, #d4d4d4);
+    --dim: var(--vscode-descriptionForeground, #8b8f98);
+    --faint: var(--vscode-disabledForeground, #6a6e77);
+    --line: var(--vscode-widget-border, #33363c);
+    --panel: var(--vscode-editorWidget-background, #252629);
+    --rail: var(--vscode-sideBar-background, #202124);
+    --accent: var(--vscode-focusBorder, #4da3ff);
+    --you: var(--vscode-textLink-foreground, #4da3ff);
+    --plan: #b48cf2;
+    --err: var(--vscode-errorForeground, #f08a7c);
+    --note: #e0b252; --hit: #e8b24d; --new: #5fcf96;
+    --mark: var(--vscode-editor-findMatchHighlightBackground, #6b5a12);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  button { font: inherit; color: var(--fg); cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary, button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  input[type=search] { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; }
+  input[type=search]:focus, button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+  header { flex: 0 0 auto; padding: 8px 14px 10px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 14px; font-weight: 600; margin: 0; }
+  .sub { color: var(--dim); font-size: 11px; margin-top: 1px; }
+  .indexnote { color: var(--dim); font-size: 11px; margin-top: 3px; display: none; }
+  .indexnote.show { display: block; }
+  .bar { display: flex; gap: 6px; align-items: center; margin-top: 7px; flex-wrap: wrap; }
+  .bar input[type=search] { flex: 1 1 180px; min-width: 120px; }
+  .bar .count { color: var(--dim); font-size: 11px; min-width: 50px; }
+  .sw { color: var(--dim); font-size: 11px; display: flex; gap: 4px; align-items: center; cursor: pointer; user-select: none; }
+
+  .strip { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel); margin-top: 8px; }
+  .strip .item { flex: 1 1 0; padding: 6px 10px; border-right: 1px solid var(--line); cursor: pointer; text-align: center; background: none; border-radius: 0; border-top: none; border-bottom: none; border-left: none; }
+  .strip .item:last-child { border-right: none; }
+  .strip .item.on { background: var(--accent); color: #fff; }
+  .strip .item.static { cursor: default; }
+  .strip .item.inactive { opacity: .5; cursor: default; }
+  .strip .num { display: block; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .strip .lbl { display: block; font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .03em; }
+  .strip .item.on .lbl { color: #fff; opacity: .85; }
+  .strip .item.provisional .num::after { content: "…"; font-weight: 400; opacity: .6; }
+
+  .app { flex: 1 1 auto; min-height: 0; display: flex; position: relative; }
+  .rail-toggle { display: none; align-items: center; gap: 7px; padding: 7px 12px; border-bottom: 1px solid var(--line); background: var(--rail); cursor: pointer; font-size: 12px; }
+  .rail-toggle .car { color: var(--dim); }
+  .rail-toggle .cur-turn { color: var(--accent); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail { flex: 0 0 272px; border-right: 1px solid var(--line); background: var(--rail); overflow-y: auto; padding: 6px 0 40px; }
+  .rail-top { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .rail-top button { width: 100%; }
+  .sec-entry { display: flex; align-items: baseline; gap: 7px; padding: 6px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .sec-entry:hover { background: var(--panel); }
+  .sec-entry.cur { background: var(--panel); box-shadow: inset 2px 0 0 var(--accent); }
+  .sec-entry .dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; background: var(--you); flex: 0 0 auto; }
+  .sec-entry.k-question .dot, .sec-entry.k-approve .dot { background: var(--plan); }
+  .sec-entry .body-col { min-width: 0; flex: 1 1 auto; }
+  .sec-entry .txt { font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sec-entry.has-hit .txt { color: var(--hit); }
+  .sec-entry .t { color: var(--dim); font-size: 10.5px; }
+  .sec-entry .note-mark { color: var(--note); font-size: 11px; }
+
+  .reader { flex: 1 1 auto; overflow-y: auto; padding: 4px 22px 90px; position: relative; }
+  .reader-inner { max-width: 760px; margin: 0 auto; }
+  .empty-state { color: var(--dim); padding: 40px 10px; text-align: center; }
+
+  .sec-head { display: flex; gap: 8px; margin: 22px 0 8px; padding-bottom: 6px; border-bottom: 2px solid var(--you); scroll-margin-top: 10px; }
+  .sec-head .lbl { color: var(--you); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .sec-head.k-question .lbl, .sec-head.k-approve .lbl { color: var(--plan); }
+  .restate { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+
+  .row { padding: 9px 0; border-bottom: 1px solid var(--line); scroll-margin-top: 10px; }
+  .row .meta { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
+  .row .time { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .row .chip { font-size: 10.5px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--line); color: var(--dim); }
+  .row.k-you .chip { color: var(--you); border-color: var(--you); }
+  .row.k-claude .chip { color: var(--accent); border-color: var(--accent); }
+  .row.k-qa .chip, .row.k-plan .chip { color: var(--plan); border-color: var(--plan); }
+  .row.k-plan .body { border-left: 3px solid var(--plan); padding-left: 10px; }
+  .row.cur-hit { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+  .row.k-interrupted { padding: 4px 0; border-bottom: none; }
+  .row.k-interrupted .interrupted-line { color: var(--faint); font-size: 11px; font-style: italic; }
+  .you-msg { white-space: pre-wrap; font-weight: 600; background: var(--panel); border-radius: 6px; padding: 10px 12px; }
+  .you-msg.folded-you { max-height: 150px; overflow: hidden; position: relative; }
+  .you-msg.folded-you:not(.open)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(to bottom, transparent, var(--panel)); }
+  .you-msg.folded-you.open { max-height: none; }
+  .approved-line { color: var(--plan); font-size: 12px; margin-top: 6px; font-weight: 600; }
+
+  .qcard .qhead { color: var(--plan); text-transform: uppercase; font-weight: 600; font-size: 11px; margin-bottom: 4px; }
+  .qcard .qtext { font-weight: 600; margin-bottom: 8px; }
+  .qcard .qpick { color: var(--dim); font-size: 11px; margin-bottom: 7px; }
+  .qoptions { display: flex; flex-direction: column; gap: 7px; }
+  .qopt { display: flex; gap: 8px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; }
+  .qopt.chosen { border-color: var(--you); background: var(--panel); }
+  .qmark { color: var(--faint); flex: 0 0 auto; }
+  .qopt.chosen .qmark { color: var(--you); }
+  .qopt-col { min-width: 0; flex: 1 1 auto; }
+  .qopt-lrow { display: flex; align-items: center; gap: 7px; }
+  .qopt-label { font-weight: 600; color: var(--dim); }
+  .qopt.chosen .qopt-label { color: var(--fg); }
+  .qopt-tag { font-size: 10px; text-transform: uppercase; color: var(--you); border: 1px solid var(--you); border-radius: 9px; padding: 0 6px; }
+  .qopt-desc { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .qopt.chosen .qopt-desc { color: var(--fg); }
+  .answerline { border-left: 3px solid var(--you); padding-left: 10px; margin-top: 8px; }
+  .answerline .lbl { color: var(--dim); font-size: 11px; text-transform: uppercase; }
+  .answerline .av { font-weight: 600; color: var(--you); }
+  .qnotyet { color: var(--err); font-size: 12px; }
+
+  .worksum { color: var(--fg); }
+  .facts { color: var(--faint); font-size: 11px; margin-top: 6px; }
+  .files { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .flbl { color: var(--dim); font-size: 10px; text-transform: uppercase; }
+  .filerow { display: flex; gap: 5px; font-size: 12px; }
+  .fkind { color: var(--dim); font-size: 10.5px; min-width: 28px; }
+  a.lnk { color: var(--accent); text-decoration: underline; cursor: pointer; overflow-wrap: anywhere; background: none; border: none; padding: 0; font: inherit; }
+  .detailbtn { font-size: 11px; color: var(--dim); padding: 2px 7px; margin-top: 6px; }
+  .worklist { margin: 7px 0 0; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; display: none; }
+  .worklist.open { display: block; }
+  .wl-item { display: flex; gap: 8px; padding: 3px 0; font-size: 12px; border-bottom: 1px solid var(--line); }
+  .wl-item:last-child { border-bottom: none; }
+  .wn { font-family: Consolas, "Cascadia Mono", monospace; color: var(--dim); min-width: 80px; flex: 0 0 auto; }
+  .wb { font-family: Consolas, "Cascadia Mono", monospace; font-size: 11.5px; overflow-wrap: anywhere; }
+  pre.fold { margin: 6px 0 0; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; max-height: 260px; overflow: auto; font-size: 11.5px; white-space: pre-wrap; }
+
+  .report-box { margin-top: 7px; }
+  .report-body { max-height: 220px; overflow: hidden; position: relative; }
+  .report-body:not(.open)::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; background: linear-gradient(to bottom, transparent, var(--bg)); }
+  .report-body.open { max-height: none; }
+  .showall { font-size: 11px; color: var(--dim); margin-top: 4px; }
+
+  .md p { margin: 0 0 9px; white-space: pre-line; }
+  .md .h { font-weight: 600; margin: 13px 0 5px; }
+  .md .h1, .md .h2 { font-size: 15px; }
+  .md code, a.code { font-family: Consolas, "Cascadia Mono", monospace; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+  .md .li { display: grid; grid-template-columns: 20px 1fr; margin: 2px 0; }
+  .md .bullet { color: var(--dim); }
+  .md table { border-collapse: collapse; margin: 7px 0 9px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 3px 8px; }
+  .md th { background: var(--panel); }
+  pre.mdcode { margin: 7px 0; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: auto; font-size: 11.5px; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; }
+
+  .new-marker { display: flex; align-items: center; gap: 8px; margin: 20px 0; color: var(--new); font-size: 11px; font-weight: 600; }
+  .new-marker::before, .new-marker::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--new); opacity: .5; }
+
+  .edgebar { position: fixed; left: 0; right: 0; z-index: 5; display: flex; justify-content: center; pointer-events: none; }
+  .edgebar.bottom { bottom: 0; padding-bottom: 10px; }
+  .pill { pointer-events: auto; background: var(--accent); color: #fff; border-radius: 999px; padding: 7px 16px; font-weight: 600; box-shadow: 0 4px 14px rgba(0,0,0,.25); border: none; }
+
+  .files-view { padding: 4px 0; }
+  .fsec { margin-bottom: 16px; }
+  .fsec-h { color: var(--you); font-weight: 600; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+  .fp { display: block; width: 100%; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; padding: 3px 0; color: var(--accent); cursor: pointer; background: none; border: none; text-align: left; }
+
+  .error-state, .status-line { color: var(--dim); padding: 30px 10px; text-align: center; }
+  .error-state { color: var(--err); }
+
+  .row { position: relative; }
+  .add-note { float: right; padding: 0 7px; color: var(--dim); background: none; border: 1px solid transparent; opacity: 0; font-size: 11px; }
+  .row:hover .add-note, .row.noted .add-note, .row.note-open .add-note { opacity: 1; }
+  .row.noted .add-note { color: var(--note); border-color: var(--note); }
+  .notebox { background: var(--panel); border: 1px solid var(--note); border-radius: 4px; padding: 8px; margin-top: 8px; clear: both; }
+  .notebox textarea { width: 100%; min-height: 54px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px; resize: vertical; }
+  .notebox .row2 { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
+  .notebox .quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+  .notebox .quick button { font-size: 11px; color: var(--dim); }
+  .saved-note { border-left: 3px solid var(--note); padding: 2px 0 2px 10px; margin-top: 8px; color: var(--note); white-space: pre-wrap; clear: both; overflow-wrap: anywhere; }
+  .saved-note .off-path { display: block; color: var(--dim); font-style: italic; font-size: 11px; margin-top: 2px; }
+  .saved-note .sent-mark { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
+
+  .allnotes-bar { display: none; align-items: center; gap: 8px; padding: 7px 14px; border-top: 1px solid var(--note); background: var(--panel); font-size: 12px; flex: 0 0 auto; }
+  .allnotes-bar.show { display: flex; }
+  .allnotes-bar .n { color: var(--note); font-weight: 600; }
+
+  .export-wrap { position: relative; display: inline-flex; }
+  .export-menu { position: absolute; right: 0; top: 100%; margin-top: 3px; z-index: 6; display: flex; flex-direction: column; gap: 2px; padding: 4px; background: var(--bg); border: 1px solid var(--line); border-radius: 5px; box-shadow: 0 6px 18px rgba(0,0,0,.25); white-space: nowrap; }
+  .export-menu[hidden] { display: none; }
+  .export-menu button { text-align: left; border-color: transparent; }
+
+  /* The story written out as a page of its own (the PDF export): the rows as the tab draws
+     them, on paper. Nothing scrolls, nothing is folded, long lines wrap. */
+  html.export, html.export body { height: auto; }
+  html.export body { display: block; padding: 0 4px; }
+  html.export h1 { font-size: 17px; }
+  html.export .sub { margin-bottom: 6px; }
+  html.export .reader { overflow: visible; padding: 0; }
+  html.export .reader-inner { max-width: none; }
+  html.export .you-msg.folded-you, html.export .report-body { max-height: none; overflow: visible; }
+  html.export .you-msg.folded-you::after, html.export .report-body::after { display: none; }
+  html.export pre.mdcode, html.export pre.fold { overflow: visible; max-height: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+  html.export .md table { display: table; }
+  html.export a.lnk { cursor: auto; }
+  html.export a.lnk:not([href]) { color: inherit; text-decoration: none; }   /* a path: text on paper, not a link */
+  html.export .sec-head { break-after: avoid; }
+  html.export .row .meta { break-after: avoid; }
+  /* Nothing is wider than the paper. A browser shrinks the whole page to fit its widest part,
+     so one long path, a wide table or a long line of code would make every text small. */
+  html.export body { overflow-wrap: anywhere; }
+  html.export .md table { max-width: 100%; }
+  html.export .you-msg, html.export .restate, html.export pre { min-width: 0; max-width: 100%; }
+  @page { margin: 16mm 14mm; }
+
+  /* On paper the parts are told apart by colour. Each kind of row has one: the tab's own where
+     the tab has one (you, questions and plans, notes, errors), and one more each for Claude and
+     for the work, which share the tab's accent and its grey. A chip is filled, a part has a
+     tint and an edge. The colours carry meaning, so a print dialog must not leave them out. */
+  html.export {
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    --claude: #0f766e; --work: #566070; --code: #9a3412;
+    --you-tint: #e6f0fb; --claude-tint: #e0f2ef; --plan-tint: #f1e9fb; --work-tint: #eef0f3;
+    --note-tint: #fdf2d9; --err-tint: #fbe9e6; --code-tint: #fbf0e8;
+  }
+  html.export h1 { color: var(--you); }
+  html.export .you-msg { font-weight: 400; }   /* the tint marks it as yours; a long message reads better in normal weight */
+  html.export .sec-head { padding: 6px 10px; background: var(--you-tint); border-radius: 5px 5px 0 0; }
+  html.export .sec-head.k-question, html.export .sec-head.k-approve { background: var(--plan-tint); border-bottom-color: var(--plan); }
+  html.export .restate { background: var(--you-tint); border-left: 4px solid var(--you); }
+  html.export .row.k-qa .restate { background: var(--plan-tint); border-left-color: var(--plan); }
+  html.export .row .chip { color: #fff; background: var(--work); border-color: var(--work); }
+  html.export .row.k-claude .chip { background: var(--claude); border-color: var(--claude); }
+  html.export .row.k-error .chip { background: var(--err); border-color: var(--err); }
+  html.export .row.k-qa .chip, html.export .row.k-plan .chip { background: var(--plan); border-color: var(--plan); }
+  html.export .row.k-claude .body { border-left: 3px solid var(--claude); padding-left: 10px; }
+  html.export .row.k-error .body { border-left-color: var(--err); background: var(--err-tint); padding: 6px 10px; border-radius: 0 4px 4px 0; }
+  html.export .row.k-work .body { border-left: 3px solid var(--work); background: var(--work-tint); padding: 6px 10px; border-radius: 0 4px 4px 0; }
+  html.export .row.k-plan .body { background: var(--plan-tint); padding: 8px 10px; border-radius: 0 4px 4px 0; }
+  html.export .qcard { border-left: 3px solid var(--plan); padding-left: 10px; }
+  html.export .qopt.chosen { background: var(--you-tint); }
+  html.export .qopt-tag { color: #fff; background: var(--you); }
+  html.export .saved-note { background: var(--note-tint); color: #8a5a10; padding: 6px 10px; border-radius: 0 4px 4px 0; }
+  html.export .row.k-claude .md .h, html.export .row.k-claude .md .bullet { color: var(--claude); }
+  html.export .row.k-plan .md .h, html.export .row.k-plan .md .bullet { color: var(--plan); }
+  html.export .md code, html.export a.code, html.export a.lnk.code:not([href]) { color: var(--code); background: var(--code-tint); border-color: #f1dccd; }
+  html.export .md th { background: var(--claude-tint); }
+  html.export .row.k-plan .md th { background: #e2d3f6; }
+  html.export .wn { color: var(--work); font-weight: 600; }
+  /* a block inside a tinted part stands out as white */
+  html.export .row.k-work .worklist, html.export .row.k-work pre.fold, html.export .row.k-plan pre.mdcode, html.export .row.k-error pre.mdcode { background: #fff; }
+
+  @media (max-width: 760px) {
+    header { padding: 8px 10px; }
+    .bar input[type=search] { flex-basis: 100px; min-width: 70px; }
+    .bar button, .sw { font-size: 11px; }
+    .strip .num { font-size: 13px; }
+    .app { flex-direction: column; }
+    .rail-toggle { display: flex; }
+    .rail {
+      position: absolute; left: 0; right: 0; top: 34px; z-index: 4;
+      max-height: min(68vh, 520px); border-right: 0; border-bottom: 1px solid var(--line);
+      box-shadow: 0 10px 24px rgba(0,0,0,.28); display: none;
+    }
+    .rail.open { display: block; }
+    .reader { padding: 4px 12px 90px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Steps</h1>
+  <div class="sub" id="sub"></div>
+  <div class="indexnote" id="indexnote">still indexing the rest of this transcript; what you see below may grow</div>
+  <div class="bar">
+    <input type="search" id="q" placeholder="Search words in the story" autocomplete="off" spellcheck="false">
+    <span class="count" id="count"></span>
+    <button id="prev" title="Previous hit">&#8593;</button>
+    <button id="next" title="Next hit">&#8595;</button>
+    <button id="notesJump" title="Jump between your notes">Notes 0</button>
+    <button id="decisions" title="Show only your messages, answered questions and approved plans">Decisions</button>
+    <label class="sw" title="Show the tool calls under every Work line"><input type="checkbox" id="allTools"> Tool calls</label>
+    <label class="sw" title="Stay at the end as new steps arrive"><input type="checkbox" id="follow" checked> Follow</label>
+    <span class="export-wrap">
+      <button id="exportBtn" title="Save the story of this view as a file" aria-haspopup="true" aria-expanded="false">Export</button>
+      <span class="export-menu" id="exportMenu" hidden>
+        <button data-export="md" title="The story as text, for an editor or a note">Markdown (.md)</button>
+        <button data-export="pdf" title="The story as this tab draws it, on pages">PDF (.pdf)</button>
+      </span>
+    </span>
+  </div>
+  <div class="strip" id="strip"></div>
+</header>
+<div class="app">
+  <div class="rail-toggle" id="railToggle"><span class="car" id="railCar">&#9656;</span><span class="cur-turn" id="railCurTurn">Story</span></div>
+  <nav class="rail" id="rail"></nav>
+  <main class="reader" id="reader"><div class="reader-inner" id="readerInner"></div></main>
+</div>
+<div class="edgebar bottom" id="endBar" style="display:none"><button class="pill" id="endPill"></button></div>
+<div class="allnotes-bar" id="allNotesBar"><span class="n" id="allNotesN"></span><button class="primary" id="sendAllNotes">Send all notes</button></div>
+
+<script>
+'use strict';
+/*
+ * Session Board Steps viewer: a story of one session's steps, built from the message-based
+ * service (steps-service.cjs). Two transports, like index.html: acquireVsCodeApi() postMessage
+ * in the webview, fetch POST /api/steps plus polling GET /api/steps/poll in a browser.
+ *
+ * The page keeps a compact step index (what "open" and "stepsProgress"/"stepsChanged" pushes
+ * carry) and renders sections lazily: only sections near the viewport hold their full row DOM,
+ * so a session with thousands of steps stays responsive. Step texts load on demand in small
+ * batches (the "bodies" message) for the sections currently in view; a step shows its preview
+ * until its body arrives.
+ */
+
+var vsapi = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : null;
+if (vsapi) document.body.classList.add('vscode');
+var sessionMeta = document.querySelector('meta[name="steps-session"]');
+var SESSION_ID = sessionMeta ? sessionMeta.getAttribute('content') : '';
+if (!SESSION_ID && !vsapi) {
+  var qp = new URLSearchParams(window.location.search);
+  SESSION_ID = qp.get('session') || '';
+}
+var tokenMeta = document.querySelector('meta[name="board-token"]');
+var TOKEN = tokenMeta ? tokenMeta.getAttribute('content') : '';
+
+var POLL_MS = 1200;
+var SEEN_DEBOUNCE_MS = 1500;
+var SEARCH_DEBOUNCE_MS = 150;
+var RENDER_WINDOW = 60;     // at most this many sections are drawn on each side of the anchor; the rest are spacers
+var ROW_BUDGET = 400;       // rows drawn around the anchor: the page holds about this many, however long the session
+var MIN_SIDE = 3;           // sections always drawn on each side of the anchor, whatever they cost in rows
+var BODY_BATCH_DELAY_MS = 60;
+
+var state = {
+  loaded: false,
+  error: null,                 // a plain-words failure the page shows instead of the story
+  title: '',
+  sections: [],                // full section list the page currently knows (from open/pushes)
+  strip: null,
+  generation: 0,
+  indexing: false,
+  seenStepId: null,
+  notes: [],                   // every note of this session, from open()/notesChanged, any order
+  curNote: -1,                 // index into a stable sort of state.notes, for the header's Notes jump
+  noteBoxFor: null,            // stepId whose note box is currently open, or null
+  bodies: Object.create(null), // stepId -> body record (text/truncated/size/... or the typed shapes)
+  bodiesPending: Object.create(null),
+  invalidatedAt: Object.create(null), // stepId -> invalidateSeq when a push named the step as updated
+  invalidateSeq: 0,
+  curHitStep: null,            // the step the search or the notes counter last jumped to; its row carries the mark
+  lens: 'all',                 // 'all' | 'decisions' | 'files'
+  showAllTools: false,
+  follow: true,
+  query: '',
+  hits: [],                    // ids of steps/sections carrying a hit, in document order
+  curHit: -1,
+  openWork: Object.create(null),   // stepId or work-group key -> true while its detail list is open
+  openReports: Object.create(null),
+  noteBoxOpened: 0,                   // counts the openings of a note box
+  noteSending: Object.create(null),   // stepId -> true while its note is being sent
+  buildingExport: false,   // true only while an export builds its output (withExportState), never across a wait
+  drawerOpen: false,
+  atBottom: true,
+  atTop: true,
+  lastSeenSent: null,
+  seenTimer: null,
+  bodyBatchTimer: null,
+  bodyBatchWanted: null,       // Set of stepIds queued for the next bodies request
+  searchTimer: null,
+  searchRequestId: 0,
+};
+
+function esc(s) { return String(s == null ? '' : s); }
+
+function fmtClock(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function fmtClockSec(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+function fmtDuration(ms) {
+  ms = Number(ms) || 0;
+  var m = Math.round(ms / 60000);
+  if (m < 1) return 'under a minute';
+  if (m < 60) return m + 'm';
+  var h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+/* A short span in seconds or minutes, for a reasoning duration ("Thought for 12 s", "Thought for
+   3m"): fmtDuration's "under a minute" says too little for a Work line reporting an exact pause. */
+function fmtShortDuration(ms) {
+  ms = Number(ms) || 0;
+  var s = Math.round(ms / 1000);
+  if (s < 60) return Math.max(s, 1) + ' s';
+  var m = Math.round(ms / 60000);
+  return m + 'm';
+}
+
+// -- transport ----------------------------------------------------------------------------
+
+var nextRequestId = 1;
+function newRequestId() { return 'r' + (nextRequestId++) + '-' + Date.now(); }
+
+var pending = Object.create(null); // requestId -> resolve fn, for the request/reply pattern over postMessage
+var pollAfter = 0;
+var pollTimer = null;
+
+// Reads are sent once more when the connection fails: a lost first request would otherwise leave
+// the tab empty. Writes (notes, sending) are never repeated, since a second copy could apply twice.
+var RETRY_ONCE = { open: 1, body: 1, bodies: 1, search: 1, seen: 1 };
+var RETRY_AFTER_MS = 200;
+
+function post(msg) {
+  return fetch('/api/steps', {
+    method: 'POST', cache: 'no-store',
+    headers: { 'X-Board-Token': TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(msg),
+  }).then(function (r) { return r.json(); });
+}
+
+function send(msg) {
+  if (vsapi) { vsapi.postMessage(msg); return Promise.resolve(null); }
+  return post(msg).catch(function (e) {
+    if (!RETRY_ONCE[msg.type]) throw e;
+    return new Promise(function (res) { setTimeout(res, RETRY_AFTER_MS); }).then(function () { return post(msg); });
+  }).catch(function (e) {
+    return { type: (msg.type || 'unknown') + 'Result', ok: false, message: 'server not reachable: ' + e.message };
+  }).then(function (reply) {
+    if (reply && reply.expired) reopenAfterExpiry();
+    return reply;
+  });
+}
+
+/* The browser server let go of this viewer: it heard nothing from it for minutes (a hidden
+   tab polls rarely). A poll says so, and so does the reply to a request that needs the
+   transcript. Opening again reads the transcript anew; the reader keeps its place. */
+function reopenAfterExpiry() {
+  pollAfter = 0;
+  pushFloor = 0;   // the viewer that comes back has a queue of its own, numbered from one
+  if (state.loaded && !state.reopening) { state.reopening = true; openSession(true); }
+}
+
+/* A request/reply call: sends msg with a fresh requestId and resolves when the matching reply
+   arrives, over either transport. The webview path listens on window message events (wired
+   once, below); the browser path is a plain fetch whose JSON body is the reply itself. */
+function call(msg) {
+  var requestId = newRequestId();
+  msg = Object.assign({ requestId: requestId, sessionId: SESSION_ID }, msg);
+  if (vsapi) {
+    return new Promise(function (resolve) {
+      pending[requestId] = resolve;
+      vsapi.postMessage(msg);
+    });
+  }
+  return send(msg);
+}
+
+function startPolling() {
+  if (vsapi || pollTimer) return;
+  pollTimer = setInterval(function () {
+    fetch('/api/steps/poll?session=' + encodeURIComponent(SESSION_ID) + '&after=' + pollAfter, {
+      headers: { 'X-Board-Token': TOKEN }, cache: 'no-store',
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      if (res && res.expired) { reopenAfterExpiry(); return; }
+      if (!res || typeof res.seq !== 'number') return;
+      pollAfter = res.seq;
+      // the pushes of a reply are the last ones of the queue, in order, up to res.seq
+      var pushes = res.pushes || [];
+      pushes.forEach(function (msg, i) { onPush(msg, res.seq - pushes.length + 1 + i); });
+    }).catch(function () { /* the next tick tries again */ });
+  }, POLL_MS);
+}
+
+if (vsapi) {
+  window.addEventListener('message', function (ev) {
+    var msg = ev.data;
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.requestId && pending[msg.requestId]) {
+      var resolve = pending[msg.requestId];
+      delete pending[msg.requestId];
+      resolve(msg);
+      return;
+    }
+    onPush(msg);
+  });
+}
+
+// -- push handling (follow, indexing progress) ---------------------------------------------
+
+/* What a push says about the bodies the page holds. A new generation (the transcript was
+   replaced or cut) makes every one of them a text of the old file. A step named as updated got
+   its result after it was first shown (the answer to a question, a plan's approval, a tool's
+   output), so its body is asked for again when it is next in view. */
+function adoptPush(msg) {
+  if (msg.generation !== undefined && msg.generation !== state.generation) {
+    state.generation = msg.generation;
+    state.bodies = Object.create(null);
+    state.bodiesPending = Object.create(null);
+  }
+  (msg.updated || []).forEach(function (id) {
+    delete state.bodies[id];
+    delete state.bodiesPending[id];
+    state.invalidatedAt[id] = ++state.invalidateSeq;
+  });
+}
+
+/* In a browser the open reply and the pushes travel on requests of their own, so the two
+   arrive in any order, and the queue the page polls may hold pushes from before it opened (a
+   second tab on a session, a tab loaded again). Two rules keep the page on the newest state.
+   A push that arrives while an open is on its way waits and is applied after the reply:
+   applied before, the reply would undo it (the sections of the first paint, "still
+   indexing"), for good when the transcript is at rest. And a push the queue held before the
+   open came in (its number is not above reply.pushSeq) is older than the reply and is left
+   out: an old error or an old list of sections would replace what the reply brought. */
+var openPending = false;
+var heldPushes = [];   // { msg, seq }
+var pushFloor = 0;     // pushes numbered up to here are older than the open reply the page holds
+
+function onPush(msg, seq) {
+  if (!msg || msg.sessionId !== SESSION_ID) return;
+  if (openPending) { heldPushes.push({ msg: msg, seq: seq }); return; }
+  if (typeof seq === 'number' && seq <= pushFloor) return;
+  if (msg.type === 'stepsProgress') {
+    state.indexing = !msg.done;
+    if (msg.error) { showStatus('indexing stopped: ' + msg.error); return; }
+    adoptPush(msg);
+    foldCompact(msg.steps);
+    if (msg.sections) mergeSections(msg.sections, msg.strip);
+    renderIndexNote();
+    renderStrip();
+    if (msg.sections) renderAllKeepingView();
+    return;
+  }
+  if (msg.type === 'stepsChanged') {
+    if (msg.moved) {
+      // the transcript lies elsewhere now (the session was stowed or brought back): a new
+      // open finds it there, and the reader keeps its place
+      if (!state.reopening) { state.reopening = true; openSession(true); }
+      return;
+    }
+    if (msg.error) { showStatus(msg.error); return; }
+    adoptPush(msg);
+    foldCompact(msg.steps);
+    if (msg.reset !== undefined && msg.reset !== null) {
+      // the active path changed further back than the tail (a retry, an edited message): the
+      // simplest correct answer is to redraw from the service's own current section list,
+      // which msg.sections already carries, rather than try to patch a divergent tree in place.
+      mergeSections(msg.sections, msg.strip, true);
+    } else if (msg.sections) {
+      mergeSections(msg.sections, msg.strip);
+    }
+    renderStrip();   // the tiles count what the push added (a section, a decision, a file)
+    renderAll();
+    maybeStickToBottom();
+    return;
+  }
+  if (msg.type === 'notesChanged') {
+    // an open note box stays open across this redraw with what was typed in it (its draft);
+    // the action that closes a box (keep, send, delete, the toggle) does so itself.
+    state.notes = msg.notes || [];
+    renderStrip();
+    renderAll();
+    renderNotesJumpLabel();
+    return;
+  }
+}
+
+/* A push names its steps by id in its sections and carries the compact records (kind, time,
+   preview, title) of the steps it adds; rows and Work lines are drawn from those. */
+function foldCompact(steps) {
+  if (!state.compactById) state.compactById = Object.create(null);
+  (steps || []).forEach(function (s) { state.compactById[s.id] = s; });
+}
+
+/* Redraws after sections arrived in front of what is shown (the index reaching further back
+   in the transcript). At the end with Follow on, the reader stays at the end; otherwise the
+   row at the top of the viewport stays where it is. */
+function renderAllKeepingView() {
+  if (state.lens === 'files') { renderAll(); return; }
+  var reader = document.getElementById('reader');
+  if (state.follow && state.atBottom) { renderRail(); scrollToEnd(); updateEdgeBars(); queueVisibleBodies(); return; }
+  var top = reader.getBoundingClientRect().top;
+  var rows = reader.querySelectorAll('[data-step]');
+  var keep = null, offset = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i].getBoundingClientRect();
+    if (r.bottom > top) { keep = rows[i].getAttribute('data-step'); offset = r.top - top; break; }
+  }
+  if (keep) {
+    var secs = visibleSections();
+    for (var j = 0; j < secs.length; j++) {
+      if (sectionStepIds(secs[j]).indexOf(keep) !== -1) { anchorIndex = j; break; }
+    }
+  }
+  renderAll();
+  var el = keep ? document.getElementById('step-' + keep) : null;
+  if (el) reader.scrollTop += el.getBoundingClientRect().top - top - offset;
+}
+
+/* Merge an incoming section list onto what the page already has. Every section carries a
+   stable key (its opener step's id, or null for the lead section, which is always sections[0]):
+   a push can safely replace the whole array, because the keys of sections already rendered are
+   unchanged across a push, only new ones are appended (or, on a reset, the array is shorter
+   than before and some keys drop away): the per-section DOM nodes below are rebuilt from
+   this array by key, not diffed field by field, so a replace here is enough. */
+function mergeSections(sections, strip, isReset) {
+  state.sections = sections || [];
+  if (strip) state.strip = strip;
+  if (isReset) state.bodies = Object.create(null); // a reset may reuse ids under a new generation
+  rebuildCompactIndex();
+}
+
+function showStatus(text) {
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var div = document.createElement('div');
+  div.className = 'status-line';
+  div.textContent = text;
+  reader.appendChild(div);
+}
+
+// -- open ------------------------------------------------------------------------------------
+
+/* The open reply carries the sections, the strip, the notes and the flat compact list of the
+   steps (kind, time, preview per step, also the ones a Work line only names by id), so rows,
+   Work summaries and times can be drawn before any body text has loaded. */
+function openSession(again) {
+  if (!SESSION_ID) { showError('no session to show'); return; }
+  startPolling();
+  openPending = !vsapi;   // a webview gets the reply and the pushes in the order they were sent
+  call({ type: 'open' }).then(function (reply) {
+    var overtook = heldPushes;
+    heldPushes = [];
+    openPending = false;
+    state.reopening = false;
+    if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
+    pushFloor = typeof reply.pushSeq === 'number' ? reply.pushSeq : 0;
+    pollAfter = Math.max(pollAfter, pushFloor);
+    // a second open answers from a new index: what the page held belongs to the old one
+    state.compactById = Object.create(null);
+    state.bodies = Object.create(null);
+    state.bodiesPending = Object.create(null);
+    state.loaded = true;
+    state.title = reply.title || 'Session ' + SESSION_ID.slice(0, 8);
+    (reply.steps || []).forEach(function (s) { state.compactById[s.id] = s; });
+    state.sections = reply.sections || [];
+    state.strip = reply.strip || null;
+    state.generation = reply.generation || 0;
+    state.indexing = Boolean(reply.indexing);
+    state.seenStepId = reply.seenStepId || null;
+    state.notes = reply.notes || [];
+    document.getElementById('title').textContent = state.title;
+    document.getElementById('sub').textContent = 'Session ' + SESSION_ID.slice(0, 8) + (reply.counts && reply.counts.unreadable ? ' · ' + reply.counts.unreadable + ' unreadable lines' : '');
+    rebuildCompactIndex();
+    renderIndexNote();
+    renderStrip();
+    renderNotesJumpLabel();
+    if (again) renderAllKeepingView();
+    else { renderAll(); scrollToEndOnLoad(); }
+    overtook.forEach(function (held) { onPush(held.msg, held.seq); });
+  });
+}
+
+function showError(message) {
+  document.getElementById('title').textContent = 'Steps';
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var div = document.createElement('div');
+  div.className = 'error-state';
+  div.textContent = message;
+  reader.appendChild(div);
+  document.getElementById('rail').textContent = '';
+  document.getElementById('strip').textContent = '';
+}
+
+function renderIndexNote() {
+  var el = document.getElementById('indexnote');
+  el.classList.toggle('show', Boolean(state.indexing));
+}
+
+// -- markdown / highlighting (a small renderer that builds DOM nodes only) -----------------
+
+var URL_RE = /^https?:\/\/[^\s<>"')\]]+/i;
+var ABS_RE = /^(?:[A-Za-z]:[\\/]|~[\\/])[^\s<>"']*/;
+var RELFILE_RE = /^[\w.\-\\/]+\.[A-Za-z0-9]{1,8}(?::\d+|#L\d+)?$/;
+var RELDIR_RE = /^[\w.\-]+[\\/][\w.\-\\/]*[\\/]$/;
+
+function kindOfToken(t) {
+  if (URL_RE.test(t)) return 'url';
+  if (ABS_RE.test(t)) return 'path';
+  if (RELDIR_RE.test(t)) return 'path';
+  if (RELFILE_RE.test(t) && /[\\/]/.test(t)) return 'path';
+  return null;
+}
+
+function linkNode(text, kind, target, code) {
+  var a = document.createElement('a');
+  a.className = 'lnk' + (code ? ' code' : '');
+  a.href = '#';
+  a.title = target;
+  a.setAttribute('data-kind', kind);   // an export keeps a web link as a link and shows a path as text
+  a.textContent = text;
+  a.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    dispatchLink(kind, target);
+  });
+  return a;
+}
+
+/* Inline markdown within one line of text: `code`, **bold**, [label](url) links, bare URLs and
+   bare paths. Appends nodes directly to `parent`; never builds or assigns innerHTML. */
+function inlineMd(parent, text) {
+  var re = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s<>"')\]]+)|((?:[A-Za-z]:[\\/]|~[\\/])[^\s<>"']*)/g;
+  var last = 0;
+  var m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[1] !== undefined) {
+      var k = kindOfToken(m[1]);
+      if (k) parent.appendChild(linkNode(m[1], k, m[1], true));
+      else { var code = document.createElement('code'); code.textContent = m[1]; parent.appendChild(code); }
+    } else if (m[2] !== undefined) {
+      var b = document.createElement('b'); b.textContent = m[2]; parent.appendChild(b);
+    } else if (m[3] !== undefined) {
+      var linkKind = /^https?:\/\//i.test(m[4]) ? 'url' : 'path';
+      parent.appendChild(linkNode(m[3], linkKind, m[4], false));
+    } else if (m[5] !== undefined) {
+      parent.appendChild(linkNode(m[5], 'url', m[5], false));
+    } else if (m[6] !== undefined) {
+      parent.appendChild(linkNode(m[6], 'path', m[6], false));
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+}
+
+/* A small, safe Markdown renderer: headings, fenced code, tables, lists and paragraphs, built
+   as DOM nodes under `root` (which is cleared first). No innerHTML anywhere. */
+function md(root, text) {
+  root.textContent = '';
+  root.classList.add('md');
+  var lines = String(text == null ? '' : text).split('\n');
+  var i = 0;
+  function isTableSep(l) { return /^\s*\|?[\s:|-]+\|?\s*$/.test(l) && /-/.test(l); }
+  function isTableRow(l) { return /\|/.test(l); }
+  function splitRow(l) {
+    var t = l.trim();
+    if (t.charAt(0) === '|') t = t.slice(1);
+    if (t.charAt(t.length - 1) === '|') t = t.slice(0, -1);
+    return t.split('|').map(function (c) { return c.trim(); });
+  }
+  while (i < lines.length) {
+    var line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    var fence = /^```/.exec(line);
+    if (fence) {
+      var buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+      i++;
+      var pre = document.createElement('pre'); pre.className = 'mdcode';
+      pre.textContent = buf.join('\n');
+      root.appendChild(pre);
+      continue;
+    }
+    var heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      var level = heading[1].length;
+      var div = document.createElement('div');
+      div.className = 'h h' + Math.min(level, 2);
+      inlineMd(div, heading[2]);
+      root.appendChild(div);
+      i++;
+      continue;
+    }
+    if (isTableRow(line) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      var header = splitRow(line);
+      i += 2;
+      var rows = [];
+      while (i < lines.length && isTableRow(lines[i])) { rows.push(splitRow(lines[i])); i++; }
+      var table = document.createElement('table');
+      var thead = document.createElement('tr');
+      header.forEach(function (h) { var th = document.createElement('th'); inlineMd(th, h); thead.appendChild(th); });
+      table.appendChild(thead);
+      rows.forEach(function (r) {
+        var tr = document.createElement('tr');
+        r.forEach(function (c) { var td = document.createElement('td'); inlineMd(td, c); tr.appendChild(td); });
+        table.appendChild(tr);
+      });
+      root.appendChild(table);
+      continue;
+    }
+    var listItem = /^(\s*)([-*]|\d+[.)])\s+(.*)$/.exec(line);
+    if (listItem) {
+      var indent = listItem[1].length;
+      var bulletText = /\d/.test(listItem[2]) ? listItem[2] : '•';
+      var row = document.createElement('div');
+      row.className = 'li';
+      row.style.marginLeft = (indent * 10) + 'px';
+      var bullet = document.createElement('span'); bullet.className = 'bullet'; bullet.textContent = bulletText;
+      var body = document.createElement('div');
+      inlineMd(body, listItem[3]);
+      row.appendChild(bullet);
+      row.appendChild(body);
+      root.appendChild(row);
+      i++;
+      continue;
+    }
+    var para = [];
+    while (i < lines.length && lines[i].trim() && !/^```/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) && !/^(\s*)([-*]|\d+[.)])\s+/.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
+    }
+    var p = document.createElement('p');
+    inlineMd(p, para.join('\n'));
+    root.appendChild(p);
+  }
+}
+
+/* Plain-text insertion with a query highlighted via <mark>, used for fields that are not
+   rendered as markdown (your own messages, option labels, tool summaries). */
+function putText(el, text, q) {
+  el.textContent = '';
+  text = String(text == null ? '' : text);
+  if (!q) { el.appendChild(document.createTextNode(text)); return; }
+  var lower = text.toLowerCase();
+  var ql = q.toLowerCase();
+  var i = 0;
+  var at = lower.indexOf(ql, i);
+  if (at === -1) { el.appendChild(document.createTextNode(text)); return; }
+  while (at !== -1) {
+    if (at > i) el.appendChild(document.createTextNode(text.slice(i, at)));
+    var mark = document.createElement('mark');
+    mark.textContent = text.slice(at, at + q.length);
+    el.appendChild(mark);
+    i = at + q.length;
+    at = lower.indexOf(ql, i);
+  }
+  if (i < text.length) el.appendChild(document.createTextNode(text.slice(i)));
+}
+
+/* Highlight every occurrence of q inside an already-built subtree (used for markdown-rendered
+   content, where putText's single-pass text replace cannot run before inlineMd has already
+   split the text into nodes). Walks text nodes only, so it never touches an element's markup. */
+function hl(root, q) {
+  if (!q) return;
+  var ql = q.toLowerCase();
+  var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  var targets = [];
+  var node;
+  while ((node = walker.nextNode())) {
+    if (node.parentNode && node.parentNode.tagName === 'MARK') continue;
+    if (node.nodeValue.toLowerCase().indexOf(ql) !== -1) targets.push(node);
+  }
+  targets.forEach(function (textNode) {
+    var text = textNode.nodeValue;
+    var lower = text.toLowerCase();
+    var frag = document.createDocumentFragment();
+    var i = 0;
+    var at = lower.indexOf(ql, i);
+    while (at !== -1) {
+      if (at > i) frag.appendChild(document.createTextNode(text.slice(i, at)));
+      var mark = document.createElement('mark');
+      mark.textContent = text.slice(at, at + q.length);
+      frag.appendChild(mark);
+      i = at + q.length;
+      at = lower.indexOf(ql, i);
+    }
+    if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+    textNode.parentNode.replaceChild(frag, textNode);
+  });
+}
+
+// -- links and long texts ---------------------------------------------------------------------
+
+function dispatchLink(kind, target) {
+  // a web link in a browser needs no host; everything else is the host's to open or to refuse,
+  // and its answer says why when it refuses (no such path, a network path, a cancelled question)
+  if (!vsapi && kind === 'url') { window.open(target, '_blank', 'noopener'); return; }
+  call({ type: 'openLink', kind: kind, target: target }).then(function (reply) {
+    if (reply && reply.ok === false && reply.notAvailable) {
+      copyToClipboard(target);
+      flashNotice('not available in the browser, path copied: ' + target);
+    } else if (reply && reply.message) {
+      flashNotice(reply.message);
+    }
+  });
+}
+
+function openFullText(stepId, title) {
+  // The step is named, not its text: what the page holds is the text cut at 200 KB, and the
+  // host reads the whole one from the transcript. A browser has no editor tab to open, so it
+  // fetches the whole text and copies that. When the whole text cannot be read nothing is
+  // copied: the cut text passed off as the whole would be worse than a plain "could not".
+  // Both requests name the transcript the click was made on: when it is replaced in between,
+  // a step of the same id in the new one is another text, and the service refuses the old name.
+  var generation = state.generation;
+  call({ type: 'openText', stepId: stepId, generation: generation, title: title || 'Step text' }).then(function (reply) {
+    if (reply && reply.notAvailable) {
+      call({ type: 'fullText', stepId: stepId, generation: generation }).then(function (full) {
+        if (full && full.ok && typeof full.text === 'string') {
+          copyToClipboard(full.text);
+          flashNotice('not available in the browser, text copied');
+        } else {
+          flashNotice('The full text could not be read' + (full && full.message ? ': ' + full.message : '') + '.');
+        }
+      });
+    } else if (reply && reply.ok === false && reply.message) flashNotice(reply.message);
+  });
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(function () {});
+}
+
+var noticeTimer = null;
+var NOTICE_MS = 4000;
+var INDEXING_NOTE = 'still indexing the rest of this transcript; what you see below may grow';
+/* A notice has the line for a while. When its time is over the line shows what holds then
+   (still indexing, or nothing), never the notice that stood there before this one: that one
+   was as passing as this. */
+function flashNotice(text) {
+  var el = document.getElementById('indexnote');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(function () {
+    el.textContent = INDEXING_NOTE;
+    el.classList.toggle('show', Boolean(state.indexing));
+  }, NOTICE_MS);
+}
+
+// -- strip (5 tiles) --------------------------------------------------------------------------
+
+function renderStrip() {
+  var el = document.getElementById('strip');
+  el.textContent = '';
+  var strip = state.strip || { activeTimeMs: 0, wallClockMs: 0, sections: 0, decisions: 0, filesChanged: 0 };
+  var provisional = state.indexing;
+  function tile(key, num, label, clickable, extra, title) {
+    var div = document.createElement('div');
+    div.className = 'item' + (clickable ? '' : ' static') + (extra || '') + (provisional && clickable ? ' provisional' : '');
+    if (title) div.title = title;
+    var n = document.createElement('span'); n.className = 'num'; n.textContent = String(num);
+    var l = document.createElement('span'); l.className = 'lbl'; l.textContent = label;
+    div.appendChild(n); div.appendChild(l);
+    if (clickable) div.addEventListener('click', function () { toggleLens(key); });
+    return div;
+  }
+  var timeTitle = 'Time between steps, each pause counted up to 10 minutes.'
+    + (strip.wallClockMs ? ' From first to last step: ' + fmtDuration(strip.wallClockMs) + '.' : '');
+  el.appendChild(tile('time', fmtDuration(strip.activeTimeMs), 'Active time', false, '', timeTitle));
+  el.appendChild(tile('sections', strip.sections, 'Sections'));
+  var decisionsTile = tile('decisions', strip.decisions, 'Decisions', true);
+  if (state.lens === 'decisions') decisionsTile.classList.add('on');
+  el.appendChild(decisionsTile);
+  var filesTile = tile('files', strip.filesChanged, 'Files changed', true);
+  if (state.lens === 'files') filesTile.classList.add('on');
+  el.appendChild(filesTile);
+  var notesTile = tile('notes', state.notes.length, 'Notes', true);
+  if (state.lens === 'notes') notesTile.classList.add('on');
+  el.appendChild(notesTile);
+  var decisionsBtn = document.getElementById('decisions');
+  decisionsBtn.classList.toggle('on', state.lens === 'decisions');
+}
+
+// -- notes: lookup, lens, jump between notes, "Send all" bar --------------------------------
+
+/** stepId -> its note (at most one note per step), rebuilt whenever state.notes changes. */
+/* The note of each step that its box edits: the first one. Two windows can each keep a note
+   on one step; the others are shown under the first and take its place as it is deleted. */
+function notesByStep() {
+  var map = Object.create(null);
+  state.notes.forEach(function (n) { if (!map[n.stepId]) map[n.stepId] = n; });
+  return map;
+}
+
+function notesOfStep(stepId) {
+  return state.notes.filter(function (n) { return n.stepId === stepId; });
+}
+
+function stepIsOnPath(stepId) {
+  for (var i = 0; i < state.sections.length; i++) if (sectionStepIds(state.sections[i]).indexOf(stepId) !== -1) return true;
+  return false;
+}
+
+function sectionHasNote(sec) {
+  if (!state.notes.length) return false;
+  var ids = sectionStepIds(sec);
+  return state.notes.some(function (n) { return ids.indexOf(n.stepId) !== -1; });
+}
+
+/** A stable order for the header's Notes jump: by creation time, same as list() already returns. */
+function sortedNotes() { return state.notes.slice().sort(function (a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); }); }
+
+function renderNotesJumpLabel() {
+  var btn = document.getElementById('notesJump');
+  btn.textContent = 'Notes ' + state.notes.length;
+  updateAllNotesBar();
+}
+
+function updateAllNotesBar() {
+  var bar = document.getElementById('allNotesBar');
+  var n = document.getElementById('allNotesN');
+  if (state.notes.length > 1) {
+    bar.classList.add('show');
+    n.textContent = state.notes.length + ' notes kept';
+  } else {
+    bar.classList.remove('show');
+  }
+}
+
+function jumpToNote(delta) {
+  var ns = sortedNotes();
+  if (!ns.length) return;
+  state.curNote = ((state.curNote + delta) % ns.length + ns.length) % ns.length;
+  scrollToStepId(ns[state.curNote].stepId);
+}
+
+function toggleLens(key) {
+  // The anchor is an index into the sections the current view shows, so it means another
+  // section, or none, in the next view. Keep the place instead: the section that was the
+  // anchor, or the nearest one before it that the new view still shows.
+  var before = visibleSections();
+  var cur = before.length ? before[Math.min(anchorIndex, before.length - 1)] : null;
+  state.lens = state.lens === key ? 'all' : key;
+  var place = cur ? state.sections.indexOf(cur) : -1;
+  var position = new Map();
+  state.sections.forEach(function (sec, i) { position.set(sec, i); });
+  var after = visibleSections();
+  var idx = 0;
+  for (var i = 0; i < after.length; i++) {
+    if (position.get(after[i]) <= place) idx = i; else break;
+  }
+  anchorIndex = idx;
+  renderAll();
+  renderStrip();
+}
+
+// -- sections: rail + reader, rendered lazily ------------------------------------------------
+
+function isDecisionSection(sec) { return sec.kind === 'you' || sec.kind === 'question' || sec.kind === 'approve'; }
+
+function visibleSections() {
+  if (state.lens === 'decisions') return state.sections.filter(isDecisionSection);
+  if (state.lens === 'notes') return state.sections.filter(sectionHasNote);
+  return state.sections;
+}
+
+function sectionLabel(sec) {
+  if (sec.kind === 'lead') return 'Session start';
+  if (sec.kind === 'you') return 'You';
+  if (sec.kind === 'question') return 'Question and answer';
+  if (sec.kind === 'approve') return 'Plan';
+  return 'Claude';
+}
+
+function sectionKey(sec, i) { return sec.openerId != null ? sec.openerId : ('lead-' + i); }
+
+function renderAll() {
+  if (state.lens === 'files') { renderFilesView(); renderRailForFiles(); updateEdgeBars(); return; }
+  renderRail();
+  renderReader();
+  updateEdgeBars();
+  queueVisibleBodies();
+}
+
+function renderRail() {
+  var rail = document.getElementById('rail');
+  rail.textContent = '';
+  var top = document.createElement('div');
+  top.className = 'rail-top';
+  var btn = document.createElement('button');
+  btn.textContent = 'Jump to the start';
+  btn.addEventListener('click', function () { scrollToSectionIndex(0); });
+  top.appendChild(btn);
+  rail.appendChild(top);
+  var secs = visibleSections();
+  secs.forEach(function (sec, i) {
+    var entry = document.createElement('div');
+    entry.className = 'sec-entry k-' + sec.kind;
+    entry.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    // what an entry of the outline is, for whoever hovers it
+    entry.title = sec.kind === 'you' ? 'A message of yours; the story continues from here'
+      : sec.kind === 'question' ? 'Your answer to a question; the story continues from here'
+      : sec.kind === 'approve' ? 'A plan you approved; the story continues from here'
+      : 'What happened before your first message';
+    if (sectionHasHit(sec)) entry.classList.add('has-hit');
+    var dot = document.createElement('span'); dot.className = 'dot';
+    var col = document.createElement('div'); col.className = 'body-col';
+    var txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = sec.heading || sectionLabel(sec);
+    var t = document.createElement('div'); t.className = 't'; t.textContent = fmtClock(sec.at);
+    col.appendChild(txt); col.appendChild(t);
+    entry.appendChild(dot); entry.appendChild(col);
+    if (sectionHasNote(sec)) {
+      var mark = document.createElement('span'); mark.className = 'note-mark'; mark.textContent = '✎'; mark.title = 'This section carries a note';
+      entry.appendChild(mark);
+    }
+    entry.addEventListener('click', function () { scrollToSectionIndex(i); closeDrawer(); });
+    rail.appendChild(entry);
+  });
+}
+
+function sectionHasHit(sec) {
+  if (!state.hits.length) return false;
+  var ids = sectionStepIds(sec);
+  return state.hits.some(function (h) { return ids.indexOf(h) !== -1; });
+}
+
+function sectionStepIds(sec) {
+  var ids = [sec.openerId].filter(Boolean);
+  (sec.body || []).forEach(function (row) {
+    if (row.stepId) ids.push(row.stepId);
+    if (row.items) ids = ids.concat(row.items);
+  });
+  return ids;
+}
+
+/* The reader draws every visible section's heading always (cheap), but only builds a section's
+   row DOM when it is within RENDER_WINDOW sections of the current anchor; farther sections are
+   placeholders with a fixed estimated height, filled in once scrolling brings them close. This
+   keeps the DOM bounded on a large session while the scroll range (and thus the scrollbar and
+   jump targets) stays stable. */
+var anchorIndex = 0;
+var renderedLo = 0;   // the sections drawn by the last renderReader: [renderedLo, renderedHi)
+var renderedHi = 0;
+
+/** Notes whose step is not found on any current section: a retry or an edited message moved the
+    active path, and the step the note was filed against is gone from it. The note itself is
+    never deleted by this (notes.cjs only prunes on a dead transcript), so it needs somewhere to
+    show in the notes lens even with no row to attach to. */
+function orphanNotes() {
+  var onPath = Object.create(null);
+  state.sections.forEach(function (sec) { sectionStepIds(sec).forEach(function (id) { onPath[id] = true; }); });
+  return state.notes.filter(function (n) { return !onPath[n.stepId]; });
+}
+
+function buildOrphanNotes(reader) {
+  var done = Object.create(null);
+  orphanNotes().forEach(function (n) {
+    if (done[n.stepId]) return;   // the notes of one step share a row, as on the path
+    done[n.stepId] = true;
+    // a row of its own with the controls every note has, so it can be changed and deleted,
+    // under the id a row of that step would have, so a jump to the note finds it
+    var row = document.createElement('div');
+    row.className = 'row k-orphan';
+    row.id = 'step-' + n.stepId;
+    addNoteUi(row, n.stepId);
+    reader.appendChild(row);
+  });
+}
+
+/* The entries of a section's body that the view in use draws. Decisions reduces a section to
+   what you said and decided: its opening message or answer (the heading row), the questions
+   and the plans; texts and Work lines are left out. Every other view draws them all. */
+function drawnBody(sec) {
+  var body = sec.body || [];
+  if (state.lens !== 'decisions') return body;
+  return body.filter(function (row) { return row.kind === 'question' || row.kind === 'plan'; });
+}
+
+/* Rows a section draws: its heading and one per entry of its body that is drawn. */
+function rowsOf(sec) { return 1 + drawnBody(sec).length; }
+
+/* What a section that is not drawn is taken to measure, for the spacers. */
+function estimatedHeight(sec) { return 70 + 44 * drawnBody(sec).length; }
+
+/* The sections to draw around the anchor: the window grows on both sides in turn until
+   ROW_BUDGET rows are in, never with fewer than MIN_SIDE sections on a side (while there
+   are any) and never with more than RENDER_WINDOW. */
+function windowAround(secs, anchor) {
+  var lo = anchor;
+  var hi = anchor + 1;
+  var rows = rowsOf(secs[anchor]);
+  for (;;) {
+    var grew = false;
+    if (lo > 0 && anchor - lo < RENDER_WINDOW && (anchor - lo < MIN_SIDE || rows < ROW_BUDGET)) { lo -= 1; rows += rowsOf(secs[lo]); grew = true; }
+    if (hi < secs.length && hi - 1 - anchor < RENDER_WINDOW && (hi - 1 - anchor < MIN_SIDE || rows < ROW_BUDGET)) { rows += rowsOf(secs[hi]); hi += 1; grew = true; }
+    if (!grew) break;
+  }
+  return { lo: lo, hi: hi };
+}
+
+function renderReader() {
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var secs = visibleSections();
+  if (!secs.length) {
+    // only notes off the path: their rows are the whole view, and one of them may carry the mark
+    if (state.lens === 'notes' && orphanNotes().length) { buildOrphanNotes(reader); markCurrentHit(); return; }
+    var empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = state.lens === 'notes' ? 'No sections carry a note yet.'
+      : state.lens === 'decisions' ? 'No messages, answers or plans in this session.'
+      : state.indexing ? 'indexing still running…' : 'no steps yet';
+    reader.appendChild(empty);
+    return;
+  }
+  if (state.lens === 'notes') buildOrphanNotes(reader);
+  // Two spacers carry the weight of everything outside the window (one div of estimated
+  // height each, never one per hidden section), so what the page holds for a session of
+  // any length is the window (about ROW_BUDGET rows) and these two spacers.
+  // the list may have shrunk under the anchor (a reset, a note deleted in the Notes view)
+  anchorIndex = Math.max(0, Math.min(anchorIndex, secs.length - 1));
+  var win = windowAround(secs, anchorIndex);
+  var lo = win.lo;
+  var hi = win.hi;
+  renderedLo = lo;
+  renderedHi = hi;
+  var heightBefore = 0;
+  var heightAfter = 0;
+  for (var b = 0; b < lo; b++) heightBefore += estimatedHeight(secs[b]);
+  for (var a = hi; a < secs.length; a++) heightAfter += estimatedHeight(secs[a]);
+  if (lo > 0) reader.appendChild(buildSpacer('before', heightBefore));
+  for (var i = lo; i < hi; i++) reader.appendChild(buildSectionNode(secs[i], i, secs));
+  if (hi < secs.length) reader.appendChild(buildSpacer('after', heightAfter));
+  insertNewSinceMarker(reader, secs);
+  markCurrentHit();
+}
+
+function buildSpacer(which, heightPx) {
+  var div = document.createElement('div');
+  div.className = 'sec-stub';
+  div.setAttribute('data-spacer', which);
+  div.style.height = Math.max(20, heightPx) + 'px';
+  return div;
+}
+
+/* The first row of the story that the reader's viewport shows, with where it sits; null when
+   the viewport shows no row at all (it stands inside a spacer). */
+function topRowInView(reader) {
+  var box = reader.getBoundingClientRect();
+  var rows = reader.querySelectorAll('[data-step]');
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i].getBoundingClientRect();
+    if (r.bottom > box.top) return r.top < box.bottom ? { id: rows[i].getAttribute('data-step'), top: r.top, el: rows[i] } : null;
+  }
+  return null;
+}
+
+/* Moves the window of drawn sections as the reader comes within a viewport of a spacer; run on
+   every scroll, it redraws only when the window has to move.
+   Scrolling toward a spacer draws the window anew around the section at the top of the
+   viewport and holds that row exactly where it was: the sections that come into the window
+   have their real heights, not the estimate the spacer stood for, so a row can be held and
+   an offset cannot.
+   A jump (the scrollbar, a key) can put the viewport inside a spacer, past everything that is
+   drawn. The spacer stands for the sections it replaced, in order and each at its estimated
+   height, so the place in it names one of them; the window is drawn around that section, with
+   it at the top. */
+function expandNearbyStubs() {
+  var reader = document.getElementById('reader');
+  var before = reader.querySelector('[data-spacer="before"]');
+  var after = reader.querySelector('[data-spacer="after"]');
+  if (!before && !after) return;
+  var box = reader.getBoundingClientRect();
+  var margin = reader.clientHeight;
+  var nearBefore = Boolean(before) && before.getBoundingClientRect().bottom > box.top - margin;
+  var nearAfter = Boolean(after) && after.getBoundingClientRect().top < box.bottom + margin;
+  if (!nearBefore && !nearAfter) return;
+  var secs = visibleSections();
+  var ref = topRowInView(reader);
+  if (!ref) {
+    var inBefore = Boolean(before) && before.getBoundingClientRect().bottom > box.top;
+    var spacer = inBefore ? before : after;
+    if (!spacer) return;
+    var from = inBefore ? 0 : renderedHi;
+    var to = inBefore ? renderedLo : secs.length;
+    var offset = Math.max(0, box.top - spacer.getBoundingClientRect().top);
+    var at = from;
+    for (var k = from; k < to; k++) {
+      at = k;
+      var h = estimatedHeight(secs[k]);
+      if (offset < h) break;
+      offset -= h;
+    }
+    anchorIndex = Math.max(0, Math.min(secs.length - 1, at));
+    renderReader();
+    var landed = reader.querySelector('[data-sec-index="' + anchorIndex + '"]');
+    if (landed) reader.scrollTop += landed.getBoundingClientRect().top - box.top;
+    queueVisibleBodies();
+    return;
+  }
+  var sectionNode = ref.el.closest('.section');
+  var inView = sectionNode ? Number(sectionNode.getAttribute('data-sec-index')) : anchorIndex;
+  if (inView === anchorIndex) return;   // the window is already drawn around what is in view
+  anchorIndex = inView;
+  renderReader();
+  var held = document.getElementById('step-' + ref.id);
+  if (held) reader.scrollTop += held.getBoundingClientRect().top - ref.top;
+  queueVisibleBodies();
+}
+
+function buildSectionNode(sec, i, secs) {
+  var wrap = document.createElement('div');
+  wrap.className = 'section';
+  wrap.setAttribute('data-sec-index', String(i));
+  if (sec.kind !== 'lead') {
+    var head = document.createElement('div');
+    head.className = 'sec-head k-' + sec.kind;
+    head.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    head.id = 'sec-' + sectionKey(sec, i);
+    var lbl = document.createElement('span'); lbl.className = 'lbl';
+    lbl.textContent = sectionLabel(sec) + ' · ' + fmtClock(sec.at);
+    head.appendChild(lbl);
+    wrap.appendChild(head);
+    if (sec.openerId) wrap.appendChild(buildOpenerRow(sec, i));
+  } else {
+    var leadHead = document.createElement('div');
+    leadHead.id = 'sec-' + sectionKey(sec, i);
+    leadHead.setAttribute('data-anchor', 'sec-' + sectionKey(sec, i));
+    wrap.appendChild(leadHead);
+  }
+  drawnBody(sec).forEach(function (row) { wrap.appendChild(buildBodyRow(row, sec)); });
+  // the facts line belongs to the work, which Decisions leaves out
+  var facts = state.lens === 'decisions' ? '' : sectionFacts(sec);
+  if (facts) { var fl = document.createElement('div'); fl.className = 'facts'; fl.textContent = facts; wrap.appendChild(fl); }
+  return wrap;
+}
+
+/** The line that closes a section that did work: its active time (from a minute up), its tool
+    calls and the files it changed. Empty for a section without tool calls. */
+function sectionFacts(sec) {
+  var calls = Number(sec.toolCalls) || 0, files = Number(sec.filesChanged) || 0;
+  if (!calls) return '';
+  var parts = [];
+  if ((Number(sec.activeTimeMs) || 0) >= 30000) parts.push(fmtDuration(sec.activeTimeMs));
+  parts.push(calls + (calls === 1 ? ' tool call' : ' tool calls'));
+  if (files) parts.push(files + (files === 1 ? ' file changed' : ' files changed'));
+  return parts.join(' · ');
+}
+
+function stepKindClass(k) {
+  if (k === 'you') return 'k-you';
+  if (k === 'qa' || k === 'question') return 'k-qa';
+  if (k === 'plan' || k === 'approve') return 'k-plan';
+  return 'k-claude';
+}
+
+function chipTextFor(stepKind) {
+  if (stepKind === 'you') return 'You';
+  if (stepKind === 'question') return 'Question and answer';
+  if (stepKind === 'plan') return 'Plan';
+  if (stepKind === 'error') return 'Error';
+  return 'Claude';
+}
+
+// -- notes on a step: the "Add note" control, the note box, the kept-note display ------------
+
+var QUICK_REPLIES = ['Why this?', 'This is wrong:', 'Go back to this'];
+
+/** Appended to every step row: a quiet "Add note" control, plus the open note box or the kept
+    note's display when one applies. stepId is the step this note is filed against; the
+    row's own element gets the "noted" class so the control stays visible without hover. */
+function addNoteUi(rowDiv, stepId) {
+  var note = notesByStep()[stepId];
+  rowDiv.classList.toggle('noted', Boolean(note));
+  rowDiv.classList.toggle('note-open', state.noteBoxFor === stepId);
+  var btn = document.createElement('button');
+  btn.className = 'add-note';
+  btn.type = 'button';
+  btn.title = 'Note on this step';
+  btn.textContent = note ? '✎ Note' : '+ Note';
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    state.noteBoxFor = state.noteBoxFor === stepId ? null : stepId;
+    state.noteDraft = null;
+    state.noteBoxOpened += 1;   // a box opened now is another one than any box before it
+    renderReader();
+    queueVisibleBodies();
+  });
+  rowDiv.appendChild(btn);
+  if (state.noteBoxFor === stepId) {
+    rowDiv.appendChild(buildNoteBox(stepId, note));
+  } else if (note) {
+    rowDiv.appendChild(buildSavedNote(stepId, note));
+  }
+  notesOfStep(stepId).slice(1).forEach(function (n) { rowDiv.appendChild(buildSavedNote(stepId, n)); });
+}
+
+function buildSavedNote(stepId, note) {
+  var div = document.createElement('div');
+  div.className = 'saved-note';
+  div.textContent = 'Note: ' + note.text;
+  if (!stepIsOnPath(stepId)) {
+    var off = document.createElement('span');
+    off.className = 'off-path';
+    off.textContent = 'step not on the current path';
+    div.appendChild(off);
+  }
+  var sent = (note.sent || [])[note.sent ? note.sent.length - 1 : -1];
+  if (sent) {
+    var sentSpan = document.createElement('span');
+    sentSpan.className = 'sent-mark';
+    sentSpan.textContent = 'Sent ' + fmtClock(new Date(Number(sent.at) || 0).toISOString());
+    div.appendChild(sentSpan);
+  }
+  return div;
+}
+
+/* The send of this step's note ended without a redraw (the note was not kept). The Send button
+   to give back is the one on the page now: a push since the click has redrawn the reader, and
+   the box built then found the send still on its way. */
+function noteSendOver(stepId) {
+  delete state.noteSending[stepId];
+  if (state.noteBoxFor !== stepId) return;
+  var btn = document.querySelector('.notebox .row2 button.primary');
+  if (btn) btn.disabled = false;
+}
+
+function buildNoteBox(stepId, existing) {
+  var box = document.createElement('div');
+  box.className = 'notebox';
+  box.addEventListener('click', function (ev) { ev.stopPropagation(); });
+
+  var quick = document.createElement('div');
+  quick.className = 'quick';
+  var ta = document.createElement('textarea');
+  ta.placeholder = 'What is wrong or worth keeping at this step?';
+  // The box is rebuilt on every redraw (each push while the session runs), so what is being
+  // typed lives in state.noteDraft, with the caret, and is put back here.
+  var draft = state.noteDraft && state.noteDraft.stepId === stepId ? state.noteDraft : null;
+  ta.value = draft ? draft.text : (existing ? existing.text : '');
+  function keepDraft() { state.noteDraft = { stepId: stepId, text: ta.value, start: ta.selectionStart, end: ta.selectionEnd }; }
+  ['input', 'keyup', 'mouseup'].forEach(function (name) { ta.addEventListener(name, keepDraft); });
+  QUICK_REPLIES.forEach(function (phrase) {
+    var qb = document.createElement('button');
+    qb.type = 'button';
+    qb.textContent = phrase;
+    qb.addEventListener('click', function () {
+      ta.value = ta.value ? ta.value.replace(/\s*$/, ' ') + phrase : phrase;
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = ta.value.length;
+      keepDraft();
+    });
+    quick.appendChild(qb);
+  });
+
+  var row2 = document.createElement('div');
+  row2.className = 'row2';
+  var keep = document.createElement('button'); keep.type = 'button'; keep.textContent = 'Keep note';
+  var send = document.createElement('button'); send.type = 'button'; send.className = 'primary';
+  send.textContent = 'Send to session';
+  // what the click does, said before it: in VS Code the note fills the session's chat box
+  // (Claude Code 2.1.322 or newer) and is sent from there; a browser can only copy it
+  send.title = vsapi ? 'Puts the note into the session\'s chat box, for you to send, and on the clipboard.'
+    : 'Copies the note for you to paste into the session.';
+  var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
+  branch.disabled = true; branch.title = 'Arrives with a later release';
+
+  /* The box is rebuilt by every redraw, so "this box" is the box as it was opened, not this
+     element. When an operation it started is over, it closes that box. A box opened since (on
+     another step, or on this one again) is not its to close, nor is what is typed there. */
+  var opened = state.noteBoxOpened;
+  function afterSave() {
+    if (state.noteBoxFor === stepId && state.noteBoxOpened === opened) { state.noteBoxFor = null; state.noteDraft = null; }
+    renderReader();
+    queueVisibleBodies();
+  }
+
+  /* Saves the box's current text (new or edited), waits for that write, then returns the saved
+     note's id: noteSend needs a real noteId, so a just-typed note is kept first rather than
+     sent by its (not yet existing) text alone. */
+  function saveThenGetNoteId(text) {
+    var req = existing ? call({ type: 'noteEdit', noteId: existing.id, text: text }) : call({ type: 'noteAdd', stepId: stepId, text: text });
+    return req.then(function (reply) {
+      if (reply && reply.ok && reply.note) { applyNoteLocally(reply.note); return reply.note.id; }
+      // not kept: the box stays open with what was typed, and the reason is on screen
+      flashNotice('The note was not kept: ' + ((reply && reply.message) || 'no answer from the board'));
+      return null;
+    });
+  }
+
+  keep.addEventListener('click', function () {
+    var text = ta.value.trim();
+    if (!text) return;
+    saveThenGetNoteId(text).then(function (noteId) { if (noteId) afterSave(); });
+  });
+  // A send that is on its way is known to the state, not to this button: keeping the note
+  // redraws the reader, and the button built then must not send the note a second time.
+  send.disabled = Boolean(state.noteSending[stepId]);
+  send.addEventListener('click', function () {
+    var text = ta.value.trim();
+    if (!text || state.noteSending[stepId]) return;
+    state.noteSending[stepId] = true;
+    send.disabled = true;
+    saveThenGetNoteId(text).then(function (noteId) {
+      if (!noteId) { noteSendOver(stepId); return; }   // nothing is sent without a kept note
+      return call({ type: 'noteSend', noteId: noteId }).then(function (reply) {
+        delete state.noteSending[stepId];
+        if (reply && reply.message) flashNotice(reply.message);
+        if (reply && !reply.ok && reply.message === 'On the clipboard. Paste it into the session.' && reply.text) copyToClipboard(reply.text);
+        afterSave();
+      });
+    });
+  });
+  row2.appendChild(keep);
+  row2.appendChild(send);
+  row2.appendChild(branch);
+  if (existing) {
+    var del = document.createElement('button');
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.addEventListener('click', function () {
+      call({ type: 'noteDelete', noteId: existing.id }).then(function (reply) {
+        if (reply && reply.ok) { removeNoteLocally(existing.id); afterSave(); return; }
+        flashNotice('The note was not deleted: ' + ((reply && reply.message) || 'no answer from the board'));
+      });
+    });
+    row2.appendChild(del);
+  }
+
+  box.appendChild(quick);
+  box.appendChild(ta);
+  box.appendChild(row2);
+  setTimeout(function () {
+    ta.focus();
+    if (draft && typeof draft.start === 'number') { ta.selectionStart = draft.start; ta.selectionEnd = draft.end; }
+  }, 0);
+  return box;
+}
+
+/* Applies a note change to state.notes immediately, ahead of the notesChanged push that is on
+   its way from the same action: the box the user just used closes and shows the right text at
+   once rather than waiting a round trip, and the later push (same content) is a no-op merge. */
+function applyNoteLocally(note) {
+  var idx = state.notes.findIndex(function (n) { return n.id === note.id; });
+  if (idx === -1) state.notes.push(note); else state.notes[idx] = note;
+  renderStrip();
+  renderNotesJumpLabel();
+}
+
+function removeNoteLocally(noteId) {
+  state.notes = state.notes.filter(function (n) { return n.id !== noteId; });
+  renderStrip();
+  renderNotesJumpLabel();
+}
+
+/* The opener step's own row: the one that gives the section its heading (a you message or an
+   answered question or approved plan). It is not duplicated anywhere else in the section: for a
+   you step, the heading card itself holds the full message (folded past about six lines, with
+   Show all), rather than a short restated line followed by a second block repeating it. */
+function buildOpenerRow(sec, i) {
+  var row = document.createElement('div');
+  row.className = 'row ' + (sec.kind === 'you' ? 'k-you' : 'k-qa');
+  row.setAttribute('data-step', sec.openerId);
+  row.id = 'step-' + sec.openerId;
+  if (sec.kind === 'you') {
+    var youDiv = buildYouBody(sec.openerId);
+    row.appendChild(youDiv);
+    foldYouBodyIfLong(youDiv, sec.openerId);
+  } else {
+    var restate = document.createElement('div');
+    restate.className = 'restate';
+    restate.textContent = sec.heading || '';
+    row.appendChild(restate);
+    if (sec.kind === 'question') row.appendChild(buildQuestionBody(sec.openerId));
+  }
+  addNoteUi(row, sec.openerId);
+  return row;
+}
+
+var YOU_MSG_FOLD_LINES = 6;
+
+function buildYouBody(stepId) {
+  var div = document.createElement('div');
+  div.className = 'you-msg restate';
+  div.setAttribute('data-step-body', stepId);
+  fillTextBody(div, stepId, false);
+  return div;
+}
+
+/* Folds a you message past YOU_MSG_FOLD_LINES lines behind a Show all button, same pattern as a
+   subagent report. Runs after the text is in place (fillTextBody already ran) and after the div
+   is attached to its row, so it measures the real line count rather than guessing from character
+   length, and can insert its button as a sibling. Idempotent: a stale button from an earlier
+   call (the re-render after a body batch lands) is removed first rather than duplicated. */
+function foldYouBodyIfLong(div, stepId) {
+  var old = div.nextSibling;
+  if (old && old.classList && old.classList.contains('showall')) old.parentNode.removeChild(old);
+  var text = (state.bodies[stepId] && state.bodies[stepId].text) || '';
+  var lineCount = text.split('\n').length;
+  div.classList.remove('folded-you', 'open');
+  if (lineCount <= YOU_MSG_FOLD_LINES) return;
+  div.classList.add('folded-you');
+  var btn = document.createElement('button');
+  btn.className = 'showall';
+  btn.textContent = 'Show all';
+  btn.addEventListener('click', function () {
+    var open = div.classList.toggle('open');
+    state.openWork['you-' + stepId] = open;
+    btn.textContent = open ? 'Show less' : 'Show all';
+  });
+  if (state.openWork['you-' + stepId]) { div.classList.add('open'); btn.textContent = 'Show less'; }
+  div.parentNode.insertBefore(btn, div.nextSibling);
+}
+
+function buildBodyRow(row, sec) {
+  if (row.kind === 'work') return buildWorkRow(row, sec);
+  if (row.kind === 'question') return buildQuestionRow(row);
+  if (row.kind === 'plan') return buildPlanRow(row);
+  if (row.kind === 'interrupted') return buildInterruptedRow(row);
+  return buildClaudeRow(row);
+}
+
+/** A quiet one-line marker for a turn the owner cancelled: never one of their messages, never a
+    full Claude row, just a note at the point in the story where it happened. */
+function buildInterruptedRow(row) {
+  var div = document.createElement('div');
+  div.className = 'row k-interrupted';
+  div.setAttribute('data-step', row.stepId);
+  div.id = 'step-' + row.stepId;
+  var line = document.createElement('div'); line.className = 'interrupted-line'; line.textContent = 'Interrupted';
+  div.appendChild(line);
+  return div;
+}
+
+function buildClaudeRow(row) {
+  var div = document.createElement('div');
+  var stepId = row.stepId;
+  var compact = state.compactById ? state.compactById[stepId] : null;
+  var kind = compact ? compact.kind : row.kind;
+  div.className = 'row ' + stepKindClass(kind) + (kind === 'error' ? ' k-error' : '');
+  div.setAttribute('data-step', stepId);
+  div.id = 'step-' + stepId;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = compact ? fmtClockSec(compact.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = chipTextFor(kind);
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body md'; body.setAttribute('data-step-body', stepId);
+  fillMdBody(body, stepId);
+  div.appendChild(body);
+  addNoteUi(div, stepId);
+  return div;
+}
+
+function buildPlanRow(row) {
+  var div = document.createElement('div');
+  div.className = 'row k-plan';
+  div.setAttribute('data-step', row.stepId);
+  div.id = 'step-' + row.stepId;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var compact = state.compactById ? state.compactById[row.stepId] : null;
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = compact ? fmtClockSec(compact.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'Plan';
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body';
+  var mdDiv = document.createElement('div'); mdDiv.className = 'md'; mdDiv.setAttribute('data-step-body', row.stepId);
+  fillMdBody(mdDiv, row.stepId);
+  body.appendChild(mdDiv);
+  if (compact && compact.approved) {
+    var approved = document.createElement('div'); approved.className = 'approved-line'; approved.textContent = 'You approved this plan.';
+    body.appendChild(approved);
+  }
+  div.appendChild(body);
+  addNoteUi(div, row.stepId);
+  return div;
+}
+
+function buildQuestionRow(row) {
+  var div = document.createElement('div');
+  div.className = 'row k-qa';
+  div.setAttribute('data-step', row.stepId);
+  div.id = 'step-' + row.stepId;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var compact = state.compactById ? state.compactById[row.stepId] : null;
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = compact ? fmtClockSec(compact.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'Question and answer';
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body qcard'; body.setAttribute('data-step-body', row.stepId);
+  fillQuestionBody(body, row.stepId);
+  div.appendChild(body);
+  addNoteUi(div, row.stepId);
+  return div;
+}
+
+function buildQuestionBody(stepId) {
+  var div = document.createElement('div');
+  div.className = 'qcard';
+  div.setAttribute('data-step-body', stepId);
+  fillQuestionBody(div, stepId);
+  return div;
+}
+
+function buildWorkRow(row, sec) {
+  var div = document.createElement('div');
+  div.className = 'row k-work';
+  var key = 'g-' + row.items[0];
+  div.setAttribute('data-work-key', key);
+  div.id = key;
+  var meta = document.createElement('div'); meta.className = 'meta';
+  var first = state.compactById ? state.compactById[row.items[0]] : null;
+  var time = document.createElement('span'); time.className = 'time'; time.textContent = first ? fmtClockSec(first.at) : '';
+  var chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'Work';
+  meta.appendChild(time); meta.appendChild(chip);
+  div.appendChild(meta);
+  var body = document.createElement('div'); body.className = 'body';
+  div.appendChild(body);
+  fillWorkBody(body, row.items, key);
+  addNoteUi(div, row.items[0]);
+  return div;
+}
+
+// -- filling bodies: preview immediately, real text once it arrives -------------------------
+
+function fillTextBody(el, stepId, asMarkdown) {
+  var b = state.bodies[stepId];
+  if (b && typeof b.text === 'string') {
+    if (asMarkdown) { md(el, b.text); if (state.query) hl(el, state.query); }
+    else { putText(el, b.text, state.query); }
+    if (b.truncated) appendTruncatedNotice(el, stepId);
+  } else {
+    var compact = state.compactById ? state.compactById[stepId] : null;
+    putText(el, (compact && compact.preview) || '', state.query);
+  }
+}
+
+function fillMdBody(el, stepId) { fillTextBody(el, stepId, true); }
+
+function appendTruncatedNotice(el, stepId) {
+  var btn = document.createElement('button');
+  btn.className = 'showall';
+  btn.textContent = 'Open full text in an editor tab';
+  btn.addEventListener('click', function () { openFullText(stepId); });
+  el.appendChild(document.createElement('br'));
+  el.appendChild(btn);
+}
+
+function fillQuestionBody(el, stepId) {
+  var b = state.bodies[stepId];
+  if (!b || !b.questions) { return; }
+  el.textContent = '';
+  b.questions.forEach(function (q) {
+    if (q.header) { var head = document.createElement('div'); head.className = 'qhead'; head.textContent = q.header; el.appendChild(head); }
+    var qtext = document.createElement('div'); qtext.className = 'qtext';
+    var qmd = document.createElement('div');
+    md(qmd, q.question);
+    if (state.query) hl(qmd, state.query);
+    qtext.appendChild(qmd);
+    el.appendChild(qtext);
+    var pick = document.createElement('div'); pick.className = 'qpick'; pick.textContent = q.multiSelect ? 'Pick several' : 'Pick one';
+    el.appendChild(pick);
+    var opts = document.createElement('div'); opts.className = 'qoptions';
+    (q.options || []).forEach(function (o) {
+      var opt = document.createElement('div'); opt.className = 'qopt' + (o.chosen ? ' chosen' : '');
+      var mark = document.createElement('span'); mark.className = 'qmark'; mark.textContent = o.chosen ? '◉' : '○';
+      var col = document.createElement('div'); col.className = 'qopt-col';
+      var lrow = document.createElement('div'); lrow.className = 'qopt-lrow';
+      var label = document.createElement('span'); label.className = 'qopt-label';
+      putText(label, o.label, state.query);
+      lrow.appendChild(label);
+      if (o.chosen) { var tag = document.createElement('span'); tag.className = 'qopt-tag'; tag.textContent = 'your choice'; lrow.appendChild(tag); }
+      col.appendChild(lrow);
+      var desc = document.createElement('div'); desc.className = 'qopt-desc';
+      putText(desc, o.description, state.query);
+      col.appendChild(desc);
+      opt.appendChild(mark); opt.appendChild(col);
+      opts.appendChild(opt);
+    });
+    el.appendChild(opts);
+    if (q.other) {
+      var answerline = document.createElement('div'); answerline.className = 'answerline';
+      var lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = 'Your own answer';
+      var av = document.createElement('div'); av.className = 'av';
+      putText(av, q.other, state.query);
+      answerline.appendChild(lbl); answerline.appendChild(av);
+      el.appendChild(answerline);
+    }
+    if (!q.answered) { var notyet = document.createElement('div'); notyet.className = 'qnotyet'; notyet.textContent = 'Not answered yet.'; el.appendChild(notyet); }
+  });
+}
+
+function fileBaseName(p) { return String(p || '').split(/[\\/]/).pop(); }
+
+/* A Work line says in words what happened: "Edited 1 file, ran 2 commands", not a bare tool-call
+   tally. A single command (Bash/PowerShell) carries its own description, since a bare
+   "ran a command" says nothing a reader can act on. An unnamed tool kind is named by its
+   own tool name rather than folded into a silent "N other steps" count, so "Used ToolSearch"
+   says what happened even for a tool this summary has no dedicated phrasing for. Bodies not yet
+   loaded fall back to the compact preview, so the line is never empty while a batch is still in
+   flight. A run that holds only empty reasoning (no tool, no subagent, nothing else) reads as
+   "Thought for 12 s", or "Thought" when no duration was stored, rather than a bare step count. */
+function summarizeWork(items) {
+  var edited = [], created = [], searches = 0, reads = 0, bash = [], subs = [], skills = [], namedOther = [], reasoningMs = 0, reasoningCount = 0;
+  var unknown = 0, unknownKinds = [], failedEdits = 0;
+  items.forEach(function (id) {
+    var c = state.compactById && state.compactById[id];
+    if (!c) return;
+    if (c.kind === 'subagent') { subs.push((state.bodies[id] && state.bodies[id].description) || c.preview || ''); return; }
+    if (c.kind === 'reasoning') { reasoningCount++; reasoningMs += Number(c.durationMs) || 0; return; }
+    if (c.kind === 'other') { unknown++; if (c.blockType && unknownKinds.indexOf(c.blockType) === -1) unknownKinds.push(c.blockType); return; }
+    if (c.kind !== 'tool') return;
+    var title = c.title || 'tool';
+    var b = state.bodies[id];
+    if ((title === 'Edit' || title === 'Write') && c.failed) failedEdits++;
+    else if (title === 'Edit') { var ep = (b && b.path) || ''; if (ep && edited.indexOf(ep) === -1) edited.push(ep); }
+    else if (title === 'Write') { var wp = (b && b.path) || ''; if (wp && created.indexOf(wp) === -1) created.push(wp); }
+    else if (title === 'Grep' || title === 'Glob') searches++;
+    else if (title === 'Read') reads++;
+    else if (title === 'Bash' || title === 'PowerShell') {
+      var input = (b && b.input) || c.preview || '';
+      bash.push(String(input).split('\n')[0]);
+    } else if (title === 'Skill') skills.push(((b && b.input) || c.preview || '').split('\n')[0]);
+    else namedOther.push(title);
+  });
+  var parts = [];
+  if (created.length) parts.push('created ' + created.length + (created.length === 1 ? ' file' : ' files'));
+  if (edited.length) parts.push('edited ' + (edited.length === 1 ? (fileBaseName(edited[0]) || '1 file') : edited.length + ' files'));
+  if (failedEdits) parts.push(failedEdits === 1 ? 'an edit failed' : failedEdits + ' edits failed');
+  if (reads) parts.push('read ' + reads + (reads === 1 ? ' file' : ' files'));
+  if (searches) parts.push('ran ' + searches + (searches === 1 ? ' search' : ' searches'));
+  if (bash.length === 1) parts.push('ran a command' + (bash[0] ? ' (' + bash[0] + ')' : ''));
+  else if (bash.length > 1) parts.push('ran ' + bash.length + ' commands');
+  if (skills.length) parts.push('used ' + skills.slice(0, 2).join(', '));
+  if (subs.length) parts.push('sent out ' + subs.length + (subs.length === 1 ? ' subagent' : ' subagents') + (subs[0] ? ' (' + subs.slice(0, 2).join('; ') + ')' : ''));
+  if (namedOther.length) parts.push('used ' + namedOther.join(', '));
+  if (unknown) parts.push(unknown + (unknown === 1 ? ' block' : ' blocks') + ' of a kind this board does not know' + (unknownKinds.length ? ' (' + unknownKinds.join(', ') + ')' : ''));
+  if (!parts.length && reasoningCount) {
+    return reasoningMs > 0 ? 'Thought for ' + fmtShortDuration(reasoningMs) : 'Thought';
+  }
+  if (!parts.length) return items.length + (items.length === 1 ? ' step' : ' steps');
+  var s = parts.join(', ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function filesTouchedIn(items) {
+  var out = [];
+  items.forEach(function (id) {
+    var c = state.compactById && state.compactById[id];
+    var b = state.bodies[id];
+    // an edit that failed changed no file
+    if (c && c.kind === 'tool' && (c.title === 'Edit' || c.title === 'Write') && !c.failed && b && b.path) {
+      out.push({ kind: c.title === 'Write' ? 'new' : 'edit', path: b.path });
+    }
+  });
+  return out;
+}
+
+function fillWorkBody(body, items, key) {
+  body.textContent = '';
+  var sum = document.createElement('div'); sum.className = 'worksum'; sum.textContent = summarizeWork(items);
+  body.appendChild(sum);
+  var files = filesTouchedIn(items);
+  if (files.length) {
+    var filesDiv = document.createElement('div'); filesDiv.className = 'files';
+    var flbl = document.createElement('div'); flbl.className = 'flbl'; flbl.textContent = 'Files touched';
+    filesDiv.appendChild(flbl);
+    files.forEach(function (f) {
+      var row = document.createElement('div'); row.className = 'filerow';
+      var fkind = document.createElement('span'); fkind.className = 'fkind'; fkind.textContent = f.kind;
+      var name = f.path.split(/[\\/]/).pop();
+      row.appendChild(fkind);
+      row.appendChild(linkNode(name, 'path', f.path, false));
+      filesDiv.appendChild(row);
+    });
+    body.appendChild(filesDiv);
+  }
+  var subagentIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'subagent'; });
+  subagentIds.forEach(function (id) { body.appendChild(buildSubagentBlock(id, key)); });
+
+  var toolIds = items.filter(function (id) { var c = state.compactById && state.compactById[id]; return c && c.kind === 'tool'; });
+  if (toolIds.length) {
+    var detailBtn = document.createElement('button'); detailBtn.className = 'detailbtn';
+    detailBtn.textContent = 'Details: ' + toolIds.length + (toolIds.length === 1 ? ' call' : ' calls');
+    var list = document.createElement('div'); list.className = 'worklist' + (state.openWork[key] || state.showAllTools ? ' open' : '');
+    toolIds.forEach(function (id) { list.appendChild(buildWorkListItem(id)); });
+    detailBtn.addEventListener('click', function () {
+      state.openWork[key] = !list.classList.contains('open');
+      list.classList.toggle('open');
+    });
+    body.appendChild(detailBtn);
+    body.appendChild(list);
+  }
+  if (state.query) hl(body, state.query);
+}
+
+function buildWorkListItem(stepId) {
+  var item = document.createElement('div'); item.className = 'wl-item';
+  var c = state.compactById && state.compactById[stepId];
+  var wn = document.createElement('span'); wn.className = 'wn'; wn.textContent = (c && c.title) || 'tool';
+  var b = state.bodies[stepId];
+  var wb = document.createElement('span'); wb.className = 'wb';
+  wb.textContent = (b && b.input) || (c && c.preview) || '';
+  item.appendChild(wn); item.appendChild(wb);
+  var wrap = document.createElement('div');
+  wrap.appendChild(item);
+  if (b && b.result) {
+    var btn = document.createElement('button'); btn.className = 'detailbtn'; btn.textContent = 'result';
+    var pre = document.createElement('pre'); pre.className = 'fold'; pre.textContent = b.result; pre.style.display = 'none';
+    // a search hit that only the output holds: the output is open, or the hit could not be seen
+    if (state.query && String(b.result).toLowerCase().indexOf(state.query.toLowerCase()) !== -1) pre.style.display = '';
+    btn.addEventListener('click', function () { pre.style.display = pre.style.display === 'none' ? '' : 'none'; });
+    wrap.appendChild(btn);
+    wrap.appendChild(pre);
+  }
+  return wrap;
+}
+
+function buildSubagentBlock(stepId, workKey) {
+  var box = document.createElement('div'); box.className = 'report-box';
+  var c = state.compactById && state.compactById[stepId];
+  var b = state.bodies[stepId];
+  var item = document.createElement('div'); item.className = 'wl-item';
+  var wn = document.createElement('span'); wn.className = 'wn'; wn.textContent = (c && c.title) || 'agent';
+  var wb = document.createElement('span'); wb.className = 'wb';
+  putText(wb, (b && b.description) || (c && c.preview) || '', state.query);
+  item.appendChild(wn); item.appendChild(wb);
+  box.appendChild(item);
+  if (b && b.report && reportShown(stepId, workKey)) {
+    var reportBody = document.createElement('div'); reportBody.className = 'report-body md' + (state.openReports[stepId] ? ' open' : '');
+    md(reportBody, b.report);
+    if (state.query) hl(reportBody, state.query);
+    box.appendChild(reportBody);
+    var btn = document.createElement('button'); btn.className = 'showall';
+    btn.textContent = reportBody.classList.contains('open') ? 'Show less' : 'Show all';
+    btn.addEventListener('click', function () {
+      var open = reportBody.classList.toggle('open');
+      state.openReports[stepId] = open;
+      btn.textContent = open ? 'Show less' : 'Show all';
+    });
+    box.appendChild(btn);
+  }
+  return box;
+}
+
+// -- "new since you last looked" -------------------------------------------------------------
+
+function insertNewSinceMarker(reader, secs) {
+  if (!state.seenStepId) return;
+  var seenIndex = -1;
+  secs.forEach(function (sec, i) {
+    if (sectionStepIds(sec).indexOf(state.seenStepId) !== -1) seenIndex = i;
+  });
+  if (seenIndex === -1 || seenIndex >= secs.length - 1) return;
+  var target = document.getElementById('sec-' + sectionKey(secs[seenIndex + 1], seenIndex + 1));
+  if (!target) return;
+  var marker = document.createElement('div');
+  marker.className = 'new-marker';
+  marker.textContent = 'New since you last looked';
+  target.parentNode.insertBefore(marker, target);
+}
+
+// -- files-changed lens -------------------------------------------------------------------
+
+function renderRailForFiles() {
+  var rail = document.getElementById('rail');
+  rail.textContent = '';
+  var top = document.createElement('div'); top.className = 'rail-top';
+  var btn = document.createElement('button'); btn.textContent = 'Back to the full story';
+  btn.addEventListener('click', function () { state.lens = 'all'; renderAll(); renderStrip(); });
+  top.appendChild(btn);
+  rail.appendChild(top);
+}
+
+/* The files-changed lens needs the body (specifically its `path`) of every Edit/Write tool
+   step, which may not have loaded yet if that step's Work line was never scrolled into view
+   under the normal "all" lens. Rather than depend on that, this lens requests any bodies it is
+   still missing itself and re-renders once they land, the same batched way queueVisibleBodies
+   does for the reader. */
+function renderFilesView() {
+  var reader = document.getElementById('readerInner');
+  reader.textContent = '';
+  var view = document.createElement('div'); view.className = 'files-view';
+  var missing = [];
+  state.sections.forEach(function (sec, i) {
+    var files = [];
+    (sec.body || []).forEach(function (row) {
+      if (row.kind !== 'work') return;
+      row.items.forEach(function (id) {
+        var c = state.compactById && state.compactById[id];
+        if (c && c.kind === 'tool' && (c.title === 'Edit' || c.title === 'Write') && !state.bodies[id] && !state.bodiesPending[id]) missing.push(id);
+      });
+      files = files.concat(filesTouchedIn(row.items));
+    });
+    if (!files.length) return;
+    var fsec = document.createElement('div'); fsec.className = 'fsec';
+    var h = document.createElement('div'); h.className = 'fsec-h';
+    h.textContent = (sec.heading || sectionLabel(sec)) + ' · ' + fmtClock(sec.at);
+    fsec.appendChild(h);
+    files.forEach(function (f) {
+      var fp = document.createElement('button'); fp.className = 'fp'; fp.textContent = f.path;
+      fp.addEventListener('click', function () { dispatchLink('path', f.path); });
+      fsec.appendChild(fp);
+    });
+    view.appendChild(fsec);
+  });
+  if (!view.children.length) {
+    var empty = document.createElement('div'); empty.className = 'empty-state'; empty.textContent = 'no files changed yet';
+    view.appendChild(empty);
+  }
+  reader.appendChild(view);
+  if (missing.length) {
+    // redrawn only when something came back: a reply without bodies (a failed request, a
+    // transcript that moved on) would otherwise ask again at once, and again
+    requestBodies(missing).then(function (stored) { if (stored && state.lens === 'files') renderFilesView(); });
+  }
+}
+
+// -- body batching: load texts for sections near the viewport --------------------------------
+
+function queueVisibleBodies() {
+  if (state.lens === 'files') return;
+  var reader = document.getElementById('reader');
+  var nodes = reader.querySelectorAll('[data-step-body]');
+  // One viewport above the reader to one below it, in window coordinates. A node is measured
+  // the same way (its bounding box): offsetTop would be relative to the node's own row, which
+  // says nothing about where the row sits in a reader scrolled far from its top.
+  var box = reader.getBoundingClientRect();
+  var top = box.top - reader.clientHeight;
+  var bottom = box.bottom + reader.clientHeight;
+  function near(node) { var b = node.getBoundingClientRect(); return b.top < bottom && b.bottom > top; }
+  var wanted = state.bodyBatchWanted || (state.bodyBatchWanted = Object.create(null));
+  Array.prototype.forEach.call(nodes, function (node) {
+    if (near(node)) {
+      var stepId = node.getAttribute('data-step-body');
+      if (stepId && !state.bodies[stepId] && !state.bodiesPending[stepId]) wanted[stepId] = true;
+    }
+  });
+  // work rows need bodies for every tool/subagent item they bundle, even though the wrapping
+  // row itself carries no single data-step-body (it summarizes several steps at once).
+  Array.prototype.forEach.call(reader.querySelectorAll('[data-work-key]'), function (node) {
+    if (near(node)) {
+      var key = node.getAttribute('data-work-key');
+      var ids = state.workItemsByKey ? state.workItemsByKey[key] : null;
+      (ids || []).forEach(function (id) { if (!state.bodies[id] && !state.bodiesPending[id]) wanted[id] = true; });
+    }
+  });
+  if (Object.keys(wanted).length && !state.bodyBatchTimer) {
+    state.bodyBatchTimer = setTimeout(flushBodyBatch, BODY_BATCH_DELAY_MS);
+  }
+}
+
+function flushBodyBatch() {
+  state.bodyBatchTimer = null;
+  var ids = Object.keys(state.bodyBatchWanted || {});
+  state.bodyBatchWanted = Object.create(null);
+  if (!ids.length) return;
+  requestBodies(ids).then(function (stored) {
+    if (!stored) return;
+    // the lens may have switched to files while this batch was in flight; the reader then
+    // holds no [data-step-body] nodes for renderVisibleBodiesOnly to refresh, so the files
+    // view would stay without a path it was only waiting on, never asking again
+    if (state.lens === 'files') renderFilesView();
+    else renderVisibleBodiesOnly();
+  });
+}
+
+/* Asks for the bodies of these steps and keeps what comes back; resolves true when at least
+   one was kept. Every id leaves the pending set whatever the outcome, so a request that failed
+   does not stop a later one for the same step. A body is dropped when the transcript started a
+   new generation, or its step was named as updated, while the request was on its way: it
+   describes the step as it was. A request that failed outright is tried again a little later,
+   since nothing else would ask while the reader stands still. */
+var BODY_RETRY_MS = 2000;
+var BODY_BATCH = 200;   // ids per request: a Work line can hold thousands of calls, and the browser server takes 64 KB
+function requestBodies(ids) {
+  if (ids.length > BODY_BATCH) {
+    var parts = [];
+    for (var at = 0; at < ids.length; at += BODY_BATCH) parts.push(requestBodies(ids.slice(at, at + BODY_BATCH)));
+    return Promise.all(parts).then(function (kept) { return kept.some(Boolean); });
+  }
+  var generation = state.generation;
+  var mark = state.invalidateSeq;
+  ids.forEach(function (id) { state.bodiesPending[id] = true; });
+  return call({ type: 'bodies', stepIds: ids, generation: generation }).then(function (reply) {
+    ids.forEach(function (id) { delete state.bodiesPending[id]; });
+    if (!reply || !Array.isArray(reply.items)) {
+      clearTimeout(state.bodyRetryTimer);
+      state.bodyRetryTimer = setTimeout(function () {
+        // the Files changed view asks for what it misses when it is drawn; the story asks
+        // for the texts in view
+        if (state.lens === 'files') renderFilesView(); else queueVisibleBodies();
+      }, BODY_RETRY_MS);
+      return false;
+    }
+    if (generation !== state.generation) return false;
+    var stored = false;
+    reply.items.forEach(function (item) {
+      if (item.stale || (state.invalidatedAt[item.stepId] || 0) > mark) return;
+      state.bodies[item.stepId] = item;
+      stored = true;
+    });
+    return stored;
+  });
+}
+
+/* After a batch lands, refresh only the body/question/work nodes already in the DOM (not a full
+   re-render), so scroll position and open/closed toggles are left alone. */
+function renderVisibleBodiesOnly() {
+  var reader = document.getElementById('reader');
+  Array.prototype.forEach.call(reader.querySelectorAll('[data-step-body]'), function (node) {
+    var stepId = node.getAttribute('data-step-body');
+    var row = node.closest('.row');
+    if (!row) return;
+    if (row.classList.contains('k-qa') && node.className.indexOf('qcard') !== -1) fillQuestionBody(node, stepId);
+    else if (node.className.indexOf('you-msg') !== -1) { fillTextBody(node, stepId, false); foldYouBodyIfLong(node, stepId); }
+    else fillMdBody(node, stepId);
+  });
+  Array.prototype.forEach.call(reader.querySelectorAll('[data-work-key]'), function (node) {
+    var key = node.getAttribute('data-work-key');
+    var ids = state.workItemsByKey ? state.workItemsByKey[key] : null;
+    if (ids) fillWorkBody(node.querySelector('.body'), ids, key);
+  });
+}
+
+// -- indexing a compact step map from the sections (so rows can show kind/time/preview) ------
+
+function rebuildCompactIndex() {
+  var byId = Object.create(null);
+  var workItemsByKey = Object.create(null);
+  // the opener steps and in-body step rows do not carry the full compact record (only the
+  // service's "steps" array from open/pushes does); this page keeps the latest one it has
+  // seen per id across pushes, since a step's kind/time/preview never change once assigned.
+  byId = state.compactById || Object.create(null);
+  state.sections.forEach(function (sec) {
+    (sec.body || []).forEach(function (row) {
+      if (row.kind === 'work') workItemsByKey['g-' + row.items[0]] = row.items;
+    });
+  });
+  state.compactById = byId;
+  state.workItemsByKey = workItemsByKey;
+}
+
+// -- search -----------------------------------------------------------------------------------
+
+function runSearch(q) {
+  state.query = q;
+  // every change of the query, an emptied box too, outdates the replies still on their way
+  var requestId = ++state.searchRequestId;
+  if (!q) {
+    state.hits = []; state.curHit = -1; state.curHitStep = null;
+    call({ type: 'cancelSearch', viewerId: VIEWER_ID });
+    renderAll(); updateSearchCount();
+    return;
+  }
+  call({ type: 'search', query: q, viewerId: VIEWER_ID }).then(function (reply) {
+    // a search that was cancelled found nothing out; it is not a search without hits
+    if (!reply || reply.cancelled || state.searchRequestId !== requestId) return;
+    state.hits = reply.stepIds || [];
+    state.curHit = state.hits.length ? 0 : -1;
+    state.curHitStep = null;   // the mark of the search before; the jump below sets it on the first hit, if there is one
+    state.hitsCapped = Boolean(reply.capped);
+    if (state.hits.length) state.showAllTools = true;
+    renderAll();
+    updateSearchCount();
+    if (state.curHit !== -1) jumpToHit();
+  });
+}
+
+/* Names this page to the service: a search replaces the one this page had running, not the
+   search of another tab that shows the same session. */
+var VIEWER_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+function updateSearchCount() {
+  var el = document.getElementById('count');
+  if (!state.query) { el.textContent = ''; return; }
+  if (!state.hits.length) { el.textContent = 'no hits'; return; }
+  el.textContent = (state.curHit + 1) + ' of ' + state.hits.length + (state.hitsCapped ? '+' : '');
+}
+
+function moveHit(delta) {
+  if (!state.hits.length) return;
+  state.curHit = (state.curHit + delta + state.hits.length) % state.hits.length;
+  updateSearchCount();
+  jumpToHit();
+}
+
+function jumpToHit() {
+  var stepId = state.hits[state.curHit];
+  if (!stepId) return;
+  if (!state.bodies[stepId]) {
+    // The text is fetched first. By the time it is here another hit, or another search, may
+    // be the current one; then this jump is no longer wanted.
+    requestBodies([stepId]).then(function () { if (state.hits[state.curHit] === stepId) scrollToStepId(stepId); });
+  } else {
+    scrollToStepId(stepId);
+  }
+}
+
+/* Whether the view in use draws the row of this step. Decisions leaves texts and Work lines
+   out, Notes the sections without a note, and Files changed draws no story at all. */
+function stepDrawnInView(stepId) {
+  if (state.lens === 'files') return false;
+  return visibleSections().some(function (sec) {
+    if (sec.openerId === stepId) return true;
+    return drawnBody(sec).some(function (row) { return row.items ? row.items.indexOf(stepId) !== -1 : row.stepId === stepId; });
+  });
+}
+
+function scrollToStepId(stepId) {
+  if (!stepIsOnPath(stepId)) {
+    // a note whose step left the path: no view but Notes has a row for it
+    if (state.lens !== 'notes' && notesOfStep(stepId).length) { state.lens = 'notes'; renderStrip(); }
+  } else if (state.lens !== 'all' && !stepDrawnInView(stepId)) {
+    // a hit or a note in a row the view does not draw: back to the whole story, which draws it
+    state.lens = 'all';
+    renderStrip();
+  }
+  // make sure the owning section is in the fully-rendered window, open any folded work list
+  // that holds it, then scroll; a step bundled into a Work line is reached by its group key.
+  var secs = visibleSections();
+  var idx = -1;
+  secs.forEach(function (sec, i) { if (sectionStepIds(sec).indexOf(stepId) !== -1) idx = i; });
+  if (idx !== -1) anchorIndex = idx;
+  renderReader();
+  if (!document.getElementById('step-' + stepId)) {
+    // the id may be bundled inside a Work line's group; open that line's detail list.
+    Object.keys(state.workItemsByKey || {}).forEach(function (key) {
+      if (state.workItemsByKey[key].indexOf(stepId) !== -1) {
+        state.openWork[key] = true;
+        var node = document.querySelector('[data-work-key="' + key + '"] .worklist');
+        if (node) node.classList.add('open');
+      }
+    });
+  }
+  state.curHitStep = stepId;
+  var marked = markCurrentHit();
+  if (marked) marked.scrollIntoView({ block: 'center' });
+  renderRail();
+}
+
+/* The row of the current hit or note carries a mark. It is drawn from the state after every
+   redraw of the reader, so a push that redraws (every live update does) leaves it in place.
+   A step bundled into a Work line is marked on that line. Returns the marked row. */
+function markCurrentHit() {
+  Array.prototype.forEach.call(document.querySelectorAll('.cur-hit'), function (n) { n.classList.remove('cur-hit'); });
+  var stepId = state.curHitStep;
+  if (!stepId) return null;
+  var target = document.getElementById('step-' + stepId);
+  if (!target) {
+    Object.keys(state.workItemsByKey || {}).forEach(function (key) {
+      if (!target && state.workItemsByKey[key].indexOf(stepId) !== -1) {
+        target = document.getElementById(key.replace(/^g-/, 'step-')) || document.querySelector('[data-work-key="' + key + '"]');
+      }
+    });
+  }
+  if (target) target.classList.add('cur-hit');
+  return target;
+}
+
+var qInput = document.getElementById('q');
+qInput.addEventListener('input', function () {
+  clearTimeout(state.searchTimer);
+  var val = qInput.value;
+  state.searchTimer = setTimeout(function () { runSearch(val.trim()); }, SEARCH_DEBOUNCE_MS);
+});
+qInput.addEventListener('keydown', function (ev) {
+  if (ev.key !== 'Enter') return;
+  clearTimeout(state.searchTimer);
+  // Enter before the pause after typing is over: what is in the box has not been searched
+  // yet, so search it; only a query already searched moves between its hits
+  var typed = qInput.value.trim();
+  if (typed !== state.query) runSearch(typed);
+  else moveHit(ev.shiftKey ? -1 : 1);
+});
+document.getElementById('next').addEventListener('click', function () { moveHit(1); });
+document.getElementById('prev').addEventListener('click', function () { moveHit(-1); });
+document.getElementById('notesJump').addEventListener('click', function () { jumpToNote(1); });
+document.getElementById('sendAllNotes').addEventListener('click', function () {
+  var btn = document.getElementById('sendAllNotes');
+  btn.disabled = true;
+  call({ type: 'notesSendAll' }).then(function (reply) {
+    btn.disabled = false;
+    if (reply && reply.message) flashNotice(reply.message);
+    if (reply && !reply.ok && reply.message === 'On the clipboard. Paste it into the session.' && reply.text) copyToClipboard(reply.text);
+  });
+});
+document.getElementById('decisions').addEventListener('click', function () { toggleLens('decisions'); });
+// both go through the lens-aware paths: with Files changed open there is no story to redraw
+document.getElementById('allTools').addEventListener('change', function (ev) { state.showAllTools = ev.target.checked; renderAll(); });
+document.getElementById('follow').addEventListener('change', function (ev) {
+  state.follow = ev.target.checked;
+  maybeStickToBottom();
+});
+
+// -- scrolling, follow, edge bars, seen ------------------------------------------------------
+
+function scrollToSectionIndex(i) {
+  var secs = visibleSections();
+  if (i < 0 || i >= secs.length) return;
+  anchorIndex = i;
+  renderReader();
+  var el = document.getElementById('sec-' + sectionKey(secs[i], i));
+  if (el) el.scrollIntoView({ block: 'start' });
+}
+
+function scrollToEnd() {
+  var secs = visibleSections();
+  anchorIndex = secs.length - 1;
+  renderReader();
+  var reader = document.getElementById('reader');
+  reader.scrollTo(0, reader.scrollHeight);
+  // the rows now at the end need their texts; a scroll event only follows when the position
+  // changed, so this does not wait for one
+  queueVisibleBodies();
+}
+
+function scrollToEndOnLoad() {
+  var qp = !vsapi ? new URLSearchParams(window.location.search) : null;
+  var top = qp && qp.get('top') === '1';
+  if (top) { anchorIndex = 0; renderReader(); return; }
+  anchorIndex = visibleSections().length - 1;
+  scrollToEnd();
+}
+
+function maybeStickToBottom() {
+  // Follow means "stay at the end", full stop: it only turns itself off on a manual scroll
+  // away from the bottom (the reader's own scroll handler), never because state.atBottom
+  // happened to read stale from before this push grew the content past the viewport.
+  // The Files changed view is a list of its own, not the story: there is no end to stay at,
+  // and scrollToEnd would draw the story's rows over it.
+  if (state.follow && state.lens !== 'files') scrollToEnd();
+  else updateEdgeBars();
+}
+
+function updateEdgeBars() {
+  var reader = document.getElementById('reader');
+  var atTop = reader.scrollTop <= 20;
+  var atBottom = reader.scrollTop + reader.clientHeight >= reader.scrollHeight - 20;
+  state.atTop = atTop;
+  state.atBottom = atBottom;
+  var endBar = document.getElementById('endBar');
+  if (state.lens === 'files') { endBar.style.display = 'none'; return; }
+  endBar.style.display = '';
+  var secs = visibleSections();
+  var pill = document.getElementById('endPill');
+  if (atBottom) {
+    pill.textContent = secs.length > 1 ? 'You are at the end. ' + (secs.length - 1) + ' sections above.' : 'You are at the end.';
+  } else {
+    var below = Math.max(0, secs.length - 1 - anchorIndex);
+    pill.textContent = below ? 'Jump to the end (' + below + ' section' + (below === 1 ? '' : 's') + ' below)' : 'Jump to the end';
+  }
+}
+
+document.getElementById('endPill').addEventListener('click', function () {
+  var reader = document.getElementById('reader');
+  if (state.atBottom) reader.scrollTo({ top: 0, behavior: 'smooth' });
+  else reader.scrollTo({ top: reader.scrollHeight, behavior: 'smooth' });
+});
+
+var scrollTicking = false;
+document.getElementById('reader').addEventListener('scroll', function () {
+  if (scrollTicking) return;
+  scrollTicking = true;
+  requestAnimationFrame(function () {
+    scrollTicking = false;
+    updateEdgeBars();
+    expandNearbyStubs();
+    queueVisibleBodies();
+    updateRailCurrent();
+    if (!state.atBottom && state.follow) {
+      state.follow = false;
+      document.getElementById('follow').checked = false;
+    }
+    scheduleSeenUpdate();
+  });
+});
+
+function updateRailCurrent() {
+  var reader = document.getElementById('reader');
+  var heads = reader.querySelectorAll('[data-anchor]');
+  var curAnchor = null;
+  for (var i = 0; i < heads.length; i++) {
+    var r = heads[i].getBoundingClientRect();
+    var readerRect = reader.getBoundingClientRect();
+    if (r.top - readerRect.top <= 24) curAnchor = heads[i].getAttribute('data-anchor');
+    else break;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.sec-entry'), function (entry) {
+    entry.classList.toggle('cur', entry.getAttribute('data-anchor') === curAnchor);
+  });
+  var curEntry = document.querySelector('.sec-entry.cur .txt');
+  document.getElementById('railCurTurn').textContent = curEntry ? curEntry.textContent : 'Story';
+}
+
+// "seen" tracking: while the tab is visible, debounce-send the last step currently in view.
+function scheduleSeenUpdate() {
+  clearTimeout(state.seenTimer);
+  state.seenTimer = setTimeout(function () {
+    if (document.hidden) return;
+    var reader = document.getElementById('reader');
+    var rows = reader.querySelectorAll('[data-step]');
+    var readerRect = reader.getBoundingClientRect();
+    var lastVisible = null;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i].getBoundingClientRect();
+      if (r.top < readerRect.bottom) lastVisible = rows[i].getAttribute('data-step');
+      else break;
+    }
+    if (lastVisible && lastVisible !== state.lastSeenSent) {
+      state.lastSeenSent = lastVisible;
+      call({ type: 'seen', stepId: lastVisible });
+    }
+  }, SEEN_DEBOUNCE_MS);
+}
+document.addEventListener('visibilitychange', function () { if (!document.hidden) scheduleSeenUpdate(); });
+
+// -- narrow layout: outline drawer -----------------------------------------------------------
+
+function toggleDrawer() {
+  state.drawerOpen = !state.drawerOpen;
+  document.getElementById('rail').classList.toggle('open', state.drawerOpen);
+  document.getElementById('railCar').textContent = state.drawerOpen ? '▾' : '▸';
+}
+function closeDrawer() {
+  if (!state.drawerOpen) return;
+  state.drawerOpen = false;
+  document.getElementById('rail').classList.remove('open');
+  document.getElementById('railCar').textContent = '▸';
+}
+document.getElementById('railToggle').addEventListener('click', toggleDrawer);
+
+// -- export: the story of the view in use, as Markdown or as a page for a PDF ---------------
+
+var EXPORT_BATCH = 120;   // steps asked for in one request while an export reads its texts
+
+/* The steps whose bodies an export of these sections reads: what the view in use draws of
+   them, each once. A reasoning step and a block of an unknown kind have no text to read. */
+function exportStepIds(secs) {
+  var seen = Object.create(null);
+  var ids = [];
+  function want(id) {
+    if (!id || seen[id]) return;
+    var c = state.compactById && state.compactById[id];
+    if (c && (c.kind === 'reasoning' || c.kind === 'other')) return;
+    seen[id] = true;
+    ids.push(id);
+  }
+  secs.forEach(function (sec) {
+    want(sec.openerId);
+    drawnBody(sec).forEach(function (row) {
+      if (row.items) row.items.forEach(want); else want(row.stepId);
+    });
+  });
+  return ids;
+}
+
+/* Reads the bodies an export needs, a batch at a time: every text whole, a tool call without
+   its result (forExport). They are kept apart from what the reader holds, which stays the
+   texts as it shows them. Rejects when the transcript changes under the export. */
+function collectExportBodies(ids, onProgress) {
+  var generation = state.generation;
+  var bodies = Object.create(null);
+  var at = 0;
+  function next() {
+    if (at >= ids.length) return Promise.resolve(bodies);
+    var batch = ids.slice(at, at + EXPORT_BATCH);
+    return call({ type: 'bodies', stepIds: batch, generation: generation, forExport: true }).then(function (reply) {
+      if (!reply || !Array.isArray(reply.items)) throw new Error((reply && reply.message) || 'the texts could not be read');
+      if (state.generation !== generation || reply.items.some(function (item) { return item.stale; })) {
+        throw new Error('the transcript changed while the texts were read; try again');
+      }
+      reply.items.forEach(function (item) {
+        var c = state.compactById && state.compactById[item.stepId];
+        if (c && c.kind === 'you' && typeof item.text === 'string') item.text = withoutPasteTags(item.text);
+        bodies[item.stepId] = item;
+      });
+      at += batch.length;
+      onProgress(Math.min(at, ids.length), ids.length);
+      return next();
+    });
+  }
+  return next();
+}
+
+/* The view an export is of, taken when it starts: reading its texts takes a while, and the
+   tab may be switched to another view meanwhile. */
+function exportView() {
+  function copy(of) {
+    var c = Object.create(null);
+    Object.keys(of).forEach(function (k) { c[k] = of[k]; });
+    return c;
+  }
+  return { lens: state.lens, showAllTools: state.showAllTools, openWork: copy(state.openWork), openReports: copy(state.openReports),
+    notes: state.notes.slice() };
+}
+
+/* A message of yours as an export shows it: without the tags Claude Code wraps a paste in.
+   Where words were typed in front of a paste, a line says where the pasted text starts, and
+   an empty line shows where it ends. A paste inside a sentence gets lines of its own, so the
+   typed words never run into the pasted ones. */
+function withoutPasteTags(text) {
+  text = String(text == null ? '' : text);
+  if (text.indexOf('<pasted_content') === -1) return text;
+  var opened = text.replace(/[ \t]*<pasted_content\b[^>\n]*>[ \t]*\r?\n?/g, function (tag, at) {
+    var before = text.slice(0, at);
+    if (!before.trim()) return '';
+    return (/\n$/.test(before) ? '' : '\n') + 'Pasted:\n';
+  });
+  var closed = opened.replace(/[ \t]*<\/pasted_content\b[^>\n]*>[ \t]*/g, function (tag, at) {
+    var after = opened.slice(at + tag.length);
+    if (!after.trim()) return '';
+    var ownLine = /\n$/.test(opened.slice(0, at)) ? '' : '\n';
+    return /^\r?\n/.test(after) ? ownLine : ownLine + '\n';
+  });
+  return closed.replace(/^\s*\n/, '').replace(/\s+$/, '');
+}
+
+/* Whether the report a subagent sent back is written out. The tab always holds it, folded.
+   A report is the result of a call, and an export leaves results out: it holds a report only
+   where the view lists what the Work line ran (Tool calls on, or that line opened) or where
+   the report itself was opened. */
+function reportShown(stepId, workKey) {
+  return !state.buildingExport || state.showAllTools || Boolean(state.openWork[workKey]) || Boolean(state.openReports[stepId]);
+}
+
+/* Runs fn with the page's state as an export wants it: the view it was started in, the
+   bodies read for it (when given), no search highlight, no open note box. Everything that
+   says what a view shows reads the state (visibleSections, drawnBody, the builders of the
+   rows), so what runs inside fn is the export's; the reader's own state is back when fn
+   returns. fn must not wait for anything. */
+function withExportState(view, bodies, fn) {
+  var keep = { lens: state.lens, showAllTools: state.showAllTools, openWork: state.openWork, openReports: state.openReports,
+    notes: state.notes, bodies: state.bodies, query: state.query, noteBoxFor: state.noteBoxFor, buildingExport: state.buildingExport };
+  state.lens = view.lens; state.showAllTools = view.showAllTools; state.openWork = view.openWork;
+  state.openReports = view.openReports || state.openReports;
+  state.notes = view.notes || state.notes;
+  state.bodies = bodies || state.bodies; state.query = ''; state.noteBoxFor = null; state.buildingExport = true;
+  try { return fn(); }
+  finally { Object.keys(keep).forEach(function (k) { state[k] = keep[k]; }); }
+}
+
+function exportName() {
+  return state.title + (state.lens === 'decisions' ? ' (decisions)' : state.lens === 'notes' ? ' (notes)' : '');
+}
+
+/* The line under the title of an export: which session, when, which view, how much. */
+function exportByline(secs) {
+  var d = new Date();
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  var parts = ['Session ' + SESSION_ID.slice(0, 8),
+    'exported ' + d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()),
+    state.lens === 'decisions' ? 'decisions only' : state.lens === 'notes' ? 'the sections with a note' : 'the whole story'];
+  if (state.strip && state.strip.activeTimeMs) parts.push(fmtDuration(state.strip.activeTimeMs) + ' active time');
+  parts.push(secs.length + (secs.length === 1 ? ' section' : ' sections'));
+  return parts.join(' · ');
+}
+
+/* The story as a page of its own, for the PDF: every section built by the builders the reader
+   uses, serialised with the page's own style sheet. What only works in the live tab is
+   taken out (buttons, the note box); a web link keeps its address, a path is shown as text.
+   The page holds no script. */
+function buildExportPage(view, secs, bodies) {
+  var doc = document.implementation.createHTMLDocument(state.title);
+  doc.documentElement.className = 'export';
+  doc.documentElement.setAttribute('lang', 'en');
+  var charset = doc.createElement('meta'); charset.setAttribute('charset', 'utf-8');
+  doc.head.insertBefore(charset, doc.head.firstChild);
+  // The page lets nothing run or load, wherever it is opened: in the window a browser prints
+  // from as well as in the file the host hands to a printer (pdf.cjs seals that one once more).
+  var policy = doc.createElement('meta');
+  policy.setAttribute('http-equiv', 'Content-Security-Policy');
+  policy.setAttribute('content', "default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+  doc.head.insertBefore(policy, charset.nextSibling);
+  var style = doc.createElement('style');
+  // by its id: in a VS Code webview the first style sheet of the document is VS Code's own
+  style.textContent = document.getElementById('pageStyle').textContent;
+  doc.head.appendChild(style);
+  var h1 = doc.createElement('h1'); h1.textContent = state.title; doc.body.appendChild(h1);
+  var sub = doc.createElement('div'); sub.className = 'sub'; doc.body.appendChild(sub);
+  var main = doc.createElement('main'); main.className = 'reader';
+  var inner = doc.createElement('div'); inner.className = 'reader-inner';
+  withExportState(view, bodies, function () {
+    sub.textContent = exportByline(secs);
+    if (state.lens === 'notes') buildOrphanNotes(inner);   // as the Notes view shows them, in front
+    secs.forEach(function (sec, i) { inner.appendChild(buildSectionNode(sec, i, secs)); });
+  });
+  Array.prototype.forEach.call(inner.querySelectorAll('button, textarea, input, .notebox'), function (n) {
+    if (n.parentNode) n.parentNode.removeChild(n);
+  });
+  Array.prototype.forEach.call(inner.querySelectorAll('a.lnk'), function (a) {
+    if (a.getAttribute('data-kind') === 'url' && /^https?:\/\//i.test(a.title)) a.setAttribute('href', a.title);
+    else a.removeAttribute('href');
+  });
+  main.appendChild(inner);
+  doc.body.appendChild(main);
+  return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+}
+
+function mdOneLine(s) { return String(s == null ? '' : s).replace(/\s*\n\s*/g, ' ').trim(); }
+
+function mdQuote(text) {
+  return String(text == null ? '' : text).split('\n').map(function (l) { return l ? '> ' + l : '>'; }).join('\n');
+}
+
+/* Headings inside a text are made two levels smaller, so the headings of the file itself (its
+   title and one per section) stay its outline. A line inside a code fence is left alone. */
+function mdDemote(text) {
+  var fence = null;   // inside a code block: the character and the length of the marker that opened it
+  return String(text == null ? '' : text).split('\n').map(function (l) {
+    var m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(l);
+    if (fence) {
+      // only a marker of the same character, at least as long and with nothing after it, closes
+      if (m && m[1].charAt(0) === fence.ch && m[1].length >= fence.len && !m[2].trim()) fence = null;
+      return l;
+    }
+    if (m) { fence = { ch: m[1].charAt(0), len: m[1].length }; return l; }
+    var h = /^(#{1,6})(\s+.*)$/.exec(l);
+    return h ? new Array(Math.min(6, h[1].length + 2) + 1).join('#') + h[2] : l;
+  }).join('\n');
+}
+
+/* A text as it is, indented, in a fence it cannot close itself. */
+function mdFence(text, indent) {
+  text = String(text == null ? '' : text);
+  var fence = '~~~';
+  while (text.indexOf(fence) !== -1) fence += '~';
+  return [indent + fence].concat(text.split('\n').map(function (l) { return indent + l; }), [indent + fence]).join('\n');
+}
+
+/* The story as Markdown: the same sections and rows as the view in use, in the same words (the
+   labels, the Work lines, the facts lines), with the texts as they were written. Your own
+   messages and your notes are quoted. */
+function buildExportMarkdown(view, secs, bodies) {
+  return withExportState(view, bodies, function () {
+    var out = ['# ' + mdOneLine(state.title), '', exportByline(secs), ''];
+    // the Notes view shows, in front, the notes whose step is no longer on the current path
+    if (state.lens === 'notes') orphanNotes().forEach(function (n) { out.push(mdQuote('Note: ' + n.text + '\n(step not on the current path)'), ''); });
+    function compact(id) { return (state.compactById && state.compactById[id]) || null; }
+    function textOf(id) {
+      var b = state.bodies[id];
+      var c = compact(id);
+      return (b && typeof b.text === 'string') ? b.text : ((c && c.preview) || '');
+    }
+    function stamp(label, id) {
+      var c = compact(id);
+      var t = c ? fmtClockSec(c.at) : '';
+      return '**' + label + (t ? ' · ' + t : '') + '**';
+    }
+    function note(id) { notesOfStep(id).forEach(function (n) { out.push(mdQuote('Note: ' + n.text), ''); }); }
+    function question(id) {
+      var b = state.bodies[id];
+      ((b && b.questions) || []).forEach(function (q) {
+        if (q.header) out.push('*' + mdOneLine(q.header) + '*', '');
+        out.push(mdDemote(q.question || ''), '');
+        (q.options || []).forEach(function (o) {
+          out.push('- [' + (o.chosen ? 'x' : ' ') + '] **' + mdOneLine(o.label) + '**' + (o.chosen ? ' (your choice)' : '')
+            + (o.description ? ': ' + mdOneLine(o.description) : ''));
+        });
+        if ((q.options || []).length) out.push('');
+        if (q.other) out.push('Your own answer:', '', mdQuote(q.other), '');
+        if (!q.answered) out.push('*Not answered yet.*', '');
+      });
+    }
+    function work(row) {
+      var first = row.items[0];
+      out.push(stamp('Work', first) + ' ' + summarizeWork(row.items), '');
+      var files = filesTouchedIn(row.items);
+      if (files.length) {
+        out.push('Files touched:', '');
+        files.forEach(function (f) { out.push('- ' + f.kind + ': `' + f.path + '`'); });
+        out.push('');
+      }
+      row.items.forEach(function (id) {
+        var c = compact(id);
+        if (!c || c.kind !== 'subagent') return;
+        var b = state.bodies[id];
+        out.push('Subagent' + (c.title ? ' (' + mdOneLine(c.title) + ')' : '') + ': ' + mdOneLine((b && b.description) || c.preview || ''), '');
+        if (b && b.report && reportShown(id, 'g-' + first)) out.push(mdQuote(mdDemote(b.report)), '');
+      });
+      // the calls of a Work line are listed when the view lists them: Tool calls on, or this line opened
+      if (state.showAllTools || state.openWork['g-' + first]) {
+        var tools = row.items.filter(function (id) { var c = compact(id); return c && c.kind === 'tool'; });
+        tools.forEach(function (id) {
+          var c = compact(id);
+          var b = state.bodies[id];
+          out.push('- `' + mdOneLine(c.title || 'tool') + '`');
+          var input = (b && b.input) || c.preview || '';
+          if (input) out.push(mdFence(input, '  '));
+        });
+        if (tools.length) out.push('');
+      }
+      note(first);
+    }
+    secs.forEach(function (sec) {
+      var rows = drawnBody(sec);
+      if (sec.kind === 'lead' && !rows.length) return;   // nothing happened before your first message
+      var title = sectionLabel(sec);
+      if (sec.kind !== 'lead') title += ' · ' + fmtClock(sec.at) + (sec.heading ? ' · ' + mdOneLine(sec.heading) : '');
+      out.push('## ' + title, '');
+      if (sec.kind === 'you') out.push(mdQuote(textOf(sec.openerId)), '');
+      if (sec.kind === 'question') question(sec.openerId);
+      if (sec.openerId) note(sec.openerId);
+      rows.forEach(function (row) {
+        if (row.kind === 'work') { work(row); return; }
+        if (row.kind === 'interrupted') { out.push('*Interrupted*', ''); return; }
+        if (row.kind === 'question') {
+          out.push(stamp('Question and answer', row.stepId), '');
+          question(row.stepId);
+        } else if (row.kind === 'plan') {
+          out.push(stamp('Plan', row.stepId), '', mdDemote(textOf(row.stepId)), '');
+          var plan = compact(row.stepId);
+          if (plan && plan.approved) out.push('*You approved this plan.*', '');
+        } else {
+          var c = compact(row.stepId);
+          out.push(stamp(chipTextFor(c ? c.kind : row.kind), row.stepId), '', mdDemote(textOf(row.stepId)), '');
+        }
+        note(row.stepId);
+      });
+      var facts = state.lens === 'decisions' ? '' : sectionFacts(sec);
+      if (facts) out.push('*' + facts + '*', '');
+    });
+    return out.join('\n');
+  });
+}
+
+/* What a browser does with an exported file: it downloads it. */
+function saveInBrowser(name, text, type) {
+  var url = URL.createObjectURL(new Blob([text], { type: type }));
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+/* Hands the export over; resolves the line the page then shows. In VS Code the host asks
+   where to save and writes the file (a PDF is printed there by a browser of the machine).
+   A browser downloads the Markdown, and prints the page itself: the story opens in a tab
+   of its own with the print dialog, where "Save as PDF" is one of the printers. */
+function deliverExport(format, name, content, printWindow) {
+  if (vsapi) {
+    return call({ type: 'exportSave', format: format, name: name, content: content }).then(function (reply) {
+      if (reply && reply.cancelled) return 'Export cancelled.';
+      if (!reply || !reply.ok) throw new Error((reply && reply.message) || 'the file could not be saved');
+      return reply.message || 'Exported.';
+    });
+  }
+  if (format === 'md') {
+    saveInBrowser(name + '.md', content, 'text/markdown');
+    return Promise.resolve('Downloaded ' + name + '.md');
+  }
+  if (!printWindow) throw new Error('the browser did not open a window to print from');
+  printWindow.document.open();
+  printWindow.document.write(content);
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.print();
+  return Promise.resolve('The story is open in a tab of its own: choose "Save as PDF" in its print dialog.');
+}
+
+function setExportBusy(busy) {
+  var btn = document.getElementById('exportBtn');
+  btn.disabled = busy;
+  btn.textContent = busy ? 'Exporting…' : 'Export';
+}
+
+/* Export of the view in use: the whole story, or what Decisions or Notes show of it, with the
+   calls of the Work lines when Tool calls is on. The view is taken once, here; a switch of
+   the tab while the texts are read does not change what is exported. */
+function runExport(format) {
+  if (state.exporting || !state.loaded) return;
+  // a transcript still being read is not the whole story yet, and an export would not say so
+  if (state.indexing) { flashNotice('Still indexing this transcript: export once the story is whole.'); return; }
+  var view = exportView();
+  var plan = withExportState(view, null, function () {
+    var secs = visibleSections();
+    return { secs: secs, ids: exportStepIds(secs), name: exportName(), empty: !secs.length && !(state.lens === 'notes' && orphanNotes().length) };
+  });
+  if (plan.empty) { flashNotice('There is nothing to export in this view.'); return; }
+  // A browser lets a page open a window only while it handles a click, so the window the PDF
+  // is printed from is opened now and filled once the story is read.
+  var printWindow = (!vsapi && format === 'pdf') ? window.open('', '_blank') : null;
+  state.exporting = true;
+  setExportBusy(true);
+  flashNotice('Export: reading the texts of ' + plan.ids.length + ' steps');
+  collectExportBodies(plan.ids, function (done, total) {
+    flashNotice('Export: read ' + done + ' of ' + total + ' steps');
+  }).then(function (bodies) {
+    var content = format === 'pdf' ? buildExportPage(view, plan.secs, bodies) : buildExportMarkdown(view, plan.secs, bodies);
+    return deliverExport(format, plan.name, content, printWindow);
+  }).then(function (message) {
+    flashNotice(message);
+  }, function (e) {
+    if (printWindow) { try { printWindow.close(); } catch (_) { /* closed already */ } }
+    flashNotice('The export failed: ' + ((e && e.message) || e));
+  }).then(function () {
+    state.exporting = false;
+    setExportBusy(false);
+  });
+}
+
+(function () {
+  var btn = document.getElementById('exportBtn');
+  var menu = document.getElementById('exportMenu');
+  function show(open) { menu.hidden = !open; btn.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+  btn.addEventListener('click', function (ev) { ev.stopPropagation(); show(menu.hidden); });
+  menu.addEventListener('click', function (ev) {
+    var format = ev.target && ev.target.getAttribute ? ev.target.getAttribute('data-export') : null;
+    if (!format) return;
+    show(false);
+    runExport(format);
+  });
+  document.addEventListener('click', function (ev) { if (!menu.hidden && !menu.contains(ev.target)) show(false); });
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && !menu.hidden) { show(false); btn.focus(); } });
+})();
+
+// -- boot --------------------------------------------------------------------------------
+
+openSession();
+</script>
+</body>
+</html>

@@ -26,7 +26,7 @@ if ($LASTEXITCODE -ne 0) { throw 'syntax error in server.cjs' }
 
 Push-Location $ext
 try {
-    node --test "tests/*.test.cjs"
+    node tests/run.cjs
     if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
 } finally {
     Pop-Location

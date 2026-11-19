@@ -438,4 +438,21 @@ test('unarchive waits for a pending end of the same id, so the file ends up live
   assert.equal(fs.existsSync(marker(E)), false);
 });
 
+test('transcriptOf: a path of the filename index that is gone, because another window stowed the session since, is not the answer', () => {
+  const F = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  seed(live('proj', F));
+  // the index is read anew, with this session in it, and then holds for a minute
+  const realNow = Date.now;
+  Date.now = () => realNow() + 2 * 60 * 1000;
+  try { assert.equal(core.transcriptIndex().get(F), live('proj', F)); } finally { Date.now = realNow; }
+  assert.equal(core.transcriptOf(F), live('proj', F));
+  // another window moves the transcript; this process still holds the list it read
+  fs.mkdirSync(path.dirname(stowed('proj', F)), { recursive: true });
+  fs.renameSync(live('proj', F), stowed('proj', F));
+  assert.equal(core.transcriptIndex().get(F), live('proj', F), 'the list still names the old place');
+  assert.equal(core.transcriptOf(F), stowed('proj', F), 'the transcript is found where it is now');
+  fs.unlinkSync(stowed('proj', F));
+  assert.equal(core.transcriptOf(F), null, 'and a transcript that is nowhere has no place');
+});
+
 test.after(() => { delete process.env.SB_SHIM_AGENTS; fs.rmSync(tmp, { recursive: true, force: true }); });

@@ -57,8 +57,15 @@ shows background agents only, not the sessions you talk to.
 - **Find any session, ever.** Type to narrow the list and search every session on this
   machine by title; press Enter to search by what was said too, and resume a past one in
   place.
+- **Read how a session got there.** ≡ opens a session's story in a tab of its own: your
+  messages, the texts and short updates it printed between tool calls, every question as it
+  was asked with your answer, the plans, and what the tool calls did, one section per thing
+  you said. Search it, keep a note on any step, send a note back to the session, and export
+  the story as Markdown or PDF.
 
 ![Searching every session by title and content](extension/media/search.png)
+
+![The Steps tab of a session, with an example story](extension/media/steps.png)
 
 ## Install
 

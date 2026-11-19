@@ -81,4 +81,63 @@ test('openUri: the board route when one runs in that window, Claude Code otherwi
   assert.equal(core.openUri(A, '3', null), null);
 });
 
+test('steerUri: only with a board authority and a well-shaped claim id; unchecked input gives null', () => {
+  const claimId = 'a'.repeat(32);
+  assert.equal(core.steerUri(A, 3, 'nima-ghorbani.session-board-vscode', claimId),
+    'vscode://nima-ghorbani.session-board-vscode/steer?session=' + A + '&windowId=3&note=' + claimId);
+  assert.equal(core.steerUri(A, 3, null, claimId), null, 'no /steer route on Claude Code itself');
+  assert.equal(core.steerUri(A, 3, 'evil/../x', claimId), null);
+  assert.equal(core.steerUri('nope', 3, 'nima-ghorbani.session-board-vscode', claimId), null);
+  assert.equal(core.steerUri(A, '3', 'nima-ghorbani.session-board-vscode', claimId), null);
+  assert.equal(core.steerUri(A, 3, 'nima-ghorbani.session-board-vscode', 'not-hex'), null);
+});
+
+test('writeSteerClaim / takeSteerClaim: a fresh claim is read once; a second read finds nothing (the replay case)', () => {
+  const claimId = core.writeSteerClaim('About your step at 14:05 ("x"): why this?');
+  assert.match(claimId, /^[0-9a-f]{32}$/);
+  assert.equal(core.takeSteerClaim(claimId), 'About your step at 14:05 ("x"): why this?');
+  assert.equal(core.takeSteerClaim(claimId), null, 'taken once; a replayed URI finds nothing');
+});
+
+test('takeSteerClaim: a claim older than 30 seconds is refused and still consumed', () => {
+  const claimId = core.writeSteerClaim('late text');
+  const file = path.join(core.DATA_DIR, 'steers', claimId + '.json');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify(Object.assign(rec, { at: Date.now() - 31000 })));
+  assert.equal(core.takeSteerClaim(claimId), null, 'stale: refused');
+  assert.equal(fs.existsSync(file), false, 'deleted even though it was refused, so a retry does not keep finding the same stale claim');
+});
+
+test('takeSteerClaim: an unknown or malformed claim id answers null without throwing', () => {
+  assert.equal(core.takeSteerClaim('f'.repeat(32)), null, 'well-shaped but never written');
+  assert.equal(core.takeSteerClaim('not-an-id'), null);
+  assert.equal(core.takeSteerClaim(''), null);
+});
+
+test('writeSteerClaim prunes claims older than a minute when a new one is written', () => {
+  const oldId = core.writeSteerClaim('old');
+  const oldFile = path.join(core.DATA_DIR, 'steers', oldId + '.json');
+  const past = Date.now() - 2 * 60 * 1000;
+  fs.utimesSync(oldFile, past / 1000, past / 1000);
+  core.writeSteerClaim('new, triggers the sweep');
+  assert.equal(fs.existsSync(oldFile), false, 'the stale claim file was swept on the next write');
+});
+
+test('takeSteerClaim: two takers of one claim at the same moment, and the text goes to one of them only', () => {
+  const claimId = core.writeSteerClaim('hand this over once');
+  // the second taker arrives when the first has read the claim and not yet removed it
+  const realUnlink = fs.unlinkSync;
+  let second = 'not run';
+  fs.unlinkSync = (file, ...rest) => {
+    if (second === 'not run' && String(file).indexOf(path.join(core.DATA_DIR, 'steers')) === 0) {
+      second = null;   // guards against the nested call coming back here
+      second = core.takeSteerClaim(claimId);
+    }
+    return realUnlink(file, ...rest);
+  };
+  let first;
+  try { first = core.takeSteerClaim(claimId); } finally { fs.unlinkSync = realUnlink; }
+  assert.deepEqual([first, second].filter((t) => t !== null), ['hand this over once'], 'one taker got the text: ' + JSON.stringify([first, second]));
+});
+
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

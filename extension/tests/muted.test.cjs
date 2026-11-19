@@ -115,6 +115,20 @@ test('snapshot: the row carries muted; a marker survives while the session is li
   core.unmuteSession(B);
 });
 
+test('snapshot: notes survive when their session ended before the cached list of transcripts knew its file; they go when no root holds a transcript', async () => {
+  registry('idle'); agents('idle');
+  await core.snapshot();   // the list of transcripts is read here and kept for a minute
+  // a session that started after that, got a note in the Steps tab, and has ended since
+  const D = 'dddddddd-1111-4222-8333-444444444444';
+  fs.writeFileSync(path.join(projectsDir, 'proj', D + '.jsonl'), JSON.stringify({ type: 'ai-title', aiTitle: 'Short one', sessionId: D }) + '\n');
+  assert.equal(core.transcriptIndex().has(D), false, 'the cached list does not hold it yet');
+  core.notesStore.add(D, 'x:0', 'a note on a session that ended quickly');
+  core.notesStore.add(C, 'x:0', 'a note on a session whose transcript is gone');
+  await core.snapshot();
+  assert.equal(core.notesStore.list(D).length, 1, 'the transcript is on disk: the note stays');
+  assert.equal(core.notesStore.list(C).length, 0, 'no transcript in either root: the note goes');
+});
+
 test('focused peers: the newest fresh heartbeat of another host that reports focus; this host, stale, unfocused and flagless records do not count', () => {
   fs.rmSync(heartbeatDir, { recursive: true, force: true });
   assert.equal(core.focusedPeerAt(EXTHOST), 0, 'no heartbeats');
@@ -157,6 +171,29 @@ test('snapshot: the window label is the heartbeat name, else the folder vote; an
   fs.rmSync(heartbeatDir, { recursive: true, force: true });
   a = await rowA();
   assert.equal(a.window.label, 'webapp', 'no heartbeat: the vote');
+});
+
+test('snapshot: notes survive while the folder of their transcript cannot be read; "cannot look" is not "gone"', async () => {
+  registry('idle'); agents('idle');
+  await core.snapshot();   // the list of transcripts is read here and kept for a minute
+  const E = 'eeeeeeee-1111-4222-8333-444444444444';
+  const locked = path.join(projectsDir, 'locked');
+  fs.mkdirSync(locked, { recursive: true });
+  fs.writeFileSync(path.join(locked, E + '.jsonl'), JSON.stringify({ type: 'ai-title', aiTitle: 'Locked away', sessionId: E }) + '\n');
+  core.notesStore.add(E, 'x:0', 'a note on a session whose folder is locked for a moment');
+  // the folder denies every look into it, as a folder without access rights does
+  const inside = (p) => String(p).startsWith(locked + path.sep);
+  const denied = () => Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+  const real = { existsSync: fs.existsSync, statSync: fs.statSync, readdirSync: fs.readdirSync };
+  fs.existsSync = (p) => (inside(p) ? false : real.existsSync(p));
+  fs.statSync = (p, ...rest) => { if (inside(p)) throw denied(); return real.statSync(p, ...rest); };
+  fs.readdirSync = (p, ...rest) => { if (String(p) === locked) throw denied(); return real.readdirSync(p, ...rest); };
+  try {
+    await core.snapshot();
+  } finally {
+    Object.assign(fs, real);
+  }
+  assert.equal(core.notesStore.list(E).length, 1, 'the note is still there when the folder can be read again');
 });
 
 test.after(() => { fs.rmSync(tmp, { recursive: true, force: true }); });

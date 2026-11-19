@@ -2,7 +2,7 @@
 /*
  * The page's archive, section and Mute flows, driven in a headless Chromium over the
  * DevTools protocol against an in-test HTTP server that serves index.html and plays scripted
- * /api answers. Skipped with a reason when no Chromium is found (tools/screenshot.cjs knows
+ * /api answers. Skipped with a reason when no Chromium is found (tools/chrome.cjs knows
  * the usual paths).
  *
  *   node:test ──▶ fake API (http) ◀── index.html in headless Chrome ◀── CDP over Node's WebSocket
@@ -12,12 +12,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const http = require('http');
-const net = require('net');
-const { spawn, execFileSync } = require('child_process');
-const { browser } = require('../../tools/screenshot.cjs');
+const { browser, freePort, startChrome } = require('../../tools/chrome.cjs');
+const chromeLock = require('./shim/chrome-lock.cjs');
 
 let CHROME = null;
 try { CHROME = browser(); } catch (_) { CHROME = null; }
@@ -78,55 +76,25 @@ function serve(req, res) {
   }
   return json(res, 404, { error: 'not found' });
 }
-function freePort() { return new Promise((res) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); }); }
 
 // -- Chrome over the DevTools protocol ----------------------------------------------------
 
-class CDP {
-  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.id && this.pending.has(m.id)) { const p = this.pending.get(m.id); this.pending.delete(m.id); if (m.error) p.reject(new Error(JSON.stringify(m.error))); else p.resolve(m.result); } }; }
-  send(method, params, sessionId) { const id = ++this.id; return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params: params || {}, sessionId })); }); }
-}
-const getJson = (url) => new Promise((res, rej) => http.get(url, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => { try { res(JSON.parse(b)); } catch (e) { rej(e); } }); }).on('error', rej));
-const kill = (pid) => { if (process.platform === 'win32') { try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch (_) { /* gone */ } } else { try { process.kill(pid); } catch (_) { /* gone */ } } };
-
 let server = null;
-let chrome = null;
-let cdp = null;
-let userDataDir = null;
+let cdp = null;   // { send, close } of the browser started by tools/chrome.cjs
 
 test.before(async () => {
   if (!CHROME) return;
+  await chromeLock.acquire(); // steps-page.test.cjs drives its own Chrome too; one at a time keeps both off a shared CPU budget
   PORT = await freePort();
   server = http.createServer(serve);
   await new Promise((res) => server.listen(PORT, '127.0.0.1', res));
-  const cdpPort = await freePort();
-  userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-page-chrome-'));
-  chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--remote-debugging-port=' + cdpPort, '--user-data-dir=' + userDataDir, '--no-first-run', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
-  // Chrome's own output, so a start that fails (seen on the release runner) says why
-  let chromeErr = '';
-  let chromeExit = null;
-  chrome.stderr.on('data', (d) => { chromeErr = (chromeErr + d.toString('utf8')).slice(-4000); });
-  chrome.on('exit', (code, signal) => { chromeExit = signal || code; });
-  chrome.on('error', (e) => { chromeErr += '\nspawn failed: ' + e.message; });
-  let info = null;
-  for (let i = 0; i < 100 && !info; i++) { try { info = await getJson('http://127.0.0.1:' + cdpPort + '/json/version'); } catch (_) { await sleep(200); } }
-  if (!info) {
-    throw new Error('Chrome (' + CHROME + ') did not open its debugging port within 20 s'
-      + (chromeExit !== null ? '; it exited with ' + chromeExit : '; it is still running')
-      + '. Its last output:\n' + (chromeErr.trim().split(/\r?\n/).slice(-15).join('\n') || '(nothing)'));
-  }
-  const ws = new WebSocket(info.webSocketDebuggerUrl);
-  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
-  cdp = new CDP(ws);
+  cdp = await startChrome();
 });
 
 test.after(async () => {
-  if (chrome) kill(chrome.pid);
+  if (cdp) await cdp.close();
   if (server) await new Promise((res) => server.close(res));
-  if (userDataDir) {   // Chrome's crash handler may hold a file for a moment; a leftover temp profile is not a failure
-    await sleep(300);
-    try { fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (_) { /* leave it to the OS temp cleanup */ }
-  }
+  if (CHROME) chromeLock.release();
 });
 
 const SAMPLE = `(function () {
@@ -146,6 +114,7 @@ const SAMPLE = `(function () {
     mutedRows: q('.row.muted[data-session]').map(function (r) { return r.getAttribute('data-session'); }),
     mutedChips: q('.row .chip.muted').length,
     actionsOverflow: q('.row .actions').filter(function (a) { return a.scrollWidth > a.clientWidth; }).length,
+    actionKinds: q('.row[data-session]').map(function (r) { return r.getAttribute('data-session') + '=' + Array.prototype.slice.call(r.querySelectorAll('.actions button[data-act]')).map(function (b) { return b.getAttribute('data-act'); }).join(','); }),
     notes: window.__notes || null,
     titles: q('.row[data-session]').map(function (r) { var t = r.querySelector('.title'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
     statusWords: q('.row[data-session]').map(function (r) { var t = r.querySelector('.status span:last-child'); return r.getAttribute('data-session') + '=' + (t ? t.textContent : ''); }),
@@ -206,7 +175,7 @@ async function openPage() {
     until: async (pred, what) => {
       const start = Date.now();
       let s = null;
-      while (Date.now() - start < 8000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
+      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
       throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
     },
     close: () => cdp.send('Target.closeTarget', { targetId }),
@@ -225,8 +194,7 @@ test('page: ⤓ asks Archive?, posts archive=1, and the row leaves', opts, async
   const page = await openPage();
   await page.until((s) => s.rows.includes(A) && s.rows.includes(B), 'both rows');
   await page.click(rowSel(A) + ' .iconbtn.archive');
-  let s = await page.sample();
-  assert.equal(s.confirmText, 'Archive?');
+  let s = await page.until((x) => x.confirmText === 'Archive?', 'the archive confirm to show');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   s = await page.until((x) => !x.rows.includes(A), 'the archived row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['?archive=1']);
@@ -344,8 +312,7 @@ test('page: ✕ is unchanged and posts without archive', opts, async () => {
   const page = await openPage();
   await page.until((s) => s.rows.includes(A), 'the idle row');
   await page.click(rowSel(A) + ' .iconbtn.end');
-  let s = await page.sample();
-  assert.equal(s.confirmText, 'End?');
+  let s = await page.until((x) => x.confirmText === 'End?', 'the end confirm to show');
   await page.click(rowSel(A) + ' .iconbtn.confirm');
   s = await page.until((x) => !x.rows.includes(A), 'the ended row to leave');
   assert.deepEqual(endCalls(A).map((c) => c.query), ['']);
@@ -933,9 +900,13 @@ const secOf = (s, key) => s.sections.find((sec) => sec.key === key);
 
 test('page: Alt+Down on a focused row posts /api/order with the complete list of its group, the row moves at once and keeps focus; Alt+Up at the top is a no-op', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]), { order: { mode: 'manual' } });
+  // every row has a transcript, so each carries the Steps button: the keyboard order of the
+  // list must be what it was before that button came
+  const withTranscripts = manualRows().concat([row(F, 'Phi old idle', 'idle', { pid: 700, rank: 3, ageMinutes: 300 })]).map((r) => Object.assign(r, { transcriptPath: 'C:\\x\\' + r.sessionId + '.jsonl' }));
+  fake.snapshot = snapshotOf(withTranscripts, { order: { mode: 'manual' } });
   const page = await openPage();
   let s = await page.until((x) => x.mode === 'manual' && x.sections[0].rows.length === 5, 'manual rows');
+  assert.ok(s.actionKinds.every((k) => k.split('=')[1].split(',')[0] === 'steps'), 'every row carries the Steps button: ' + JSON.stringify(s.actionKinds));
   assert.deepEqual([s.sections[0].rows, s.sections[0].stale], [[D, C, B, A, F], null], 'the row idle for 5 h is shown in its rank');
   await page.key(C, 'ArrowDown');
   s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
@@ -1064,5 +1035,21 @@ test('page: in activity mode there are no handles and Alt+arrows do nothing; wit
   s = await page.until((x) => x.sections[0].rows.length === 4 && x.handles === 4, 'the filter cleared');
   await page.key(C, 'ArrowDown');
   await page.until(() => orderCalls().length === 1, 'moving works again');
+  await page.close();
+});
+
+test('page: rows still render their buttons, with Steps in place for a session that has a transcript (regression)', opts, async () => {
+  fake.snapshot = snapshotOf([
+    row(A, 'With transcript', 'idle', { transcriptPath: 'C:\\x\\a.jsonl' }),
+    row(B, 'No transcript', 'idle', { pid: 200, transcriptPath: null }),
+  ]);
+  const page = await openPage();
+  const s = await page.until((x) => x.rows.includes(A) && x.rows.includes(B), 'both rows');
+  const kindsOf = (sid) => (s.actionKinds.find((x) => x.indexOf(sid + '=') === 0) || '').split('=')[1].split(',');
+  assert.deepEqual(kindsOf(A), ['steps', 'details', 'retitle', 'mute', 'archive', 'end'], 'the row with a transcript carries Steps ahead of the other buttons, order otherwise unchanged');
+  assert.deepEqual(kindsOf(B), ['details', 'retitle', 'mute', 'archive', 'end'], 'no transcript: no Steps button, the rest unchanged');
+  const title = await page.eval('document.querySelector(' + JSON.stringify(rowSel(A) + ' .iconbtn.steps') + ').title');
+  assert.equal(title, 'Steps', 'the row button\'s tooltip is just Steps');
+  await page.click(rowSel(A) + ' .iconbtn.steps');
   await page.close();
 });

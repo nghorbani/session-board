@@ -502,6 +502,7 @@ function actionsHtml(s, opts) {
   var flash = state.flashes[s.sessionId];
   var age = flash && flash.until > Date.now() ? flash.text : fmtAge(s.ageMinutes);
   var html = '<span class="age">' + esc(age) + '</span>';
+  if (s.path || s.transcriptPath) html += '<button class="iconbtn steps" data-act="steps" title="Steps">≡</button>';
   html += '<button class="iconbtn info" data-act="details" aria-expanded="' + (state.details[s.sessionId] ? 'true' : 'false') + '" title="details: full id, start, process, window, transcript">ⓘ</button>';
   if (opts.endable || (opts.past && !s.live)) {
     html += state.retitling[s.sessionId]
@@ -665,6 +666,13 @@ function archivedBy(s) { return s.archivedBy || (s.archived ? 'board' : null); }
 function boardArchived(s) { var by = archivedBy(s); return by === 'board' || by === 'both'; }
 
 // -- actions -------------------------------------------------------------------------------
+
+/** The Steps button: a tab in the editor group in use in VS Code, a new browser tab otherwise
+    (the server embeds its own token into that page the same way it does for this one). */
+function openSteps(sid) {
+  if (vsapi) { send({ type: 'steps', sessionId: sid }); return; }
+  window.open('/steps?session=' + encodeURIComponent(sid), '_blank');
+}
 
 function copyResume(sid, note) {
   var cmd = 'claude --resume ' + sid;
@@ -1099,6 +1107,7 @@ function onRowClick(ev) {
     ev.stopPropagation();
     var act = btn.getAttribute('data-act');
     if (act === 'archivepast') { requestArchivePast(sid); return; }
+    if (act === 'steps') { openSteps(sid); return; }
     if (act === 'details') { state.details[sid] = !state.details[sid]; render(); return; }
     if (act === 'copyval') { copyText(sid, btn.getAttribute('data-copy') || ''); return; }
     if (act === 'unarchive') { requestUnarchive(sid); return; }

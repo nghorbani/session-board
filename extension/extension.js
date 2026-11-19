@@ -14,12 +14,56 @@ const path = require('path');
 const vscode = require('vscode');
 const core = require('./core.cjs');
 const { createNotifier } = require('./notify.cjs');
+const { createStepsService } = require('./steps-service.cjs');
+const pdf = require('./pdf.cjs');
 
 const VIEW_ID = 'sessionBoard.view';
+const escapeAttr = core.escapeAttr;
+
+/**
+ * An allow list, not a deny list: a path clicked in the viewer comes from transcript text, not
+ * from something the user typed, and a UNC form (plain, mixed-separator, an NT object path, or
+ * either Windows device prefix) makes Windows contact a named host to authenticate just for the
+ * stat call, which can leak the user's NTLM credentials. Enumerating the ways to spell a network
+ * path keeps missing one (`\/host\share`, `/\host/share` and `\??\UNC\...` all slipped past an
+ * earlier version of this check that matched only `\\`, `//` and `\\?\`/`\\.\`), so this instead
+ * demands the shape a trusted local path has to have and refuses everything else.
+ *
+ * `resolved` must already be the fully resolved absolute path (home expansion and the session's
+ * own working directory both applied); this only classifies that final string, normalised with
+ * `path.win32.normalize` on Windows so every `/` becomes `\` before the shape check runs (a
+ * mixed-separator UNC form is still a UNC form once its separators agree). On Windows the one
+ * allowed shape is a drive letter root (`C:\...`); a rooted path with no drive (`\foo`), any
+ * path starting with two separators in any mix, an NT object prefix (`\??\`), and the `\\?\` /
+ * `\\.\` device prefixes are all refused by simply not matching that shape, not by naming each
+ * of them. On other platforms the one allowed shape is a path starting with exactly one `/`.
+ * Returns the `vscode.Uri.file(...)` built from the checked, normalised value, so the same Uri
+ * the shape check approved is what every caller passes on to stat, revealFileInOS, the editor
+ * and the preview, never a second parse of the original string; returns null when the path is
+ * refused, including when the Uri's authority is not empty (a `file://host/...` spelling that
+ * reached this far through some other route would carry a host there).
+ */
+function safeLocalFileUri(resolved) {
+  const isWindows = process.platform === 'win32';
+  const normalized = isWindows ? path.win32.normalize(String(resolved || '')) : String(resolved || '');
+  const shapeOk = isWindows ? /^[A-Za-z]:\\(?!\\)/.test(normalized) : /^\/(?!\/)/.test(normalized);
+  if (!shapeOk) return null;
+  const uri = vscode.Uri.file(normalized);
+  if (uri.authority) return null;   // defence in depth: a Uri that still carries a host is refused too
+  return uri;
+}
+
 const POLL_VISIBLE_MS = 5000;
 const POLL_HIDDEN_MS = 15000;
 const USAGE_VISIBLE_MS = 5 * 60 * 1000;
 const USAGE_HIDDEN_MS = 15 * 60 * 1000;
+
+/** A file name for an export, from a session title: without the characters a file name
+    cannot hold on Windows, of a length a path can take, never empty. */
+function exportFileName(name) {
+  const clean = String(name || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').replace(/^[ .]+|[ .]+$/g, '').slice(0, 80).trim();
+  return clean || 'steps';
+}
 
 class BoardProvider {
   constructor(context, log) {
@@ -37,6 +81,16 @@ class BoardProvider {
     this.searchRequestId = null;
     this.accountError = null;  // the account probe failure last logged, so it is said once per change
     this.claudeArchiveError = null;   // same for the read of Claude Code's archive
+    this.stepsService = createStepsService({
+      resolveTranscript: (sessionId) => core.transcriptOf(sessionId),
+      sessionTitle: (sessionId) => this.stepsSessionTitle(sessionId),
+      dataDir: core.DATA_DIR,
+      rg: { probe: (appRoot) => core.rgProbe(appRoot), run: core.run, RG_BASE: core.RG_BASE, jsonEscaped: core.jsonEscaped },
+      deliver: (sessionId, text, meta) => this.deliverToSession(sessionId, text, meta),
+    });
+    this.stepsPanels = new Map();   // sessionId -> panel, one per session
+    this.htmlToPdf = pdf.htmlToPdf;        // the printer of the PDF export, and the search for the
+    this.findPdfBrowser = pdf.findBrowser; // browser it prints with; a test puts its own here
   }
 
   // -- webview ---------------------------------------------------------------------------
@@ -61,8 +115,11 @@ class BoardProvider {
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
       + 'style-src ' + webview.cspSource + ' \'unsafe-inline\'; '
       + 'script-src \'nonce-' + nonce + '\';">';
-    html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp);
-    html = html.replace('<script>', '<script nonce="' + nonce + '">');
+    // a replacer FUNCTION, never a plain replacement string: String.replace expands $-patterns
+    // ($&, $', $`, $1...) in a string argument, so anything built from outside data has to go
+    // in through a function's return value, inserted literally, not as that second argument.
+    html = html.replace('<meta charset="utf-8">', () => '<meta charset="utf-8">' + csp);
+    html = html.replace('<script>', () => '<script nonce="' + nonce + '">');
     return html;
   }
 
@@ -98,6 +155,7 @@ class BoardProvider {
         case 'archivePast': if (core.UUID_RE.test(sid)) return await this.archivePast(sid); return;
         case 'retitle': if (core.UUID_RE.test(sid)) return await this.retitle(sid); return;
         case 'refreshUsage': return await this.refreshUsage(String(m.requestId || ''));
+        case 'steps': if (core.UUID_RE.test(sid)) return await this.openSteps(sid); return;
         default: return;
       }
     } catch (e) {
@@ -266,7 +324,22 @@ class BoardProvider {
   }
 
   sessionRow(sessionId) {
-    return ((this.last && this.last.sessions) || []).find((s) => s.sessionId === sessionId) || null;
+    const live = ((this.last && this.last.sessions) || []).find((s) => s.sessionId === sessionId);
+    if (live) return live;
+    return ((this.last && this.last.ended) || []).find((s) => s.sessionId === sessionId) || null;
+  }
+
+  /** A session's title for the Steps panel and tab: the row's title when the session is live or
+      ended (both carry Claude Code's own name), else read straight from its transcript (a
+      session the board has not snapshotted yet, right after a reload). Never the 8-hex-id
+      fallback here; that is the page's own last resort when this returns null too. */
+  stepsSessionTitle(sessionId) {
+    const row = this.sessionRow(sessionId);
+    if (row && (row.title || row.name)) return row.title || row.name;
+    const file = core.transcriptOf(sessionId);
+    if (!file) return null;
+    const facts = core.transcriptFacts(sessionId, file);
+    return facts.customTitle || facts.title || null;
   }
 
   // -- opening ---------------------------------------------------------------------------
@@ -276,11 +349,25 @@ class BoardProvider {
    * `claude-vscode.editor.open` honours claudeCode.preferredLocation only when its sixth
    * argument marks the call as programmatic; called bare it opens an editor tab and rewrites
    * the preference to "panel". `primaryEditor.open` is the fallback (always an editor tab).
+   *
+   * `prompt`, when given, is passed as the command's own second argument (the Steps
+   * viewer's "Send to session" hand-over). The call without a prompt keeps its exact six
+   * arguments unchanged (a regression the host suite pins), since `undefined` and an omitted
+   * argument are the same thing to `executeCommand` either way, but writing it out keeps that
+   * guarantee visible in the source rather than resting on an engine detail.
+   *
+   * Returns true when `editor.open` ran, false when nothing could open the session, and
+   * 'without-prompt' when a prompt was given but only the fallback worked: that command takes no
+   * prompt, so the session is open and the text is not in its chat box.
    */
-  async revealHere(sessionId) {
+  async revealHere(sessionId, prompt) {
     const honour = { programmatic: 'honor-preferred-location' };
     try {
-      await vscode.commands.executeCommand('claude-vscode.editor.open', sessionId, undefined, undefined, undefined, undefined, honour);
+      if (prompt === undefined) {
+        await vscode.commands.executeCommand('claude-vscode.editor.open', sessionId, undefined, undefined, undefined, undefined, honour);
+      } else {
+        await vscode.commands.executeCommand('claude-vscode.editor.open', sessionId, prompt, undefined, undefined, undefined, honour);
+      }
       this.log.info('revealed ' + sessionId + ' via claude-vscode.editor.open');
       return true;
     } catch (e) {
@@ -289,11 +376,141 @@ class BoardProvider {
     try {
       await vscode.commands.executeCommand('claude-vscode.primaryEditor.open', sessionId);
       this.log.info('revealed ' + sessionId + ' via claude-vscode.primaryEditor.open');
-      return true;
+      return prompt === undefined ? true : 'without-prompt';
     } catch (e) {
       this.log.warn('claude-vscode.primaryEditor.open failed: ' + String((e && e.message) || e));
       return false;
     }
+  }
+
+  // -- send to session (the steps-service "deliver" hand-over) ---------------------------
+
+  /**
+   * The Claude Code extension version from which `claude-vscode.editor.open`'s prompt argument
+   * is known to fill the chat box (read from the 2.1.322 webview code): below it, or when the extension is
+   * missing altogether, hand-over is never attempted and the text goes to the clipboard plus
+   * the existing open instead.
+   */
+  static get STEER_MIN_CLAUDE_VERSION() { return '2.1.322'; }
+
+  /** Whether this window's own Claude Code extension is new enough for prompt hand-over. */
+  claudeHandOverOk() {
+    const ext = vscode.extensions.getExtension('anthropic.claude-code');
+    const version = ext && ext.packageJSON && ext.packageJSON.version;
+    return Boolean(version) && core.versionAtLeast(version, BoardProvider.STEER_MIN_CLAUDE_VERSION);
+  }
+
+  /** A stowed transcript is restored first, the way copyResume does, before anything else about
+   *  the session (its window, whether it is running) is decided from it. */
+  async restoreStowedForDeliver(sessionId) {
+    if (!core.stowedTranscripts(sessionId).length) return;
+    try {
+      const r = await core.unarchiveSession(sessionId);
+      this.log.info('unarchive ' + sessionId + ' (send to session)' + (r && r.restoredTo ? ': ' + r.restoredTo : ''));
+    } catch (e) {
+      this.log.warn('unarchive ' + sessionId + ' (send to session) failed: ' + String((e && e.message) || e));
+    }
+  }
+
+  /**
+   * The steps service's `deliver(sessionId, text, meta)`: the text always lands on the clipboard; whether it
+   * also reaches the session's own chat box depends on where the session runs and whether this
+   * window's Claude Code is new enough (filling the box cannot be
+   * guaranteed on an older or missing extension). Returns { ok, message } where message is
+   * exactly the line steps.html shows under the note.
+   *   - a terminal or background session (no VS Code window at all): clipboard only.
+   *   - owned by this window: hand-over here when claudeHandOverOk(), else clipboard only.
+   *   - owned by another window: a one-shot claim plus the board's own /steer route, when that
+   *     window runs a board 0.12.0 or newer; otherwise clipboard only (that window's Claude
+   *     Code version cannot be known from here, so the fallback is the same as "unknown").
+   *   - not running: resumed by the same call (revealHere / the /steer hand-over both resume a
+   *     session that is not alive, the way Claude Code's own editor.open already does).
+   * `ok: true` only when the text reached a chat box, not merely the clipboard: noteSend/
+   * notesSendAll record a "sent" mark on that signal, and clipboard-only is not a sent note.
+   */
+  async deliverToSession(sessionId, text, meta) {
+    await this.restoreStowedForDeliver(sessionId);
+    await vscode.env.clipboard.writeText(text);
+    const clipboardOnly = (message) => ({ ok: false, message: message || 'On the clipboard. Paste it into the session.' });
+
+    const row = this.sessionRow(sessionId);
+    if (!row || !row.window) {
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): no VS Code window, clipboard only');
+      return clipboardOnly();
+    }
+    // A running session is placed by its process. An ended one has no process; its row carries
+    // the window whose folder holds it, and opening it there resumes it.
+    const pid = Number(row.pid);
+    const running = Number.isInteger(pid) && pid > 0;
+    const owner = running ? await core.exthostForPid(pid) : (Number(row.window.exthostPid) || null);
+    if (owner === process.pid) {
+      if (!this.claudeHandOverOk()) {
+        this.log.info('send to session ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION + ', clipboard only');
+        return clipboardOnly();
+      }
+      const revealed = await this.revealHere(sessionId, text);
+      if (revealed === 'without-prompt') {
+        this.log.info('send to session ' + sessionId + ': opened by the fallback, which takes no text; clipboard only');
+        return clipboardOnly('The session is open, but the note could not be put into its chat box. It is on the clipboard: paste it there.');
+      }
+      if (!revealed) return clipboardOnly();
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): delivered in this window');
+      return { ok: true, message: 'In the chat box and on the clipboard.' };
+    }
+    const win = running ? await core.windowForPid(pid) : { windowId: row.window.id, exthostPid: Number(row.window.exthostPid) || null };
+    if (!win || !win.exthostPid) return clipboardOnly();
+    const board = core.boardAlive(win.exthostPid);
+    if (!board || !core.versionAtLeast(core.boardVersion(win.exthostPid), '0.12.0')) {
+      this.log.info('send to session ' + sessionId + ': owning window has no current board, clipboard only');
+      return clipboardOnly();
+    }
+    const claimId = core.writeSteerClaim(text);
+    try {
+      await core.steerToWindow(sessionId, win.windowId, board, claimId);
+    } catch (e) {
+      this.log.warn('send to session ' + sessionId + ' failed to reach window ' + win.windowId + ': ' + String((e && e.message) || e));
+      return clipboardOnly();
+    }
+    // The URI was opened; whether the text reached a chat box is for the window that took the
+    // claim to say (its Claude Code may be too old, or its open may have failed).
+    const ack = await core.waitSteerAck(claimId);
+    if (ack && ack.ok) {
+      this.log.info('send to session ' + sessionId + ' (' + (meta && meta.kind) + '): window ' + win.windowId + ' confirmed');
+      return { ok: true, message: 'In the chat box and on the clipboard.' };
+    }
+    if (ack) {
+      this.log.info('send to session ' + sessionId + ': window ' + win.windowId + ' could not fill its chat box, clipboard only');
+      return clipboardOnly('The session\'s window could not put the note into its chat box. It is on the clipboard: paste it there.');
+    }
+    this.log.warn('send to session ' + sessionId + ': window ' + win.windowId + ' did not confirm');
+    return clipboardOnly('Handed to the session\'s window, which did not confirm. The note is on the clipboard as well.');
+  }
+
+  /**
+   * The owning side of a /steer hand-over: takeSteerClaim both reads and deletes the claim in
+   * one step, so a replayed or logged URI finds nothing the second time, and the text never
+   * comes from anywhere but that claim (never the URL's own query string). A malformed id, a
+   * missing claim or one past its 30-second window all simply do nothing, same as an /open on a
+   * session this window no longer has.
+   */
+  async handleSteerUri(uri) {
+    const params = new URLSearchParams(uri.query);
+    const sessionId = params.get('session') || '';
+    const claimId = params.get('note') || '';
+    if (!core.UUID_RE.test(sessionId)) return;
+    const text = core.takeSteerClaim(claimId);
+    if (text === null) { this.log.warn('steer ' + sessionId + ': no fresh claim for this URI'); return; }
+    await this.restoreStowedForDeliver(sessionId);
+    // the sender waits for this answer before it calls its note sent
+    let delivered = false;
+    if (!this.claudeHandOverOk()) {
+      this.log.warn('steer ' + sessionId + ': this window\'s Claude Code is below ' + BoardProvider.STEER_MIN_CLAUDE_VERSION);
+    } else {
+      const revealed = await this.revealHere(sessionId, text);
+      delivered = revealed === true;
+      if (!delivered) this.log.warn('steer ' + sessionId + (revealed ? ': opened by the fallback, which takes no text' : ': could not reveal the session in this window'));
+    }
+    core.writeSteerAck(claimId, delivered);
   }
 
   /** vscode://<this extension id>/open?session=<id>, routed here by windowId. */
@@ -304,6 +521,7 @@ class BoardProvider {
       if (core.UUID_RE.test(id)) await this.openClaudeRename(id);
       return;
     }
+    if (uri.path === '/steer') { await this.handleSteerUri(uri); return; }
     if (uri.path !== '/open') return;
     const sessionId = new URLSearchParams(uri.query).get('session') || '';
     if (!core.UUID_RE.test(sessionId)) return;
@@ -389,6 +607,275 @@ class BoardProvider {
     if (choice === 'Open folder in new window') {
       await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(cwd), { forceNewWindow: true });
     }
+  }
+
+  // -- steps panel -------------------------------------------------------------------------
+
+  /**
+   * "Steps" on a row: one webview panel per session (asking again reveals it), titled
+   * "Steps: <title>", wired so page messages reach stepsService.handle and service pushes
+   * (follow, indexing progress) reach the panel. Everything the service holds for this
+   * session (its index, its follow timer) is released once the panel is disposed and no
+   * other subscriber is left. The panel opens as one more tab in the editor group in use,
+   * where the chat tab is; it does not split the editor area (a tab can be dragged to the
+   * side when both are wanted at once).
+   */
+  async openSteps(sessionId) {
+    const existing = this.stepsPanels.get(sessionId);
+    if (existing) { existing.reveal(); return; }
+    const title = this.stepsSessionTitle(sessionId) || sessionId.slice(0, 8);
+    const panel = vscode.window.createWebviewPanel(
+      'sessionBoard.steps', 'Steps: ' + title, vscode.ViewColumn.Active,
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
+    );
+    this.stepsPanels.set(sessionId, panel);
+    panel.webview.html = this.stepsHtml(panel.webview, sessionId);
+    const unsubscribe = this.stepsService.subscribe(sessionId, (msg) => {
+      try { panel.webview.postMessage(msg); } catch (_) { /* panel gone */ }
+    });
+    panel.webview.onDidReceiveMessage(async (msg) => {
+      if (!msg || typeof msg !== 'object') return;
+      let reply;
+      try {
+        if (msg.type === 'openLink') reply = await this.openStepsLink(sessionId, msg.kind, String(msg.target || ''));
+        else if (msg.type === 'openText') reply = await this.openStepsFullText(sessionId, msg);
+        else if (msg.type === 'exportSave') reply = await this.saveStepsExport(msg);
+        else reply = await this.stepsService.handle(Object.assign({}, msg, { sessionId }));
+      } catch (e) {
+        // A request that failed is answered too. The page waits for the reply to each request
+        // and has nothing else to go by: without one, what it asked for stays "on its way".
+        reply = { type: String(msg.type || 'unknown') + 'Result', ok: false, message: String((e && e.message) || e) };
+      }
+      // the page matches a reply to its request by this id and by nothing else
+      if (reply && msg.requestId !== undefined && reply.requestId === undefined) reply = Object.assign({}, reply, { requestId: msg.requestId });
+      try { panel.webview.postMessage(reply); } catch (_) { /* panel gone */ }
+    });
+    panel.onDidDispose(() => {
+      unsubscribe();
+      this.stepsPanels.delete(sessionId);
+      this.stepsService.handle({ type: 'close', sessionId }).catch(() => { /* best effort */ });
+    });
+  }
+
+  /** Until extension/steps.html exists, a one-line placeholder loads in its place, through the
+   *  same CSP and nonce approach as the board page; the session id rides in its own meta tag,
+   *  the way index.html's board-token does, since the panel's postMessage channel carries only
+   *  the host's own replies, never an initial value the page can read before its first send. */
+  stepsHtml(webview, sessionId) {
+    const stepsHtmlPath = path.join(this.context.extensionPath, 'steps.html');
+    let html;
+    try {
+      html = fs.readFileSync(stepsHtmlPath, 'utf8');
+    } catch (_) {
+      html = '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+        + '<body style="font-family: sans-serif; padding: 2em;">Steps viewer coming soon.</body></html>';
+    }
+    const alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let nonce = '';
+    for (let i = 0; i < 32; i++) nonce += alphabet[Math.floor(Math.random() * alphabet.length)];
+    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+      + 'style-src ' + webview.cspSource + ' \'unsafe-inline\'; '
+      + 'script-src \'nonce-' + nonce + '\';">';
+    // sessionId is the board's own session id (already checked against core.UUID_RE before
+    // openSteps is ever called), but it is escaped and inserted through a replacer function
+    // all the same: a session id is still a value from outside this function's own control,
+    // and a plain replacement string would expand any $-pattern it happened to carry.
+    const sessionMeta = '<meta name="steps-session" content="' + escapeAttr(sessionId) + '">';
+    const headMeta = '<meta charset="utf-8">' + csp + sessionMeta;
+    html = html.replace('<meta charset="utf-8">', () => headMeta);
+    html = html.replace('<script>', () => '<script nonce="' + nonce + '">');
+    return html;
+  }
+
+  /**
+   * A link clicked in the Steps viewer. `kind: 'url'` opens only http and https with
+   * openExternal; anything else is refused rather than handed to the OS. `kind: 'path'` is
+   * resolved (absolute as given, `~` against the home directory, relative against the
+   * session's own working directory from the board's last snapshot when one is known), checked
+   * by `safeLocalFileUri` and, once that passes, `stat`-ed through the one `Uri` the check
+   * built: a folder is revealed in the OS file explorer, a file opens in an editor tab (a `.md`
+   * file with the Markdown preview instead), and a trailing `:line` or `#Lline` moves the
+   * cursor there. A path that does not exist, or that resolves outside anything the stat call
+   * can read, answers with a plain message the page shows; nothing here ever executes a file or
+   * passes a path to openExternal.
+   *
+   * A path is untrusted transcript text, not something the user typed, so it is resolved and
+   * shape-checked before anything touches it: `safeLocalFileUri` only allows a path rooted at a
+   * drive letter (Windows) or a single leading separator (elsewhere), which rules out every
+   * network form (UNC, mixed separators, an NT object path, either device prefix, or a value
+   * carrying its own URI scheme) by construction rather than by naming each one. Stat-ing a
+   * network path makes Windows contact the named host to authenticate, which can leak the
+   * user's NTLM credentials just because some text in a transcript looked like a path, so a
+   * refused path is never passed to `stat` at all. A path outside the session's own working
+   * directory, the open workspace folders and the home directory still opens, but only after
+   * asking once, since it is still a local path a legitimate link could reasonably point
+   * outside those (a `cd`'d-to build folder, say); only the network case has no way to proceed.
+   */
+  async openStepsLink(sessionId, kind, target) {
+    if (kind === 'url') {
+      if (!/^https?:\/\//i.test(target)) return { type: 'openLinkResult', ok: false, message: 'that link is not web or not openable here' };
+      try { await vscode.env.openExternal(vscode.Uri.parse(target)); return { type: 'openLinkResult', ok: true }; }
+      catch (e) { return { type: 'openLinkResult', ok: false, message: String((e && e.message) || e) }; }
+    }
+    if (kind !== 'path') return { type: 'openLinkResult', ok: false, message: 'unknown link kind' };
+    const m = /^(.*?)(?::(\d+)|#L(\d+))$/.exec(target);
+    const rawPath = m ? m[1] : target;
+    const line = m ? Number(m[2] || m[3]) : null;
+    // A value carrying its own URI scheme (file://host/..., or any other scheme://...) is
+    // refused on the raw text, before resolveStepsPath gets a chance to fold it into a
+    // relative path fragment under some trusted base, where it would read as harmless (nested
+    // under the session's own working directory, say) even though the author meant it as an
+    // absolute reference to somewhere else entirely; the resolved form is checked again below
+    // regardless, since a relative path or one with `..` segments must not reach a network
+    // path either.
+    // At least two characters before the "://": a single letter there is a Windows drive
+    // (`C://dir` is `C:/dir` with a doubled separator, still a plain local path), never a URI
+    // scheme in practice, so requiring two characters tells the two apart without a drive
+    // letter list of its own.
+    if (/^[A-Za-z][A-Za-z0-9+.-]{1,}:\/\//.test(rawPath)) return this.refuseNetworkPath(rawPath);
+    const resolved = this.resolveStepsPath(sessionId, rawPath);
+    const uri = safeLocalFileUri(resolved);
+    if (!uri) return this.refuseNetworkPath(resolved);
+    if (!this.isStepsPathTrusted(sessionId, uri.fsPath)) {
+      const choice = await vscode.window.showWarningMessage('Open ' + uri.fsPath + '?', { modal: true }, 'Open');
+      if (choice !== 'Open') return { type: 'openLinkResult', ok: false, message: 'cancelled' };
+    }
+    let stat;
+    try { stat = await vscode.workspace.fs.stat(uri); }
+    catch (_) { return { type: 'openLinkResult', ok: false, message: 'that path does not exist: ' + uri.fsPath }; }
+    try {
+      if (stat.type === vscode.FileType.Directory) {
+        await vscode.commands.executeCommand('revealFileInOS', uri);
+        return { type: 'openLinkResult', ok: true };
+      }
+      if (/\.md$/i.test(uri.fsPath)) {
+        await vscode.commands.executeCommand('markdown.showPreview', uri);
+        return { type: 'openLinkResult', ok: true };
+      }
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const editor = await vscode.window.showTextDocument(doc);
+      if (line && editor && editor.selection !== undefined) {
+        // best-effort cursor placement; a fake editor in a test has no selection API to call.
+        const pos = new vscode.Position(Math.max(0, line - 1), 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        if (editor.revealRange) editor.revealRange(new vscode.Range(pos, pos));
+      }
+      return { type: 'openLinkResult', ok: true };
+    } catch (e) {
+      return { type: 'openLinkResult', ok: false, message: String((e && e.message) || e) };
+    }
+  }
+
+  /** A network path is refused outright, never stat-ed or opened; the page copies it instead. */
+  async refuseNetworkPath(p) {
+    await vscode.env.clipboard.writeText(p);
+    return { type: 'openLinkResult', ok: false, message: 'Network paths are not opened from here. The path is on the clipboard.' };
+  }
+
+  /** True when `resolved` sits inside the session's own working directory, an open workspace
+   *  folder, or the home directory: the roots a link can open without asking first. */
+  isStepsPathTrusted(sessionId, resolved) {
+    const row = this.sessionRow(sessionId);
+    const roots = [];
+    if (row && row.cwd) roots.push(row.cwd);
+    for (const f of vscode.workspace.workspaceFolders || []) if (f && f.uri && f.uri.fsPath) roots.push(f.uri.fsPath);
+    roots.push(require('os').homedir());
+    return roots.some((root) => core.isInside(resolved, root) || path.resolve(resolved) === path.resolve(root));
+  }
+
+  /** Absolute as given, `~` against the home directory, else relative against the session's
+   *  own working directory from the board's last snapshot (when known; otherwise unresolved,
+   *  which the later stat call then simply fails on). */
+  resolveStepsPath(sessionId, rawPath) {
+    if (path.isAbsolute(rawPath)) return rawPath;
+    if (rawPath === '~' || rawPath.startsWith('~/') || rawPath.startsWith('~\\')) {
+      return path.join(require('os').homedir(), rawPath.slice(1));
+    }
+    const row = this.sessionRow(sessionId);
+    const base = row && row.cwd ? row.cwd : null;
+    return base ? path.resolve(base, rawPath) : rawPath;
+  }
+
+  /** "Open full text" from the Steps page. The page names the step: its own copy of the text
+   *  is cut at 200 KB, so the whole text is read here, through the service, from the
+   *  transcript. A message that carries a text and no step is opened as it is. */
+  async openStepsFullText(sessionId, msg) {
+    const title = String(msg.title || '');
+    if (msg.stepId === undefined) return this.openStepsText(title, String(msg.text || ''));
+    const ask = { type: 'fullText', sessionId, stepId: String(msg.stepId) };
+    if (msg.generation !== undefined) ask.generation = msg.generation;
+    const full = await this.stepsService.handle(ask);
+    if (!full || !full.ok) return { type: 'openTextResult', ok: false, message: (full && full.message) || 'the text of that step could not be read' };
+    return this.openStepsText(title, String(full.text || ''));
+  }
+
+  /** Opens a text as an untitled document in an editor tab. */
+  async openStepsText(title, text) {
+    try {
+      const doc = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });
+      await vscode.window.showTextDocument(doc);
+      return { type: 'openTextResult', ok: true };
+    } catch (e) {
+      return { type: 'openTextResult', ok: false, message: String((e && e.message) || e) };
+    }
+  }
+
+  /**
+   * exportSave { format: 'md' | 'pdf', name, content }: the story as the Steps page wrote it
+   * out, saved where the save dialog says. Markdown is written as it is. For a PDF the
+   * content is a page that a browser of this machine prints (pdf.cjs). On a machine without
+   * such a browser the dialog asks for an .html file instead and says why: the page itself
+   * is saved there and opened in the default browser, to be printed from there. Both ways
+   * the page is sealed first, so nothing in it runs or loads. The only file written is the
+   * one the dialog named.
+   */
+  async saveStepsExport(msg) {
+    const reply = { type: 'exportSaveResult' };
+    const format = msg.format === 'pdf' ? 'pdf' : 'md';
+    const content = typeof msg.content === 'string' ? msg.content : '';
+    if (!content) return Object.assign(reply, { ok: false, message: 'There is nothing to export.' });
+    const asPage = format === 'pdf' && !this.findPdfBrowser();
+    const ext = format === 'md' ? 'md' : asPage ? 'html' : 'pdf';
+    const folders = vscode.workspace.workspaceFolders || [];
+    const dir = folders.length && folders[0].uri && folders[0].uri.fsPath ? folders[0].uri.fsPath : require('os').homedir();
+    const target = await vscode.window.showSaveDialog({
+      title: asPage ? 'No Chrome, Edge or Chromium to print a PDF with: save the story as a page and print it from your browser' : 'Export the story',
+      defaultUri: vscode.Uri.file(path.join(dir, exportFileName(msg.name) + '.' + ext)),
+      filters: ext === 'md' ? { Markdown: ['md'] } : ext === 'pdf' ? { PDF: ['pdf'] } : { 'Web page': ['html'] },
+    });
+    if (!target) return Object.assign(reply, { ok: false, cancelled: true });
+    const saved = target.fsPath;
+    try {
+      if (ext === 'md') {
+        await fs.promises.writeFile(saved, content, 'utf8');
+      } else if (ext === 'html') {
+        const sealed = pdf.sealHtml(content);
+        if (!sealed) return Object.assign(reply, { ok: false, message: 'The page to save has no head.' });
+        await fs.promises.writeFile(saved, sealed, 'utf8');
+        await vscode.env.openExternal(vscode.Uri.file(saved));
+        return Object.assign(reply, { ok: true, message: 'No Chrome, Edge or Chromium was found to print a PDF with. The story is saved as '
+          + path.basename(saved) + ' and opened in your browser: print it to PDF there.' });
+      } else {
+        const printed = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: 'Printing the story to a PDF' },
+          () => this.htmlToPdf(content, saved),
+        );
+        if (!printed.ok) return Object.assign(reply, { ok: false, message: printed.message });
+      }
+    } catch (e) {
+      return Object.assign(reply, { ok: false, message: 'The export could not be written: ' + String((e && e.message) || e) });
+    }
+    this.offerSavedExport(saved, format);   // a toast with Open and Show in folder; not waited for
+    return Object.assign(reply, { ok: true, message: 'Saved ' + saved });
+  }
+
+  offerSavedExport(file, format) {
+    const uri = vscode.Uri.file(file);
+    Promise.resolve(vscode.window.showInformationMessage('Saved ' + path.basename(file), 'Open', 'Show in folder')).then(async (choice) => {
+      if (choice === 'Show in folder') await vscode.commands.executeCommand('revealFileInOS', uri);
+      else if (choice === 'Open' && format === 'pdf') await vscode.env.openExternal(uri);
+      else if (choice === 'Open') await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+    }).catch((e) => { this.log.warn('export: ' + String((e && e.message) || e)); });
   }
 
   // -- ending ----------------------------------------------------------------------------

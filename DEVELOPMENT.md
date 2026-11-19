@@ -30,6 +30,11 @@ session-board/
     core.cjs                  data layer: sessions, transcript facts, window mapping, jump, end,
                               archive, search, usage limits and the signed-in account
     index.html                the page; runs in the webview and in a browser
+    steps.cjs                 transcript reader of the Steps tab: index, active path, steps, sections
+    steps-service.cjs         the Steps tab's messages: open, bodies, search, follow, notes, send
+    notes.cjs                 the notes store, one file per note
+    pdf.cjs                   the PDF export: finds a Chromium-based browser and prints a page with it
+    steps.html                the Steps page; runs in a webview panel and in a browser
     README.md                 Marketplace page
     CHANGELOG.md              one plain line per user-visible change, grouped by version
     media/                    icons and the README screenshots (rendered, never hand-edited)
@@ -39,7 +44,10 @@ session-board/
   server.cjs                  browser front end over the same core.cjs and index.html
   start.ps1                   runs server.cjs and opens the browser
   build.ps1                   tests, packages the .vsix with vsce 4 and installs it
-  tools/screenshot.cjs        renders the README screenshots from index.html with example data
+  tools/screenshot.cjs        renders the README screenshots with example data: the board from
+                              index.html, the Steps tab from steps.html over the real steps service
+  tools/chrome.cjs            starts, drives and stops a headless Chromium (found by pdf.cjs's
+                              findBrowser); used by the screenshot tool and by both page suites
   tools/release-notes.cjs     prints one CHANGELOG section, used by the release workflow
   .github/workflows/release.yml   builds and attaches the .vsix to a GitHub Release on a version tag
   LICENSE                     MIT, covers the root files too
@@ -80,8 +88,9 @@ the flag back as visible.
 ## Tests
 
 ```powershell
-cd extension; npm test          # node --test "tests/*.test.cjs"; build.ps1 runs this too
-node tools/screenshot.cjs       # refresh extension/media/board.png and search.png
+cd extension; npm test          # node tests/run.cjs: the suites in parallel, then the two page suites alone; build.ps1 runs this too
+node tools/screenshot.cjs       # refresh extension/media/board.png, search.png and steps.png
+node tools/screenshot.cjs steps # only the pictures named
 ```
 
 Every suite isolates the board's data directory by setting `LOCALAPPDATA` and `XDG_DATA_HOME`
@@ -145,6 +154,39 @@ installed.
   window owns a session), an unreadable Claude Code archive, the show store and its 0.11.2
   file, `archivePast()`.
 - `server-order.test.cjs`: `server.cjs` as a child process answering the order, show and archive routes.
+- `shim/transcript.cjs`: the transcript line constructors that `steps.test.cjs` and
+  `steps-service.test.cjs` share.
+- `steps.test.cjs`: `steps.cjs` against JSONL written into a temp dir: the active path across a
+  retry and a compaction, split responses, tool results off the path, questions and their
+  answers, a message typed mid-turn, backward reading in chunks (progress calls and bytes
+  read follow the file size, not the line count), growth, a partial last line, sections,
+  active time and the figures of a section's facts line.
+- `pdf.test.cjs`: `pdf.cjs` with a function in place of the browser (the arguments, the sealed
+  page, no file left after a failed print), and one print with a browser of the machine
+  when there is one.
+- `steps-service.test.cjs`: `steps-service.cjs` with a fake timer: the first reply before the
+  whole index, progress pushes spaced in time, every push carrying the compact records of the
+  steps it adds, follow, search (ripgrep faked, the Node scan, the 500 cap, notes), the seen
+  marker, the note messages and the hand-over text.
+- `notes.test.cjs`: the notes store: one file per note, sent records as files of their own,
+  the 16 KB cap, an edit racing a delete, two writers at once, pruning.
+- `steps-host.test.cjs`: the Steps panel of `extension.js` against the fake `vscode`: one panel
+  per session, links (web, folder, file, Markdown, `file:line`, refused network paths, the
+  question for a path outside the trusted folders), `revealHere()` with and without a prompt,
+  `deliverToSession()` on every branch, and the `/steer` claim (fresh, stale, replayed).
+- `server-steps.test.cjs`: `server.cjs` as a child process: the `/steps` page (nonce, nothing
+  injected from the query), `POST /api/steps` with its 64 KB limit, the poll route, notes
+  over HTTP and the copy-only answer to a send.
+- `steps-page.test.cjs`: `steps.html` in headless Chrome like `page.test.cjs`, against scripted
+  replies. A few tests set `fake.service` to the real `steps-service.cjs` over a transcript
+  written in the test, so the page is checked against what the reader really sends; the
+  sampler's `notices` lists every notice the page showed, which names the cause of a timeout.
+  One test covers the VS Code transport end to end: it serves the panel's own html with a
+  stand-in for `acquireVsCodeApi` and passes the page's messages through the panel handler
+  of `extension.js` (booted by the host shim), with the real service and reader behind it.
+  The page matches a reply to its request by `requestId` there, so a reply without it hangs;
+  the panel handler therefore answers a request whose handling threw as well (`ok: false`
+  with the message).
 
 A change comes with a test in the matching suite. New CLI behaviour gets a shim mode, not a
 real `claude` call; new page behaviour gets a scripted snapshot in the page suite.
@@ -366,6 +408,173 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   (tmp then rename). It answers `claude-owned` for a session running in a window or in a
   terminal whose registry record says `nameSource: "user"`.
 
+- **Steps**: ≡ sends `steps`; the host opens one webview panel per session as a tab in the
+  editor group in use (`ViewColumn.Active`, so the editor area is not split;
+  `retainContextWhenHidden`, not restored after a reload) on `steps.html` and passes every
+  page message to `createStepsService().handle()`, whose pushes go back through
+  `subscribe()`. `server.cjs` mounts the same service behind `POST /api/steps` (JSON body,
+  64 KB, the one route that parses a body) and `GET /api/steps/poll?session=&after=<seq>`.
+  A browser tab cannot say that it closed, so `server.cjs` knows a viewer by its requests
+  and releases it after ten 30 s ticks without one (ticks, not the clock, so a machine that
+  slept does not wake to released tabs). Only an `open` starts a viewer; the next poll of a
+  released tab, or its next request that reads the transcript, answers `expired`, and the
+  page opens the session again, keeping the reader's place. In a browser the open reply and
+  the pushes travel on requests of their own, and the queue a page polls from zero may hold
+  pushes from before it opened (a second tab, a reload). The page keeps to the newest
+  state by two rules in `onPush`: a push that arrives while an open is on its way waits and
+  is applied after the reply, and a push numbered at or below the reply's `pushSeq` (how
+  far the queue had come when the open came in, set by `server.cjs`) is left out.
+  - Reader (`steps.cjs`, no `vscode`): `createStepIndex(file)` reads the transcript from its
+    end, the last 2 MB first and then 1 MB chunks with a `setImmediate` between them, always
+    whole lines. Per tree line (`user`, `assistant`, `system`, `attachment` with a `uuid`) it
+    keeps a small node (parent ids, offset, length) and the step records that line gives,
+    worked out once while the parsed line is in hand; texts and tool results stay on disk
+    and are read by offset when the page asks (`body()`), a tool result through the offset
+    of the line that carries it. The tip is the newest non-sidechain node in file order;
+    the path runs back through `parentUuid` and, across a compaction, `logicalParentUuid`.
+    `poll()` reads what the file gained; a changed file identity or a smaller size starts a
+    new generation and a body asked for with an old one answers `stale`. A poll also names
+    the steps already on the path whose result came in with it (`updated`): the answer to
+    a question, a plan's approval, a tool's output, a subagent's report. `fullText()` is a
+    step's whole text, past the 200 KB at which `body()` cuts.
+  - Step kinds: `you` (also a message typed mid-turn, stored as a `queued_command`
+    attachment with a human origin), `text`, `update` (a `thinking` block that has text: the
+    reworded short line the chat showed between tool calls), `reasoning` (an empty
+    `thinking` block), `tool`, `subagent`, `question`, `plan`, `compaction`, `error`,
+    `interrupted`, `other` (a kind the reader does not know).
+  - `buildSections()` cuts the steps where the owner said something: section kinds `lead`,
+    `you`, `question` (an answered one), `approve`. Rows are `text`, `update`, `question`,
+    `plan`, `error`, `compaction`, `interrupted` and `work` (a run of `tool`, `reasoning`,
+    `subagent` and `other` steps, named by id). A section carries its active time, tool calls
+    and files changed; the strip carries the totals. Active time is the sum of the gaps
+    between consecutive steps, each counted up to 10 minutes.
+  - Service: `open` answers after the tail pass with `indexing: true`; the rest arrives as
+    `stepsProgress` pushes, at most one per 500 ms, the last with `done: true`. While a viewer
+    is open a timer polls the file once a second and pushes `stepsChanged`, also for a
+    result that adds no step. Every push carries the generation of its steps and the ids of
+    the updated ones; the page drops the bodies it holds for those, and all of them on a
+    new generation, and reads them again. A section list
+    names steps by id only, so every push carries the compact records (kind, time, preview,
+    title) of the steps it adds; the page draws rows and Work lines from those and asks for
+    texts in batches (`bodies`) for the sections in view. The index lives while a viewer
+    is subscribed.
+  - Search: `rg --byte-offset --only-matching --fixed-strings --ignore-case` with the query
+    and its JSON-escaped form (never `--json`: one stored line can run to megabytes); the
+    offset of a hit names every step whose text comes from that line (`sourceRanges()`: the
+    step's own line, the line of its result, the line a subagent's report came in), found
+    by bisection over the sorted offsets; candidates are confirmed against the text the
+    page shows, 500 at most. Without ripgrep the same scan runs in Node over the bytes of
+    the file, one line at a time, so memory stays at one line and offsets stay byte
+    offsets. Notes are searched too. A ripgrep run that fails or stops at its output limit
+    is not taken for the whole answer: the Node scan runs instead. A candidate whose body is
+    cut at 200 KB is confirmed against its whole text. Each viewer has one search running
+    (`viewerId`): a new query replaces that viewer's own search, not the search of another
+    tab on the same session.
+  - Following: one poll at a time per session (`s.polling`), and what a poll finds is
+    dropped when its viewer closed or its index was replaced while it ran. A transcript
+    that moved (a session stowed or brought back) is not "gone": the service asks
+    `resolveTranscript` again, tells the viewer `moved` once, and the page opens the
+    session again, which builds the index on the file where it is now. Both hosts resolve
+    with `core.transcriptOf`: the path of the filename index only while that file is there,
+    else a look at the two roots, since the index is up to a minute old and only the
+    process that moves a transcript reads it anew. An indexing pass tells the viewers of
+    its own index only (`s.index === idx`): one whose transcript moved away ends without a
+    word and leaves the indexing of the new index alone. With each tick the
+    service also looks at the notes of the session and tells the viewers when they differ
+    from what it told last, so a note kept in another window shows up here; the same look
+    is taken when a further viewer opens the session, whose reply would otherwise be the
+    only one to carry the change. During the
+    backward pass a progress push is followed by a pause of twenty times what it took to
+    build (`PROGRESS_COST_FACTOR`), which keeps the pushes rare on a very large transcript.
+  - Page (`steps.html`): text is inserted as text nodes; the Markdown renderer builds DOM
+    nodes and there is no `innerHTML` assignment. Both hosts serve it with a CSP whose
+    script source is a per-response nonce. Only the sections around the anchor hold their
+    rows: about 400 rows (`ROW_BUDGET`), never fewer than three sections and never more
+    than 60 on each side; two spacers of estimated height stand for the rest. Rows and
+    heights are counted as the view in use draws them (`drawnBody`: under Decisions a
+    section is its opening message, its questions and its plans). Scrolling
+    toward a spacer draws the window anew around the section at the top of the viewport
+    and holds that row where it was; a jump into a spacer draws the window around the
+    section that place names. The mark on the current hit or note is state
+    (`curHitStep`), drawn after every redraw. A jump to a hit or a note that the view in
+    use does not draw goes to the whole story; a note whose step left the path has a row
+    under Notes only (with the id a row of that step would have), so a jump to it goes
+    there. Which texts to fetch is decided by bounding boxes against
+    the reader's, never by `offsetTop` (that is relative to the row). A text cut at 200 KB
+    is opened in full by naming its step: `openText` with a `stepId`, which the host reads
+    through `fullText`. An open note box keeps its draft in the page state, because every
+    push redraws the reader.
+  - Export: both formats are built in the page, from the sections of the view in use
+    (`visibleSections`, `drawnBody`), so an export holds what the view shows, in the same
+    words, the notes off the current path of the Notes view included. The view (lens, Tool
+    calls, opened Work lines) is taken once when the export starts (`exportView`) and put
+    in place of the state only while the export picks its sections and builds
+    (`withExportState`), so a switch of the tab while the texts are read changes nothing.
+    A transcript that is still being indexed is not exported. The page reads the bodies it
+    needs in batches with `bodies` and `forExport` (every text whole, a tool call without
+    its result; `exportBody` in `steps.cjs`) into a map of its own, which stands in for
+    `state.bodies` while it builds, so the reader keeps the cut texts it shows. A message
+    of yours goes into that map without the `pasted_content` tags around a paste
+    (`withoutPasteTags`). The report of a subagent is the result of a call: an export
+    writes it only where the view lists what the Work line ran or the report was opened
+    (`reportShown`; `state.buildingExport` is true only inside `withExportState`, unlike
+    `state.exporting`, which spans the whole run and its waits). The
+    Markdown is written by `buildExportMarkdown`; headings inside a text are made smaller,
+    except inside a code fence, which only its own marker closes. The PDF starts as a page:
+    `buildExportPage` runs every section through the row builders the reader uses and
+    serialises the result with the page's own style sheet (`html.export` rules: light
+    colours, nothing folded, nothing scrolls), without buttons and without script. The
+    sheet is taken by its id (`pageStyle`): in a VS Code webview the first style sheet of
+    the document is one VS Code puts there, and the page suite's webview route puts an
+    excerpt of it in front for that reason. On
+    paper each kind of row has a colour of its own (a filled chip, a tint, an edge; the
+    `--claude`, `--work` and `*-tint` values exist only under `html.export`), and
+    `print-color-adjust: exact` keeps them when a print dialog would drop backgrounds. In VS
+    Code the page sends `exportSave` with the content; the host asks where to save
+    (`showSaveDialog`), writes Markdown as it is, and prints a PDF through `pdf.cjs`:
+    the page is sealed with a content policy that lets nothing run or load, written to a
+    temp folder and printed by a headless Chrome, Edge or Chromium on a profile of its
+    own (`findBrowser`, `SESSION_BOARD_BROWSER` to name one); the PDF is copied to its
+    place only when it starts and ends as one. The host looks for the browser before it
+    asks where to save: without one the dialog asks for an `.html` file and says why, the
+    sealed page is saved there and opened in the default browser. The only file an export
+    writes is the one the dialog named. A browser needs no
+    host for this: it downloads the Markdown and prints the page from a window of its own
+    (the 64 KB limit of `POST /api/steps` would not take the content anyway).
+  - Links: the page sends `openLink` with a kind. `http` and `https` go to `openExternal`.
+    A path is transcript text, not something the user typed: it is resolved against the
+    session's folder, must then be a drive-letter path on Windows (one leading slash
+    elsewhere), is refused and copied when it is a network or device path, asks first when
+    it lies outside the session's folder, the workspace folders and the home folder, and
+    is then revealed (folder), previewed (Markdown) or opened in the editor. Nothing is run.
+  - Notes (`notes.cjs`): `notes\<sessionId>\<noteId>.json` = `{ id, stepId, at, text }`, tmp
+    then rename, 16 KB at most; a send is recorded as `<noteId>.sent.<at>-<random>.json`, so
+    two windows never rewrite one list. An edit is last writer wins and writes only while
+    the note file exists. A delete writes `<noteId>.deleted` first, before it looks at the
+    folder or removes a file, and an edit or a send record that finds that mark after its
+    own write removes what it wrote, so a delete in between never brings a note back and an
+    edit never reports a note the delete then takes. Notes go when the transcript is gone
+    from both roots: `snapshot()` prunes them, after `transcriptGone()` has looked at the
+    disk itself, because the filename index is up to a minute old and a root or a project
+    folder that cannot be read proves nothing (only "no such file" counts as gone;
+    `pruneDead` does nothing without that check). A step can hold more than one note (two
+    windows each kept one): the page's box edits the first and shows the others under it. The last step in view is kept in `steps-seen\<id>.json`.
+  - Send to session: the text is `About your step at <HH:MM> ("<first 120 chars>"): <note>`
+    and always goes to the clipboard. In the owning window `revealHere(sessionId, prompt)`
+    passes it as the second argument of `claude-vscode.editor.open`, which fills the chat
+    input from Claude Code 2.1.322 on (`STEER_MIN_CLAUDE_VERSION`); the call without a prompt
+    keeps its six arguments. For another window the sender writes a one-shot claim
+    `steers\<claimId>.json` and opens `vscode://<board>/steer?session=&windowId=&note=<claimId>`;
+    the owning board (0.12.0 or newer, by its heartbeat) takes the claim when it is younger
+    than 30 s and deletes it, so the text never rides in a URL and a replayed URI does
+    nothing. It then writes `steers\<claimId>.ack` with whether the text reached its chat
+    box; the sender waits up to 8 s (`waitSteerAck()`) and marks the note as sent only on a
+    yes. `revealHere()` answers `'without-prompt'` when only `primaryEditor.open` worked,
+    which takes no text, and that is not a sent note either. An ended session has no
+    process and is placed by the window its row names. Everything else (older Claude Code,
+    a terminal session, an old board, the browser page) is clipboard plus the existing
+    open.
+
 ## Where a change goes
 
 - To show something new on a row, enrich the row in `snapshot()` (core.cjs), render it in
@@ -375,6 +584,11 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   `server.cjs`, and the page's `send()`/`api()` pair. The host answers with a `<name>Result`
   message that carries the session id or request id the page used, so a late or foreign reply
   never changes the page's state; the ↻ lifecycle comment in index.html shows the pattern.
+- Something new in the Steps tab: a new step kind starts in `stepSpecsOf()` (steps.cjs), is
+  placed by `buildSections()` and drawn in `steps.html`; a new action is a message type in
+  `steps-service.cjs`, which both hosts already route. Check it once in the page suite with
+  `fake.service` set to the real service: scripted replies alone let the page and the reader
+  drift apart.
 - The usage strip is `parseUsageResponse()`, `parseAuthStatus()` and `usageState()` in
   core.cjs plus `renderUsage()` in index.html; each new reply shape gets a shim mode.
 - Anything that reads Claude Code's files or CLI output reads undocumented internals. Validate
