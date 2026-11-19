@@ -190,9 +190,10 @@ async function serve(req, res) {
     // real reader and not by a scripted reply
     if (fake.service) return json(res, 200, await fake.service.handle(msg));
     if (msg.type === 'open') {
+      const pushSeq = fake.pushes.length;   // as server.cjs: how far the queue had come when the open came in
       const base = await fake.open();   // a test may hold the reply back
       const notes = base.notes && base.notes.length ? base.notes : noteList();
-      return json(res, 200, Object.assign({ requestId: msg.requestId }, base, { notes }));
+      return json(res, 200, Object.assign({ requestId: msg.requestId, pushSeq }, base, { notes }));
     }
     if (msg.type === 'body') return json(res, 200, Object.assign({ type: 'bodyResult', sessionId: msg.sessionId, stepId: msg.stepId }, fake.body(msg.stepId)));
     if (msg.type === 'bodies') return json(res, 200, { type: 'bodiesResult', sessionId: msg.sessionId, generation: msg.generation, items: await fake.bodies(msg.stepIds || [], msg) });
@@ -1500,6 +1501,8 @@ test('page: a push that overtakes the open reply is applied after it: the end of
   // the reply was taken at first paint, when only the end of the transcript was indexed, and is slow on its way
   fake.open = async () => { await held; return openReply({ steps: steps.slice(2), sections: [whole[0], whole[2]], indexing: true }); };
   const page = await openPage(A);
+  for (let i = 0; i < 100 && !fake.calls.some((m) => m && m.type === 'open'); i++) await sleep(50);
+  assert.ok(fake.calls.some((m) => m && m.type === 'open'), 'the open is on its way');
   // meanwhile the indexing finished, and the push that says so reaches the page first
   fake.pushes.push({ type: 'stepsProgress', sessionId: A, generation: 1, fraction: 1, done: true, sections: whole, strip: { activeTimeMs: 60000, sections: 3, decisions: 0, filesChanged: 0 }, steps });
   for (let i = 0; i < 100 && !(await page.eval('typeof pollAfter === "number" && pollAfter >= 1')); i++) await sleep(50);
@@ -1516,6 +1519,43 @@ test('page: a push that overtakes the open reply is applied after it: the end of
   const saved = await page.eval('window.__saved[0]');
   assert.ok(saved, 'the export came out: ' + JSON.stringify((await page.sample()).notices));
   assert.ok(saved.text.indexOf('body of u1:0') !== -1 && saved.text.indexOf('body of u2:0') !== -1, 'with both turns');
+  await page.close();
+});
+
+test('page: a push that was queued before the page opened is older than its open reply and is left out, whichever of the two arrives first', opts, async () => {
+  const steps = [step('u1:0', 'you'), step('t1:0', 'text')];
+  const sections = [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }])];
+  // another tab had this session open; its queue still holds an error from a moment when the
+  // transcript was away, and a list of sections from before the last turn
+  const stale = () => {
+    fake.pushes.push({ type: 'stepsChanged', sessionId: A, generation: 1, sections: [sections[0]], strip: { activeTimeMs: 0, sections: 1, decisions: 0, filesChanged: 0 }, steps: [] });
+    fake.pushes.push({ type: 'stepsChanged', sessionId: A, error: 'transcript moved or removed' });
+  };
+  const shown = (page) => page.eval('({ text: document.getElementById("readerInner").textContent, after: pollAfter })');
+  // the reply first, the old pushes with the first poll after it
+  stale();
+  fake.open = () => openReply({ steps, sections });
+  let page = await openPage(A);
+  await page.until((x) => x.sectionHeadings.length >= 2 && x.rowsInView > 0, 'the story');
+  for (let i = 0; i < 100 && (await shown(page)).after < 2; i++) await sleep(50);
+  await sleep(300);
+  let s = await shown(page);
+  assert.equal(s.after, 2, 'the page has read the queue');
+  assert.equal(s.text.indexOf('transcript moved'), -1, 'the old error is not shown over the story');
+  assert.equal((await page.sample()).sectionHeadings.length, 2, 'and the old list of sections did not replace the newer one');
+  await page.close();
+  // the old pushes first, the reply after them
+  let letGo = null;
+  const held = new Promise((resolve) => { letGo = resolve; });
+  fake.open = async () => { await held; return openReply({ steps, sections }); };
+  page = await openPage(A);
+  for (let i = 0; i < 100 && !(await page.eval('typeof pollAfter === "number" && pollAfter >= 2')); i++) await sleep(50);
+  letGo();
+  await page.until((x) => x.sectionHeadings.length >= 2 && x.rowsInView > 0, 'the story');
+  await sleep(300);
+  s = await shown(page);
+  assert.equal(s.text.indexOf('transcript moved'), -1, 'the old error is not applied after the reply either');
+  assert.equal((await page.sample()).sectionHeadings.length, 2);
   await page.close();
 });
 
@@ -1592,14 +1632,16 @@ test('page: Export as PDF in a browser opens the story as a page of its own and 
 
 test('page: an export leaves the report of a subagent out until the calls of its Work line are listed, and shows a pasted message without the tags around the paste', opts, async () => {
   const steps = [step('u1:0', 'you'), step('a1:0', 'subagent', { title: 'Explore', preview: 'Scout the code' }), step('b1:0', 'tool', { title: 'Bash' }),
-    step('x1:0', 'text'), step('u2:0', 'you')];
+    step('x1:0', 'text'), step('u2:0', 'you'), step('u3:0', 'you')];
   const sections = [section('lead', 'Session start', null, []),
     section('you', 'Task', 'u1:0', [{ kind: 'work', items: ['a1:0', 'b1:0'] }, { kind: 'text', stepId: 'x1:0' }]),
-    section('you', 'Look at this log:', 'u2:0', [])];
+    section('you', 'Look at this log:', 'u2:0', []),
+    section('you', 'Please review: and explain.', 'u3:0', [])];
   fake.open = () => openReply({ steps, sections });
   fake.bodies = (ids, msg) => ids.map((id) => {
     if (id === 'u1:0') return { stepId: id, text: '\n\n<pasted_content id="ab12">\n## Task\n\nDo the thing.\n</pasted_content id="ab12">', truncated: false, size: 80 };
     if (id === 'u2:0') return { stepId: id, text: 'Look at this log:\n<pasted_content id="cd34">\nline one\n</pasted_content id="cd34">\nWhy?', truncated: false, size: 80 };
+    if (id === 'u3:0') return { stepId: id, text: 'Please review: <pasted_content id="ef56">x = 1</pasted_content id="ef56"> and explain.', truncated: false, size: 80 };
     if (id === 'a1:0') return { stepId: id, title: 'Explore', description: 'Scout the code', prompt: 'look around', report: '## Report\n\nREPORT TEXT of the scout' };
     if (id === 'b1:0') return Object.assign({ stepId: id, title: 'Bash', input: '$ npm test' }, msg && msg.forExport ? {} : { result: 'all green' });
     return { stepId: id, text: 'body of ' + id, truncated: false, size: 10 };
@@ -1618,6 +1660,7 @@ test('page: an export leaves the report of a subagent out until the calls of its
   assert.equal(html.indexOf('pasted_content'), -1);
   assert.ok(md.indexOf('\n> ## Task\n>\n> Do the thing.\n') !== -1, 'a message that is a paste starts with the pasted text: ' + md);
   assert.ok(md.indexOf('\n> Look at this log:\n> Pasted:\n> line one\n>\n> Why?\n') !== -1, 'after typed words a line says where the pasted text starts, and an empty line where it ends: ' + md);
+  assert.ok(md.indexOf('\n> Please review:\n> Pasted:\n> x = 1\n>\n> and explain.\n') !== -1, 'a paste inside a sentence stands on lines of its own, apart from the words around it: ' + md);
   // the report opened in the tab: the export holds it
   await page.click('.report-box .showall');
   md = (await page.exportAs('md')).text;

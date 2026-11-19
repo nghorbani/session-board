@@ -416,7 +416,12 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   and releases it after ten 30 s ticks without one (ticks, not the clock, so a machine that
   slept does not wake to released tabs). Only an `open` starts a viewer; the next poll of a
   released tab, or its next request that reads the transcript, answers `expired`, and the
-  page opens the session again, keeping the reader's place.
+  page opens the session again, keeping the reader's place. In a browser the open reply and
+  the pushes travel on requests of their own, and the queue a page polls from zero may hold
+  pushes from before it opened (a second tab, a reload). The page keeps to the newest
+  state by two rules in `onPush`: a push that arrives while an open is on its way waits and
+  is applied after the reply, and a push numbered at or below the reply's `pushSeq` (how
+  far the queue had come when the open came in, set by `server.cjs`) is left out.
   - Reader (`steps.cjs`, no `vscode`): `createStepIndex(file)` reads the transcript from its
     end, the last 2 MB first and then 1 MB chunks with a `setImmediate` between them, always
     whole lines. Per tree line (`user`, `assistant`, `system`, `attachment` with a `uuid`) it

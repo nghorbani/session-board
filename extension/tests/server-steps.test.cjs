@@ -124,6 +124,26 @@ test('GET /api/steps/poll drains pushes queued for the session since a given seq
   assert.ok(seen, 'a stepsChanged push arrived through the poll route');
 });
 
+test('an open reply says how far the queue of pushes had come, so a page can leave out what is older than the reply', async () => {
+  const sid = uuid(21);
+  const file = path.join(slugDir, sid + '.jsonl');
+  fs.writeFileSync(file, line({ type: 'user', uuid: uuid(22), parentUuid: null, timestamp: new Date().toISOString(), message: { role: 'user', content: 'first' } }));
+  const first = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r1', sessionId: sid }) });
+  assert.equal(first.body.ok, true);
+  assert.equal(first.body.pushSeq, 0, 'nothing was queued before the first open');
+  fs.appendFileSync(file, line({ type: 'assistant', uuid: uuid(23), parentUuid: uuid(22), message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'reply' }] }, timestamp: new Date().toISOString() }));
+  let seq = 0;
+  for (let i = 0; i < 40 && !seq; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    const poll = await call('GET', '/api/steps/poll?session=' + sid + '&after=0');
+    if (poll.body.pushes && poll.body.pushes.length) seq = poll.body.seq;
+  }
+  assert.ok(seq >= 1, 'a push was queued');
+  // a second tab on the same session: its polling starts at zero and reads those pushes too
+  const second = await call('POST', '/api/steps', { body: JSON.stringify({ type: 'open', requestId: 'r2', sessionId: sid }) });
+  assert.ok(second.body.pushSeq >= seq, 'it is told that they are older than its reply: ' + second.body.pushSeq);
+});
+
 test('GET /steps serves the page with the token and session id in their meta tags', async () => {
   const r = await fetch('http://127.0.0.1:' + port + '/steps?session=' + A);
   assert.equal(r.status, 200);

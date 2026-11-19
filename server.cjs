@@ -336,7 +336,13 @@ async function handle(req, res) {
         return sendJson(res, 200, { type: String(msg.type) + 'Result', requestId: msg.requestId, ok: false, expired: true, message: 'this viewer was released; the page opens the session again' });
       }
     }
+    // An open reply says how far the queue of pushes had come when the open came in. A page
+    // starts its polling at zero, so a second tab on a session, or a tab loaded again, reads
+    // what was queued for the first; those pushes are older than its reply and it leaves
+    // them out by this number.
+    const pushSeq = msg.type === 'open' && sid ? ((pushQueues.get(sid) || {}).seq || 0) : null;
     const reply = await stepsService.handle(msg);
+    if (pushSeq !== null && reply && typeof reply === 'object') reply.pushSeq = pushSeq;
     return sendJson(res, 200, reply);
   }
 

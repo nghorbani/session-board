@@ -456,6 +456,7 @@ function send(msg) {
    transcript. Opening again reads the transcript anew; the reader keeps its place. */
 function reopenAfterExpiry() {
   pollAfter = 0;
+  pushFloor = 0;   // the viewer that comes back has a queue of its own, numbered from one
   if (state.loaded && !state.reopening) { state.reopening = true; openSession(true); }
 }
 
@@ -483,7 +484,9 @@ function startPolling() {
       if (res && res.expired) { reopenAfterExpiry(); return; }
       if (!res || typeof res.seq !== 'number') return;
       pollAfter = res.seq;
-      (res.pushes || []).forEach(onPush);
+      // the pushes of a reply are the last ones of the queue, in order, up to res.seq
+      var pushes = res.pushes || [];
+      pushes.forEach(function (msg, i) { onPush(msg, res.seq - pushes.length + 1 + i); });
     }).catch(function () { /* the next tick tries again */ });
   }, POLL_MS);
 }
@@ -521,16 +524,22 @@ function adoptPush(msg) {
   });
 }
 
-/* In a browser the open reply and the pushes travel on requests of their own, so a push can
-   reach the page before a reply that is older than it. Applied then, it would be undone by
-   the reply (the list of sections of the first paint, "still indexing"), for good when the
-   transcript is at rest. Such a push waits for the reply and is applied after it. */
+/* In a browser the open reply and the pushes travel on requests of their own, so the two
+   arrive in any order, and the queue the page polls may hold pushes from before it opened (a
+   second tab on a session, a tab loaded again). Two rules keep the page on the newest state.
+   A push that arrives while an open is on its way waits and is applied after the reply:
+   applied before, the reply would undo it (the sections of the first paint, "still
+   indexing"), for good when the transcript is at rest. And a push the queue held before the
+   open came in (its number is not above reply.pushSeq) is older than the reply and is left
+   out: an old error or an old list of sections would replace what the reply brought. */
 var openPending = false;
-var heldPushes = [];
+var heldPushes = [];   // { msg, seq }
+var pushFloor = 0;     // pushes numbered up to here are older than the open reply the page holds
 
-function onPush(msg) {
+function onPush(msg, seq) {
   if (!msg || msg.sessionId !== SESSION_ID) return;
-  if (openPending) { heldPushes.push(msg); return; }
+  if (openPending) { heldPushes.push({ msg: msg, seq: seq }); return; }
+  if (typeof seq === 'number' && seq <= pushFloor) return;
   if (msg.type === 'stepsProgress') {
     state.indexing = !msg.done;
     if (msg.error) { showStatus('indexing stopped: ' + msg.error); return; }
@@ -639,6 +648,8 @@ function openSession(again) {
     openPending = false;
     state.reopening = false;
     if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
+    pushFloor = typeof reply.pushSeq === 'number' ? reply.pushSeq : 0;
+    pollAfter = Math.max(pollAfter, pushFloor);
     // a second open answers from a new index: what the page held belongs to the old one
     state.compactById = Object.create(null);
     state.bodies = Object.create(null);
@@ -660,7 +671,7 @@ function openSession(again) {
     renderNotesJumpLabel();
     if (again) renderAllKeepingView();
     else { renderAll(); scrollToEndOnLoad(); }
-    overtook.forEach(onPush);
+    overtook.forEach(function (held) { onPush(held.msg, held.seq); });
   });
 }
 
@@ -2412,13 +2423,24 @@ function exportView() {
 }
 
 /* A message of yours as an export shows it: without the tags Claude Code wraps a paste in.
-   Where words were typed in front of a paste, a line says where the pasted text starts. */
+   Where words were typed in front of a paste, a line says where the pasted text starts, and
+   an empty line shows where it ends. A paste inside a sentence gets lines of its own, so the
+   typed words never run into the pasted ones. */
 function withoutPasteTags(text) {
   text = String(text == null ? '' : text);
   if (text.indexOf('<pasted_content') === -1) return text;
-  return text.replace(/<pasted_content\b[^>\n]*>[ \t]*\r?\n?/g, function (tag, at) {
-    return text.slice(0, at).trim() ? 'Pasted:\n' : '';
-  }).replace(/[ \t]*<\/pasted_content\b[^>\n]*>/g, '').replace(/^\s*\n/, '').replace(/\s+$/, '');
+  var opened = text.replace(/[ \t]*<pasted_content\b[^>\n]*>[ \t]*\r?\n?/g, function (tag, at) {
+    var before = text.slice(0, at);
+    if (!before.trim()) return '';
+    return (/\n$/.test(before) ? '' : '\n') + 'Pasted:\n';
+  });
+  var closed = opened.replace(/[ \t]*<\/pasted_content\b[^>\n]*>[ \t]*/g, function (tag, at) {
+    var after = opened.slice(at + tag.length);
+    if (!after.trim()) return '';
+    var ownLine = /\n$/.test(opened.slice(0, at)) ? '' : '\n';
+    return /^\r?\n/.test(after) ? ownLine : ownLine + '\n';
+  });
+  return closed.replace(/^\s*\n/, '').replace(/\s+$/, '');
 }
 
 /* Whether the report a subagent sent back is written out. The tab always holds it, folded.
