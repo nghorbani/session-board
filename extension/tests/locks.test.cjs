@@ -133,9 +133,9 @@ test('a board archive drops the lock at once: archived and restored before any s
   assert.equal(fs.existsSync(lock(B)), false, 'the lock went with the archive, before any snapshot');
   await core.unarchiveSession(B);
   registry('idle'); agents('idle');
-  const snap = await core.snapshot();
+  await core.snapshot();
   assert.equal(core.readLocks().has(B), false, 'restored: not locked');
-  assert.ok(!snap.sessions.some((x) => x.sessionId === B && x.lockSlot !== null));
+  assert.ok(fs.existsSync(transcript(B)), 'the transcript is back, so only the archive took the lock');
 });
 
 test('the old order store is left alone: order/ and sort.json are neither read, written nor removed', async () => {

@@ -1110,9 +1110,9 @@ test('page: placeRows puts every row once whatever the order it gets them in: al
   await page.close();
 });
 
-test('page: the keyboard keeps its place across a render: a focused lock button can be pressed twice, and a focused card keeps the focus through the polls', opts, async () => {
+test('page: the keyboard keeps its place across a render: a focused lock button can be pressed twice, a focused card keeps the focus through the polls, and of three copy buttons the same one gets it back', opts, async () => {
   fake.calls.length = 0;
-  fake.snapshot = snapshotOf(boardRows(), auto);
+  fake.snapshot = snapshotOf(boardRows({ [A]: { name: 'agent-a', transcriptPath: 'C:\\x\\a.jsonl' } }), auto);
   const page = await openPage();
   await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
   await page.eval('document.querySelector(' + JSON.stringify(rowSel(A) + ' .lockbtn') + ').focus(); document.activeElement.click(); true');
@@ -1125,6 +1125,17 @@ test('page: the keyboard keeps its place across a render: a focused lock button 
   await sleep(700);                                          // two or three polls, each one a render
   s = await page.sample();
   assert.deepEqual([s.focusedIn, s.focusedAct], [C, null], 'a focused card keeps the focus through the polls');
+  // the agent name, the id and the transcript path of a row are three buttons with the action "copyval"
+  await page.click(rowSel(A) + ' .iconbtn.info');
+  await page.until((x) => x.details.some((d) => d.indexOf(A + '=') === 0 && /transcript/.test(d)), 'the details');
+  const pathButton = 'Array.prototype.slice.call(document.querySelectorAll(' + JSON.stringify(rowSel(A) + ' .details .copyval') + ')).pop()';
+  assert.ok(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(A) + ' [data-act="copyval"]') + ').length') >= 3, 'three or more copy buttons on the row');
+  await page.eval('window.__copied = null; ' + pathButton + '.focus(); document.activeElement.click(); true');
+  s = await page.until((x) => x.copied !== null, 'the first copy');
+  assert.match(s.copied, /a\.jsonl$/, 'the transcript path');
+  await page.eval('window.__copied = null; document.activeElement.click(); true');
+  s = await page.until((x) => x.copied !== null, 'the second copy');
+  assert.match(s.copied, /a\.jsonl$/, 'the second press copies the path again: the focus came back to the same button, not to the first of the three');
   await page.close();
 });
 
