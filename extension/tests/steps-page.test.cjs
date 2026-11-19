@@ -190,7 +190,7 @@ async function serve(req, res) {
     // real reader and not by a scripted reply
     if (fake.service) return json(res, 200, await fake.service.handle(msg));
     if (msg.type === 'open') {
-      const base = fake.open();
+      const base = await fake.open();   // a test may hold the reply back
       const notes = base.notes && base.notes.length ? base.notes : noteList();
       return json(res, 200, Object.assign({ requestId: msg.requestId }, base, { notes }));
     }
@@ -1490,6 +1490,34 @@ test('page: an export is refused while the transcript is still being indexed, si
   assert.equal(await page.eval('window.__saved.length'), 0);
   await page.close();
 }, { timeout: 60000 });
+
+test('page: a push that overtakes the open reply is applied after it: the end of the indexing is not undone by the older reply, and the export goes through', opts, async () => {
+  const steps = [step('u1:0', 'you'), step('t1:0', 'text'), step('u2:0', 'you'), step('t2:0', 'text')];
+  const whole = [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [{ kind: 'text', stepId: 't1:0' }]),
+    section('you', 'second', 'u2:0', [{ kind: 'text', stepId: 't2:0' }])];
+  let letGo = null;
+  const held = new Promise((resolve) => { letGo = resolve; });
+  // the reply was taken at first paint, when only the end of the transcript was indexed, and is slow on its way
+  fake.open = async () => { await held; return openReply({ steps: steps.slice(2), sections: [whole[0], whole[2]], indexing: true }); };
+  const page = await openPage(A);
+  // meanwhile the indexing finished, and the push that says so reaches the page first
+  fake.pushes.push({ type: 'stepsProgress', sessionId: A, generation: 1, fraction: 1, done: true, sections: whole, strip: { activeTimeMs: 60000, sections: 3, decisions: 0, filesChanged: 0 }, steps });
+  for (let i = 0; i < 100 && !(await page.eval('typeof pollAfter === "number" && pollAfter >= 1')); i++) await sleep(50);
+  assert.equal(await page.eval('pollAfter >= 1'), true, 'the page has taken the push while the reply is still on its way');
+  letGo();
+  // the older reply holds the start of the session and the last turn; the push holds all three
+  const s = await page.until((x) => x.sectionHeadings.length >= 3 && x.rowsInView > 0, 'the whole story, as the push told it');
+  assert.equal(s.sectionHeadings.length, 3);
+  assert.equal(await page.eval('state.indexing'), false, 'the indexing is over, whatever the older reply said');
+  await page.eval('window.__saved = []; saveInBrowser = function (name, text) { window.__saved.push({ name: name, text: text }); }; true');
+  await page.click('#exportBtn');
+  await page.click('#exportMenu [data-export="md"]');
+  for (let i = 0; i < 100 && (await page.eval('window.__saved.length')) === 0; i++) await sleep(50);
+  const saved = await page.eval('window.__saved[0]');
+  assert.ok(saved, 'the export came out: ' + JSON.stringify((await page.sample()).notices));
+  assert.ok(saved.text.indexOf('body of u1:0') !== -1 && saved.text.indexOf('body of u2:0') !== -1, 'with both turns');
+  await page.close();
+});
 
 test('page: an export of Notes holds the notes whose step is no longer on the current path, as the view does', opts, async () => {
   fake.open = () => openReply({

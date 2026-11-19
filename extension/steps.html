@@ -514,8 +514,16 @@ function adoptPush(msg) {
   });
 }
 
+/* In a browser the open reply and the pushes travel on requests of their own, so a push can
+   reach the page before a reply that is older than it. Applied then, it would be undone by
+   the reply (the list of sections of the first paint, "still indexing"), for good when the
+   transcript is at rest. Such a push waits for the reply and is applied after it. */
+var openPending = false;
+var heldPushes = [];
+
 function onPush(msg) {
   if (!msg || msg.sessionId !== SESSION_ID) return;
+  if (openPending) { heldPushes.push(msg); return; }
   if (msg.type === 'stepsProgress') {
     state.indexing = !msg.done;
     if (msg.error) { showStatus('indexing stopped: ' + msg.error); return; }
@@ -617,7 +625,11 @@ function showStatus(text) {
 function openSession(again) {
   if (!SESSION_ID) { showError('no session to show'); return; }
   startPolling();
+  openPending = !vsapi;   // a webview gets the reply and the pushes in the order they were sent
   call({ type: 'open' }).then(function (reply) {
+    var overtook = heldPushes;
+    heldPushes = [];
+    openPending = false;
     state.reopening = false;
     if (!reply || !reply.ok) { showError((reply && reply.message) || 'could not open this session'); return; }
     // a second open answers from a new index: what the page held belongs to the old one
@@ -639,9 +651,9 @@ function openSession(again) {
     renderIndexNote();
     renderStrip();
     renderNotesJumpLabel();
-    if (again) { renderAllKeepingView(); return; }
-    renderAll();
-    scrollToEndOnLoad();
+    if (again) renderAllKeepingView();
+    else { renderAll(); scrollToEndOnLoad(); }
+    overtook.forEach(onPush);
   });
 }
 

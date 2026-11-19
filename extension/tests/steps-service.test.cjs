@@ -211,6 +211,34 @@ test('a section is headed by the words typed after a paste, also when the paste 
   assert.equal(opened.sections.find((sec) => sec.kind === 'you').heading, 'Why does this fail?');
 });
 
+test('the heading after a long paste stays your words when indexing goes on in the background and finishes', async () => {
+  const file = newFile();
+  const paste = '<pasted_content id="ab12">\n' + 'a line of a long log\n'.repeat(13000) + '</pasted_content>\n';
+  const objs = [];
+  for (let i = 1; i <= 30; i++) {
+    objs.push(i === 1 ? userLine(uuid(i), null, 'line ' + i) : assistantLine(uuid(i), uuid(i - 1), 'm' + i, [{ type: 'text', text: 'line ' + i + ' '.repeat(2000) }]));
+  }
+  objs.push(userLine(uuid(31), uuid(30), paste + 'Why does this fail?'), assistantLine(uuid(32), uuid(31), 'm32', [{ type: 'text', text: 'because' }]));
+  writeLines(file, objs);
+  const deps = makeDeps({ chunkBytes: 4096, tailBytes: 4096 });
+  deps.__files.set(A, file);
+  const svc = svcMod.createStepsService(deps);
+  const pushes = [];
+  let doneSeen;
+  const donePromise = new Promise((resolve) => { doneSeen = resolve; });
+  svc.subscribe(A, (msg) => {
+    pushes.push(msg);
+    if (msg.type === 'stepsProgress' && msg.done) doneSeen();
+  });
+  const opened = await svc.handle({ type: 'open', requestId: 'r1', sessionId: A });
+  await donePromise;
+  const headingIn = (sections) => (sections.filter((sec) => sec.kind === 'you').pop() || {}).heading;
+  assert.equal(headingIn(opened.sections), 'Why does this fail?', 'in the first reply');
+  const progress = pushes.filter((m) => m.type === 'stepsProgress' && m.sections);
+  assert.ok(progress.length >= 1 && progress[progress.length - 1].done, 'the pass ran on after the reply and finished');
+  progress.forEach((m) => assert.equal(headingIn(m.sections), 'Why does this fail?', 'in a push of the indexing, done: ' + m.done));
+});
+
 test('bodies for an export: whole texts past the 200 KB cut, tool calls without their results', async () => {
   const file = newFile();
   const huge = 'y'.repeat(250 * 1024) + ' the very end';

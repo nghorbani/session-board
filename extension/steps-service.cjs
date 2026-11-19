@@ -169,14 +169,14 @@ function createStepsService(deps) {
         if (frac >= tailFraction && frac < 1) takeFirstPaint();
         if (sameSlot() && (lastProgressAt === null || now() - lastProgressAt >= progressIntervalMs)) {
           lastProgressAt = now();
-          const { sections, strip } = buildSections(idx.steps(), idx.body);
+          const { sections, strip } = buildSections(idx.steps(), idx.body, idx.fullText);
           push(sessionId, { type: 'stepsProgress', sessionId, generation: idx.generation(), fraction: frac, done: false, sections, strip, steps: freshCompact(s, idx.steps()) });
         }
       }).then(() => {
         takeFirstPaint();   // settling is always a cue too, however small the file or short the pass
         if (sameSlot()) {
           s.indexing = false;
-          const { sections, strip } = buildSections(idx.steps(), idx.body);
+          const { sections, strip } = buildSections(idx.steps(), idx.body, idx.fullText);
           push(sessionId, { type: 'stepsProgress', sessionId, generation: idx.generation(), fraction: 1, done: true, sections, strip, steps: freshCompact(s, idx.steps()) });
         }
       }, (e) => {
