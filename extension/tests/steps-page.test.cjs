@@ -2011,6 +2011,11 @@ test('page: a jump to a note whose step left the path shows that note under Note
   assert.equal(s.notesTileOn, true, 'the view is still Notes');
   assert.equal(s.savedNoteOffPath, true, 'and the note is still on the page');
   assert.match(s.curHitText, /abandoned try/);
+  // a push that draws the reader anew (another window kept a note) leaves the mark where it is
+  fake.notes.set('n-gone2', { id: 'n-gone2', stepId: 'gone2:0', at: 2, text: 'a second note off the path', sent: [] });
+  fake.pushes.push({ type: 'notesChanged', sessionId: A, notes: noteList() });
+  s = await page.until((x) => x.notesTileNum === '2', 'the redraw');
+  assert.equal(s.curHitId, 'step-gone:0', 'the mark is still on the note after the redraw');
   // from the whole story, a search for its words leads there too
   await page.click('.strip .item:nth-child(5)');
   await page.until((x) => x.notesTileOn === false && x.savedNoteOffPath === false, 'the whole story');

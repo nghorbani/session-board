@@ -1208,7 +1208,8 @@ function renderReader() {
   reader.textContent = '';
   var secs = visibleSections();
   if (!secs.length) {
-    if (state.lens === 'notes' && orphanNotes().length) { buildOrphanNotes(reader); return; }
+    // only notes off the path: their rows are the whole view, and one of them may carry the mark
+    if (state.lens === 'notes' && orphanNotes().length) { buildOrphanNotes(reader); markCurrentHit(); return; }
     var empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.textContent = state.lens === 'notes' ? 'No sections carry a note yet.'
@@ -1467,7 +1468,7 @@ function buildNoteBox(stepId, existing) {
   send.title = vsapi ? 'Puts the note into the session\'s chat box, for you to send, and on the clipboard.'
     : 'Copies the note for you to paste into the session.';
   var branch = document.createElement('button'); branch.type = 'button'; branch.textContent = 'Branch from here';
-  branch.disabled = true; branch.title = 'Arrives with 0.13.0';
+  branch.disabled = true; branch.title = 'Arrives with a later release';
 
   /* The box is rebuilt by every redraw, so "this box" is the box as it was opened, not this
      element. When an operation it started is over, it closes that box. A box opened since (on
