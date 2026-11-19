@@ -149,7 +149,8 @@ function titleFromTranscript(transcriptPath) {
   const lines = text.split('\n');
   let messageAt = lastMessageAtOf(lines);
   // one message larger than the tail leaves no whole message line in it: look once in a larger tail
-  if (messageAt == null) messageAt = lastMessageAt(readTail(transcriptPath, MESSAGE_TAIL_BYTES));
+  // (a transcript that fits into the first tail has nothing more to show)
+  if (messageAt == null && largerThan(transcriptPath, TITLE_TAIL_BYTES)) messageAt = lastMessageAt(readTail(transcriptPath, MESSAGE_TAIL_BYTES));
   let title = null;
   let customTitle = null;
   let lastPrompt = null;
@@ -194,6 +195,8 @@ function lastMessageAtOf(lines) {
 }
 
 function lastMessageAt(text) { return text ? lastMessageAtOf(String(text).split('\n')) : null; }
+
+function largerThan(file, bytes) { try { return fs.statSync(file).size > bytes; } catch (_) { return false; } }
 
 /**
  * sessionId -> transcript path for live rows. Deriving the path from a session's cwd
@@ -883,6 +886,8 @@ function archiveSession(sessionId) {
   if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
   fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
   fs.writeFileSync(archiveMarker(sessionId), JSON.stringify({ at: Date.now() }));
+  // an archived session holds no place: its lock goes now, so a restore before the next snapshot does not bring it back locked
+  try { fs.unlinkSync(lockFile(sessionId)); } catch (_) { /* no lock, or reconcileLocks() drops it with the next snapshot */ }
 }
 
 function unlinkMarker(sessionId) {
@@ -1361,8 +1366,9 @@ function pruneDead(dir, coll, liveIds, transcripts) {
  * snapshot() ──▶ readLocks() ──▶ reconcileLocks() ──▶ `lockSlot` on every running and ended row
  *                 (null without a lock). A slot is a place number counted from 0 in the list the
  *                 page shows for the row's window; the page does the placing.
- * A lock belongs to its session, not to a window. It goes when the session is archived, on the
- * board or in Claude Code, and when the session is not running and no transcript is left.
+ * A lock belongs to its session, not to a window. It goes when the session is archived: at once
+ * on the board (archiveSession), with the next snapshot in Claude Code; and when the session is
+ * not running and no transcript is left.
  */
 const LOCKS_DIR = path.join(DATA_DIR, 'locks');
 const LOCK_MAX_IDS = 500;
@@ -1420,14 +1426,16 @@ function setLocks(req) {
 /**
  * Drop the locks that no longer have a card to hold: a session archived on the board or in
  * Claude Code (its word counts only once its archive has been read), and a session that is not
- * running and has no transcript in either root. The exact check, not the minute-old file index,
- * decides the second case. A lock that cannot be removed stays for the next snapshot.
+ * running and has no transcript in either root. A transcript the file index lists is there
+ * (the index is at most a minute old, so a deleted one keeps its lock a minute longer); one the
+ * index does not list is looked for on disk, so a session younger than the index keeps its lock.
+ * A lock that cannot be removed stays for the next snapshot.
  */
-function reconcileLocks(locks, liveIds, boardIds, claude) {
+function reconcileLocks(locks, liveIds, boardIds, claude, index) {
   const claudeKnown = Boolean(claude) && claude.known !== false && Boolean(claude.ids);
   for (const id of [...locks.keys()]) {
     const archived = boardIds.has(id) || (claudeKnown && claude.ids.has(id));
-    if (!archived && (liveIds.has(id) || !transcriptGone(id))) continue;
+    if (!archived && (liveIds.has(id) || (index && index.has(id)) || !transcriptGone(id))) continue;
     try { fs.unlinkSync(lockFile(id)); } catch (_) { /* gone already, or the next snapshot retries */ }
     locks.delete(id);
   }
@@ -2310,7 +2318,7 @@ async function snapshot(opts) {
   const liveIds = new Set(rows.map((r) => r.sessionId));
   forgetStatuses(liveIds);
   pruneDead(MUTED_DIR, muted, liveIds, index);
-  reconcileLocks(locks, liveIds, archived, claude);
+  reconcileLocks(locks, liveIds, archived, claude, index);
   notesStore.pruneDead(liveIds, index, transcriptGone);
 
   const windows = new Map();

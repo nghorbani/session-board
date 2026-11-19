@@ -297,7 +297,7 @@ var state = {
   folded: Object.create(null),              // section key -> folded; a section starts open
   pendingMute: Object.create(null),         // sessionId -> { muted, until } from the bell until a snapshot agrees
   details: Object.create(null),             // sessionId -> true while its details line is folded out (memory only)
-  pendingLocks: Object.create(null),        // sessionId -> { slot (null: unlocked), seq, until } from a lock change until a snapshot agrees
+  pendingLocks: Object.create(null),        // sessionId -> { slot (null: unlocked), seq, until, acked } from a lock change until its reply came and a snapshot agrees
   lockSeq: 0,                               // counts the lock requests of this page; a reply names the one it answers
   pendingShow: null,                        // { show, until } from the auto | running | all switch until a snapshot agrees
   pendingArchive: Object.create(null),      // sessionId -> until: an ended row archived with ⤓ leaves at once
@@ -987,7 +987,8 @@ function renderSwitch(data) {
  * A lock change: the lock button, a drop or Alt+Up/Down ──▶ sendLocks({ set, move, clear }):
  *    state.pendingLocks[id] = { slot (null: unlocked), seq, until: now + 10 s } for every id named ──▶ render at once
  *    ──▶ host message `locks` or POST /api/locks ──▶ locksResult { ok, seq }
- *    ok     ──▶ an entry stays until a snapshot agrees with it or the 10 s pass
+ *    ok     ──▶ its entries are marked; a marked entry stays until a snapshot agrees with it, any entry until the 10 s pass
+ *               (a snapshot from before the write may agree by chance, as after lock then unlock: it must not end the hold)
  *    not ok ──▶ the entries of that seq go (a newer change of the same card stays), the cards return, the notice says why
  * set locks a card at a place; move gives the other locked cards of the section the place they now have
  * (core applies it only where a lock still exists); clear unlocks.
@@ -1009,7 +1010,10 @@ function sendLocks(req) {
 }
 
 function onLocksResult(r) {
-  if (r.ok) return;                                        // the next snapshot carries the slots and drops the pending entries
+  if (r.ok) {                                              // written: from here on a snapshot that agrees ends the hold
+    Object.keys(state.pendingLocks).forEach(function (id) { if (r.seq == null || state.pendingLocks[id].seq === r.seq) state.pendingLocks[id].acked = true; });
+    return;
+  }
   Object.keys(state.pendingLocks).forEach(function (id) { if (r.seq == null || state.pendingLocks[id].seq === r.seq) delete state.pendingLocks[id]; });
   notice('lock failed: ' + (r.message || 'unknown'));
   render();
@@ -1312,9 +1316,32 @@ function glide(before) {
   });
 }
 
+/** The control inside a row that holds the keyboard focus, so a render can hand the focus to its replacement. */
+function focusedInRow() {
+  var el = document.activeElement;
+  var row = el && el.closest ? el.closest('.row[data-session]') : null;
+  if (!row) return null;
+  var list = row.closest('#sections, #l-archived, #l-results');
+  return { sid: row.getAttribute('data-session'), act: el !== row && el.getAttribute ? el.getAttribute('data-act') : null, list: list ? list.id : null };
+}
+
+/** Give the focus back after a render: to the same control of the same row, else to the row. A row that is gone takes the focus with it. */
+function restoreFocus(f) {
+  if (!f || !f.list) return;
+  var rows = document.getElementById(f.list).querySelectorAll('.row[data-session]');
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].getAttribute('data-session') !== f.sid) continue;
+    var el = f.act ? rows[i].querySelector('[data-act="' + f.act + '"]') : null;
+    el = el && !el.disabled ? el : rows[i];
+    if (el.focus) el.focus({ preventScroll: true });
+    return;
+  }
+}
+
 function render() {
   if (state.drag) { state.renderDue = true; return; }     // never replace the DOM under a drag; dragend renders
   var tops = rowTops();
+  var focus = focusedInRow();
   var data = state.data;
   var limits = (data && data.limits) || { compact: null, save: null };
   var all = (data && data.sessions) || [];
@@ -1385,6 +1412,7 @@ function render() {
   }
   document.getElementById('g-archived').style.display = archived.length ? '' : 'none';
   document.getElementById('l-archived').innerHTML = archivedHtml;
+  restoreFocus(focus);
   glide(tops);
 }
 
@@ -1398,12 +1426,12 @@ function onSnapshot(data) {
     var row = (data.sessions || []).filter(function (s) { return s.sessionId === sid; })[0];
     if (!row || (pe.pid != null && row.pid !== pe.pid)) delete state.pendingEnd[sid];
   });
-  // a lock change holds until a snapshot agrees with it (or no longer lists the card), or the guard expires
+  // a lock change holds until its reply came and a snapshot agrees with it (or no longer lists the card), or the guard expires
   Object.keys(state.pendingLocks).forEach(function (sid) {
     var p = state.pendingLocks[sid];
     var row = (data.sessions || []).concat(data.ended || []).filter(function (x) { return x.sessionId === sid; })[0];
     var slot = row && typeof row.lockSlot === 'number' ? row.lockSlot : null;
-    if (!row || slot === p.slot || p.until <= Date.now()) delete state.pendingLocks[sid];
+    if (!row || (p.acked && slot === p.slot) || p.until <= Date.now()) delete state.pendingLocks[sid];
   });
   // the switch holds its mode until a snapshot agrees, or the guard expires
   var ps = state.pendingShow;

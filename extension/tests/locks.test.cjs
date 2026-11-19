@@ -4,8 +4,8 @@
  * place number (slot) of its card. setLocks checks a whole request before the first write;
  * `set` locks an id, `move` changes only a lock that exists, `clear` unlocks. The snapshot puts
  * lockSlot on running and ended rows after one reconcile step: a session archived on the board
- * or in Claude Code loses its lock, and so does one that is not running and has no transcript
- * left. The old order store (order/, sort.json) is never read or written. The fixture is the
+ * or in Claude Code loses its lock (on the board at once, with the archive), and so does one
+ * that is not running and has no transcript left. The old order store (order/, sort.json) is never read or written. The fixture is the
  * one of muted.test.cjs: temp dirs, the CLI shim, the window map.
  */
 const test = require('node:test');
@@ -124,6 +124,18 @@ test('reconcile: an archived session loses its lock, on the board at once, in Cl
   core.reconcileLocks(map, live, new Set(), { known: false, ids: new Set([A, B]) });
   assert.deepEqual([map.has(A), map.has(B)], [true, true], 'Claude Code\'s archive not read yet: nothing is dropped on its word');
   core.setLocks({ clear: [A, B] });
+});
+
+test('a board archive drops the lock at once: archived and restored before any snapshot, the session comes back without it', async () => {
+  core.setLocks({ set: { [B]: 1 } });
+  const r = await core.archivePast(B);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(fs.existsSync(lock(B)), false, 'the lock went with the archive, before any snapshot');
+  await core.unarchiveSession(B);
+  registry('idle'); agents('idle');
+  const snap = await core.snapshot();
+  assert.equal(core.readLocks().has(B), false, 'restored: not locked');
+  assert.ok(!snap.sessions.some((x) => x.sessionId === B && x.lockSlot !== null));
 });
 
 test('the old order store is left alone: order/ and sort.json are neither read, written nor removed', async () => {

@@ -60,7 +60,7 @@ function serve(req, res) {
     return;
   }
   if (req.headers['x-board-token'] !== TOKEN) return json(res, 403, { error: 'forbidden' });
-  if (u.pathname === '/api/sessions') return json(res, 200, fake.snapshot);
+  if (u.pathname === '/api/sessions') { fake.polls = (fake.polls || 0) + 1; return json(res, 200, fake.snapshot); }
   if (u.pathname === '/api/locks' && req.method === 'POST') {
     let text = '';
     req.on('data', (d) => { text += d; });
@@ -126,6 +126,8 @@ const SAMPLE = `(function () {
     posted: window.__posted || null,
     handles: q('.row .handle').length,
     focused: document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-session') : null,
+    focusedIn: (function () { var e = document.activeElement; var r = e && e.closest ? e.closest('.row[data-session]') : null; return r ? r.getAttribute('data-session') : null; })(),
+    focusedAct: document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-act') : null,
     dropMarks: q('.row.drop-before, .row.drop-after').length,
     muteBusy: q('.iconbtn.mute:disabled, .iconbtn.unmute:disabled').length,
     unmuteOn: q('.row[data-session]').filter(function (r) { return r.querySelector('.iconbtn.unmute'); }).map(function (r) { return r.getAttribute('data-session'); }),
@@ -165,8 +167,9 @@ const SAMPLE = `(function () {
   };
 })()`;
 
-async function openPage() {
-  const { targetId } = await cdp.send('Target.createTarget', { url: 'http://127.0.0.1:' + PORT + '/' });
+/** One page of the board in the test Chrome: its target, its evaluator and what every kind of page needs. */
+async function attachPage(query) {
+  const { targetId } = await cdp.send('Target.createTarget', { url: 'http://127.0.0.1:' + PORT + '/' + (query || '') });
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Runtime.enable', {}, sessionId);
   const ev = async (expr) => {
@@ -174,12 +177,27 @@ async function openPage() {
     if (r.exceptionDetails) throw new Error('page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
     return r.result.value;
   };
-  const page = {
+  return {
+    eval: ev,
     sample: () => ev(SAMPLE),
     click: (sel) => ev('(function () { var e = document.querySelector(' + JSON.stringify(sel) + '); if (!e) throw new Error("no element " + ' + JSON.stringify(sel) + '); e.click(); return true; })()'),
+    until: async (pred, what) => {
+      const start = Date.now();
+      let s = null;
+      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
+      throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
+    },
+    close: () => cdp.send('Target.closeTarget', { targetId }),
+  };
+}
+
+/** The page as the browser front end serves it: it polls the fake API. */
+async function openPage() {
+  const page = await attachPage('');
+  const ev = page.eval;
+  Object.assign(page, {
     search: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); q.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); return true; })()'),
     type: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); return true; })()'),
-    eval: (expr) => ev(expr),
     key: (sid, k) => ev('(function () { var r = document.querySelector(' + JSON.stringify(rowSel(sid)) + '); if (!r) throw new Error("no row"); r.focus(); r.dispatchEvent(new KeyboardEvent("keydown", { key: ' + JSON.stringify(k) + ', altKey: true, bubbles: true, cancelable: true })); return true; })()'),
     drag: (sid, target, before) => ev('(function () { var h = document.querySelector(' + JSON.stringify(rowSel(sid) + ' .handle') + '); if (!h) return { error: "no handle" };'
       + ' var t = document.querySelector(' + JSON.stringify(rowSel(target)) + '); if (!t) return { error: "no target" };'
@@ -190,15 +208,18 @@ async function openPage() {
       + ' t.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));'
       + ' h.dispatchEvent(new DragEvent("dragend", { bubbles: true, cancelable: true, dataTransfer: dt }));'
       + ' return { allowed: allowed, marks: marks }; })()'),
-    until: async (pred, what) => {
-      const start = Date.now();
-      let s = null;
-      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
-      throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
-    },
-    close: () => cdp.send('Target.closeTarget', { targetId }),
-  };
+  });
   await page.until((s) => s.counts.length > 0, 'the page to render');
+  return page;
+}
+
+/** The page as a VS Code webview loads it: it posts messages to the host and hears from it; `host` plays the extension host. */
+async function openWebviewPage(snapshot) {
+  const page = await attachPage('?webview=1');
+  page.host = (msg) => page.eval('window.postMessage(' + JSON.stringify(msg) + ', "*"); true');
+  await page.until((s) => Array.isArray(s.posted) && s.posted.some((m) => m.type === 'refresh'), 'the webview page to ask for a snapshot');
+  await page.host({ type: 'snapshot', data: snapshot });
+  await page.until((s) => s.sections.length > 0, 'the snapshot to render');
   return page;
 }
 
@@ -1074,32 +1095,64 @@ test('page: with a filter typed the grip stays and Alt+Down goes past the next c
   await page.close();
 });
 
-async function openWebviewPage(snapshot) {
-  const { targetId } = await cdp.send('Target.createTarget', { url: 'http://127.0.0.1:' + PORT + '/?webview=1' });
-  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-  await cdp.send('Runtime.enable', {}, sessionId);
-  const ev = async (expr) => {
-    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, sessionId);
-    if (r.exceptionDetails) throw new Error('page: ' + ((r.exceptionDetails.exception && r.exceptionDetails.exception.description) || r.exceptionDetails.text));
-    return r.result.value;
-  };
-  const page = {
-    sample: () => ev(SAMPLE),
-    click: (sel) => ev('(function () { var e = document.querySelector(' + JSON.stringify(sel) + '); if (!e) throw new Error("no element " + ' + JSON.stringify(sel) + '); e.click(); return true; })()'),
-    host: (msg) => ev('window.postMessage(' + JSON.stringify(msg) + ', "*"); true'),   // what the extension host would post to the webview
-    until: async (pred, what) => {
-      const start = Date.now();
-      let s = null;
-      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
-      throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
-    },
-    close: () => cdp.send('Target.closeTarget', { targetId }),
-  };
-  await page.until((s) => Array.isArray(s.posted) && s.posted.some((m) => m.type === 'refresh'), 'the webview page to ask for a snapshot');
-  await page.host({ type: 'snapshot', data: snapshot });
-  await page.until((s) => s.sections.length > 0, 'the snapshot to render');
-  return page;
-}
+test('page: placeRows puts every row once whatever the order it gets them in: all rows locked, one slot twice, and the same list for the same rows shuffled', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  const page = await openPage();
+  await page.until((x) => x.sections.length === 1, 'the page');
+  const place = (rows) => page.eval('placeRows(' + JSON.stringify(rows) + ').map(function (s) { return s.sessionId; })');
+  const r = (id, extra) => Object.assign({ sessionId: id, status: 'idle', activityAt: 1000, workingSince: null, lockSlot: null }, extra);
+  assert.deepEqual(await place([r(C, { lockSlot: 1 }), r(A, { lockSlot: 1 }), r(B, { lockSlot: 0 })]), [B, A, C], 'all locked and one slot twice: by slot, then by id, no row lost');
+  const mixed = [r(A, { activityAt: 3000 }), r(B, { lockSlot: 1 }), r(C, { status: 'busy', workingSince: 500 }), r(D, { activityAt: 2000 }), r(E, { lockSlot: 0 })];
+  assert.deepEqual(await place(mixed), [E, B, C, A, D], 'the locks at their slots, then the working row, then by the last message');
+  assert.deepEqual(await place(mixed.slice().reverse()), [E, B, C, A, D], 'the same list for the same rows in another order');
+  assert.deepEqual(await place([]), []);
+  await page.close();
+});
+
+test('page: the keyboard keeps its place across a render: a focused lock button can be pressed twice, and a focused card keeps the focus through the polls', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  const page = await openPage();
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
+  await page.eval('document.querySelector(' + JSON.stringify(rowSel(A) + ' .lockbtn') + ').focus(); document.activeElement.click(); true');
+  let s = await page.until((x) => x.locked.length === 1, 'locked');
+  assert.deepEqual([s.focusedIn, s.focusedAct], [A, 'lock'], 'the new lock button of the same card holds the focus');
+  await page.eval('document.activeElement.click(); true');
+  s = await page.until((x) => x.locked.length === 0, 'unlocked by the second press, without focusing again');
+  assert.deepEqual([s.focusedIn, s.focusedAct], [A, 'lock']);
+  await page.eval('document.querySelector(' + JSON.stringify(rowSel(C)) + ').focus(); true');
+  await sleep(700);                                          // two or three polls, each one a render
+  s = await page.sample();
+  assert.deepEqual([s.focusedIn, s.focusedAct], [C, null], 'a focused card keeps the focus through the polls');
+  await page.close();
+});
+
+test('page: lock then unlock in a row: a snapshot that knows only the first write does not show the card locked again', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  fake.locks = () => Object.assign(locksOk(), { delayMs: 1500 });
+  const page = await openPage();
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
+  await page.click(rowSel(A) + ' .lockbtn');
+  await page.until((x) => x.locked.length === 1, 'locked');
+  await page.click(rowSel(A) + ' .lockbtn');
+  await page.until((x) => x.locked.length === 0, 'unlocked');
+  const polled = async (count) => { const from = fake.polls; while (fake.polls < from + count) await sleep(20); await sleep(80); };   // that many polls answered, and rendered
+  await polled(2);                                           // polls from before both writes: they agree with "unlocked" by chance
+  fake.snapshot = snapshotOf(boardRows({ [A]: { lockSlot: 2 } }), auto);   // the next polls know the first write only
+  await polled(2);
+  let s = await page.sample();
+  assert.deepEqual(s.locked, [], 'the unlock holds: its own reply is still out');
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  await page.until(() => locksCalls().length === 2, 'both POSTs');
+  await sleep(1700);                                         // both replies are in
+  await polled(2);
+  s = await page.sample();
+  assert.deepEqual(s.locked, [], 'and after the replies');
+  fake.locks = locksOk;
+  await page.close();
+});
 
 test('page (webview): the lock button posts a locks message with a seq; a failed locksResult for that seq frees the card and shows the notice; a good one holds until the snapshot agrees', opts, async () => {
   const page = await openWebviewPage(snapshotOf(boardRows(), auto));

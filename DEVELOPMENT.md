@@ -144,16 +144,20 @@ installed.
 - `heartbeats.test.cjs`: the heartbeat readers delete records older than a day and leftover
   `.tmp` files, keep fresh and merely stale ones, and `boardAlive()` answers against a temp
   installed-extension list.
-- `order.test.cjs`: the order store (`setOrder()` checks the whole list before the first
-  write, `readOrder()`), the sort-mode file, pruning shared with the muted store, and
-  `rank` and `order.mode` on the snapshot.
-- `order-host.test.cjs`: the `order`, `sortMode`, `showMode` and `archivePast` messages and their
-  replies, and `claudeCode.claudeProcessWrapper` reaching `snapshot()`.
+- `locks.test.cjs`: the lock store (`setLocks()` checks the whole request before the first
+  write; `move` never creates a lock), `lockSlot` on the snapshot, `reconcileLocks()` (archived
+  on the board or in Claude Code, a session without a transcript, one younger than the file
+  index), the lock that goes with a board archive, and the old order files left alone.
+- `activity.test.cjs`: `lastMessageAt()` (top level only, cut lines, bad dates, the larger
+  second read) and `activityAt` and `workingSince` on the snapshot across the status changes.
+- `locks-host.test.cjs`: the `locks`, `showMode` and `archivePast` messages and their replies,
+  the retired `order` and `sortMode` messages, and `claudeCode.claudeProcessWrapper` reaching
+  `snapshot()`.
 - `ended.test.cjs`: `listedSessions()` (the root's folder and its real path's, no worktree
   folders, programmatic and daemon sessions left out, archived and stowed rows apart, which
-  window owns a session), an unreadable Claude Code archive, the show store and its 0.11.2
-  file, `archivePast()`.
-- `server-order.test.cjs`: `server.cjs` as a child process answering the order, show and archive routes.
+  window owns a session), an unreadable Claude Code archive, the show store with the file
+  format older boards read, `archivePast()`.
+- `server-locks.test.cjs`: `server.cjs` as a child process answering the lock, show and archive routes; the retired order routes are 404.
 - `shim/transcript.cjs`: the transcript line constructors that `steps.test.cjs` and
   `steps-service.test.cjs` share.
 - `steps.test.cjs`: `steps.cjs` against JSONL written into a temp dir: the active path across a
@@ -394,7 +398,14 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   place changed, held in `state.pendingLocks` under a `seq` until a snapshot agrees or 10 s
   pass, sent as `locks` to the host (reply `locksResult { ok, seq }`) or as
   `POST /api/locks`. A lock belongs to the session: in another window's section it sits at
-  the same place number. Two windows changing locks at once settle on the last write.
+  the same place number. Two windows changing locks at once settle on the last write; there is
+  no lock between processes, so a move in one window and an unlock of the same card in another
+  within the same millisecond can leave that card locked (unlock it again). A board archive
+  removes the session's lock at once (`archiveSession()`). A render hands the keyboard focus to
+  the replacement of the control that held it (`focusedInRow()`, `restoreFocus()`), so a
+  focused lock button or card stays usable across the polls. A pending lock change ends on an
+  agreeing snapshot only after its own reply came (`acked`): a snapshot from before the write
+  can agree by chance, as after lock then unlock.
   `order\` and `sort.json` of 0.10.0 to 0.12.0 stay on disk and are never read.
 - **Titles**: the board keeps none of its own (0.10.x boards wrote `titles\<id>.json`; it is
   no longer read and is left on disk). ✎ sends `retitle`; `suggestTitle()` collects the last six prompts and the
