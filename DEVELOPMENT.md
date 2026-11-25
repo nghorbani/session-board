@@ -152,7 +152,9 @@ installed.
   per running session of its window, none for another window's row, an archived row or a
   window without a folder; the 60 s before a record of an ended session goes; a record of
   another lifetime left alone; a newer process of the same session; a row whose process is
-  gone; a removal that fails once), an explicit end, `run` in the heartbeat, the `kept` flag
+  gone; a removal that fails once; a record that went missing written again), an explicit
+  end, an end held open by a real process while its window writes a record (for the process
+  being ended, and for one started since), `run` in the heartbeat, the `kept` flag
   of `listedSessions()`
   (a dead lifetime, a live one, another folder, a junction and its target, no row added or
   moved, a dead host that owns no folder) and `reconcileKept()` (an archive, a transcript that
@@ -186,7 +188,9 @@ installed.
   steps it adds, follow, search (ripgrep faked, the Node scan, the 500 cap, notes), the seen
   marker, the note messages and the hand-over text.
 - `notes.test.cjs`: the notes store: one file per note, sent records as files of their own,
-  the 16 KB cap, an edit racing a delete, two writers at once, pruning.
+  the 16 KB cap, an edit racing a delete, two writers at once, pruning; and
+  `writeJsonAtomic()`, which the locks and the kept records of `core.cjs` use too: a write
+  that fails leaves no temp file and reports its own failure.
 - `steps-host.test.cjs`: the Steps panel of `extension.js` against the fake `vscode`: one panel
   per session, links (web, folder, file, Markdown, `file:line`, refused network paths, the
   question for a path outside the trusted folders), `revealHere()` with and without a prompt,
@@ -426,11 +430,12 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   under "running" a restart of VS Code or of its extensions used to empty the window's
   section. Each host lifetime has a name, `run` (a random id per activation; a pid cannot
   name a lifetime, pids come around again), which it writes into its heartbeat and into
-  `kept\<id>.json = { root, run, at }` for every running session of its window that is not
-  archived (`createKeptTracker()` in `core.cjs`, called from `keepCards()` after every poll
-  that is not stale and never once the provider has stopped). `root` is the folder key of
-  the real path of the window's first workspace folder, so a junction and its target are one
-  folder. A session that ends while its window lives loses its record after 60 s
+  `kept\<id>.json = { root, run, at, startedAt }` for every running session of its window
+  that is not archived (`createKeptTracker()` in `core.cjs`, called from `keepCards()` after
+  every poll that is not stale and never once the provider has stopped). `root` is the folder
+  key of the real path of the window's first workspace folder, so a junction and its target
+  are one folder; `startedAt` is the start of the session's process, left out when the CLI
+  gives none. A session that ends while its window lives loses its record after 60 s
   (`KEPT_GRACE_MS`): at shutdown the board may see the sessions go a moment before its own
   host dies, and removing at once would delete the records the restart needs.
   `listedSessions()` sets `kept: true` on an ended row when the session's record names one of
@@ -443,8 +448,13 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   gone, and when the session runs again in a process younger than the record while the
   record's lifetime is dead (resumed in a terminal or in a window on an older board: the card
   is spent). ✕ on the board drops the record at once (`endSession()`, `forgetKept()`): a
-  record written after that end began is left, since the session ran again in a newer process
-  meanwhile, and a removal that fails is named in the end result (`keptError`) and logged.
+  record of a process that started after that end began is left, since the session ran again
+  meanwhile. The record's `startedAt` decides, not the time of its write: a window that sees
+  the session for the first time while the end runs writes a record for the very process
+  being ended. A removal that fails is named in the end result (`keptError`) and logged. No
+  lock between windows here either: a record another window writes between the end's read
+  and its removal goes too, and that window's tracker, which reads the folder at every poll,
+  writes it again at its next one.
   In the tracker a record that could not be removed is tried again on the next poll, and a
   row whose process is gone by the time the tracker reads it gets no record. A session that runs again in a newer process within
   the same lifetime gets a fresh record, so `reconcileKept()` does not take that process for

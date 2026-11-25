@@ -1478,10 +1478,11 @@ function reconcileLocks(locks, liveIds, boardIds, claude, index) { reconcileMark
  * Kept cards: the sessions that were running in a window when its extension host went away (a
  * restart of VS Code or of its extensions, a closed window) stay on the board as ended cards,
  * also with the switch on "running". One record per session in DATA_DIR/kept/<id>.json =
- * { root, run, at } (tmp then rename): `root` is the folder key of the real path of the window's
- * first workspace folder, `run` the host lifetime that saw the session running (a random id per
- * activation, also in that host's heartbeat; a pid cannot name a lifetime, pids come around
- * again), `at` when that lifetime wrote the record.
+ * { root, run, at, startedAt } (tmp then rename): `root` is the folder key of the real path of
+ * the window's first workspace folder, `run` the host lifetime that saw the session running (a
+ * random id per activation, also in that host's heartbeat; a pid cannot name a lifetime, pids
+ * come around again), `at` when that lifetime wrote the record, `startedAt` when the session's
+ * process started (left out when the CLI gives no start time).
  *
  *   host poll ──▶ tracker.observe(rows, folder)
  *                   running row of this host's window, not archived ──▶ record (once per process and lifetime)
@@ -1528,7 +1529,9 @@ function createKeptTracker(run, hostPid, clock) {
         // (ended and resumed within the wait): the record follows it, or reconcileKept would read the
         // new process as a resume elsewhere once this host is gone.
         if (m && m.run === run && m.root === root && !(Number(r.startedAt) > Number(m.at))) continue;
-        writeJsonAtomic(fs, keptFile(r.sessionId), { root, run, at });
+        const rec = { root, run, at };
+        if (Number(r.startedAt) > 0) rec.startedAt = Number(r.startedAt);   // names the process; an older CLI gives no start time
+        writeJsonAtomic(fs, keptFile(r.sessionId), rec);
         written += 1;
       }
       for (const [id, seenAt] of [...lastRunning]) {
@@ -1565,16 +1568,23 @@ function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
 
 /**
  * Drop the kept record of a session that was ended on the user's word; `since` is when that end
- * began. A record written after it is left alone: the session ran again in a newer process while
- * the end of the old one was still under way, and that record is not this end's to take. Returns
- * null, or why the record could not be removed. Its window's tracker then drops it after its
- * wait, as for a session that ended by itself, so the caller reports the reason and goes on.
+ * began. A record of a process that started after it is left alone: the session ran again while
+ * the end of its old process was still under way, and that record is not this end's to take.
+ * The process's start decides, not the time of the write: a window that sees the session for the
+ * first time during the end writes a record for the very process being ended. A record without
+ * a start time (an older CLI) goes. Returns null, or why the record could not be removed. Its
+ * window's tracker then drops it after its wait, as for a session that ended by itself, so the
+ * caller reports the reason and goes on.
+ *
+ * No lock between windows here either: a record another window writes between this read and
+ * the removal goes too. Its tracker finds none for a session running in its window at its next
+ * poll and writes it again.
  */
 function forgetKept(sessionId, since) {
   const file = keptFile(sessionId);
   let rec = null;
   try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e && e.code === 'ENOENT') return null; }
-  if (rec && Number(rec.at) > Number(since)) return null;
+  if (rec && Number(rec.startedAt) > Number(since)) return null;
   try { fs.unlinkSync(file); return null; } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }
 }
 

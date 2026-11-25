@@ -15,6 +15,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-kept-'));
 process.env.LOCALAPPDATA = tmp;
@@ -104,6 +105,9 @@ test('tracker: one record for a running row of its window; none for another wind
   clock += 5000;
   assert.deepEqual(tracker.observe(rows, root), { written: 0, removed: 0 }, 'a running session costs one write per process and lifetime, not one per poll');
   assert.equal(rec(LIVE).at, 1000000);
+  fs.unlinkSync(file(LIVE));                                // taken by something else while the session runs on
+  clock += 5000;
+  assert.deepEqual(tracker.observe(rows, root), { written: 1, removed: 0 }, 'the tracker reads the disk at every poll: a record that went missing is written again');
   assert.deepEqual(core.createKeptTracker(RUN_NEW, NEW, () => clock).observe([runRow(K1, NEW)], null), { written: 0, removed: 0 }, 'a window without a folder');
   assert.equal(has(K1), false);
 });
@@ -145,11 +149,11 @@ test('tracker: a session that runs again in a newer process within the same life
   let clock = 5000000;
   const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
   tracker.observe([runRow(LIVE, NEW, { startedAt: clock - 1000 })], root);
-  assert.equal(rec(LIVE).at, 5000000);
+  assert.deepEqual(rec(LIVE), { root: keyOf(REAL), run: RUN_NEW, at: 5000000, startedAt: 4999000 }, 'the record names its process by the time it started');
   clock += 20000;                                           // ended and resumed within the minute: the record is still there
   const resumedAt = clock - 5000;
   assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { startedAt: resumedAt })], root), { written: 1, removed: 0 }, 'the record is for the process that runs now');
-  assert.equal(rec(LIVE).at, clock);
+  assert.deepEqual([rec(LIVE).at, rec(LIVE).startedAt], [clock, resumedAt]);
   clock += 5000;
   assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { startedAt: resumedAt })], root), { written: 0, removed: 0 }, 'and then once per process');
   const map = core.readKept();                              // the host is gone, the new process lives on: no lifetime is alive
@@ -197,11 +201,6 @@ test('an explicit end drops the record at once: ended by hand and the window clo
   assert.equal(has(K1), false, 'the end is the user\'s word: no card to keep');
   assert.equal('keptError' in r, false);
 
-  // the session ran again while the end was still under way: a record written since the end began is the newer process's
-  record(K1, { run: RUN_NEW, at: Date.now() + 60000 });
-  await core.endSession(K1, {});
-  assert.ok(has(K1), 'the end of the old process does not take the record of the new one');
-
   // a record that cannot be removed: the end still succeeds and says so, instead of calling the card gone
   record(K1, { run: RUN_NEW });
   const unlink = fs.unlinkSync;
@@ -220,6 +219,50 @@ test('an explicit end drops the record at once: ended by hand and the window clo
   const refused = await core.endSession(LIVE, {});
   assert.deepEqual([refused.code, has(LIVE)], ['needs-force', true], 'it still runs: its record stays');
   agents([]);
+});
+
+/**
+ * End a session whose process really runs, and call `during` while that end is under way. The
+ * session is a background job, so the end goes through the `claude stop` shim, a process of its
+ * own: nothing after the call below can come later than the end's finish, since the end cannot
+ * go on before this function gives the event loop back. `during` gets the process of the session.
+ */
+async function endUnderWay(id, during) {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(function () {}, 60000)'], { stdio: 'ignore' });
+  const reg = path.join(sessionsDir, child.pid + '.json');
+  const proc = { pid: child.pid, startedAt: Date.now() - 5000 };
+  try {
+    fs.writeFileSync(reg, JSON.stringify({ sessionId: id, status: 'idle', procStart: '0' }));
+    agents([Object.assign({ id: id.slice(0, 8), sessionId: id, status: 'idle', kind: 'background', cwd: root, name: 'bg' }, proc)]);
+    process.env.SB_SHIM_STOP_KILL_PID = String(child.pid);
+    await core.snapshot();
+    const pending = core.endSession(id, {});
+    const called = Date.now();
+    while (Date.now() === called) { /* into the next millisecond: later than the moment the end began */ }
+    during(proc);
+    return await pending;
+  } finally {
+    delete process.env.SB_SHIM_STOP_KILL_PID;
+    try { child.kill(); } catch (_) { /* the end stopped it */ }
+    try { fs.unlinkSync(reg); } catch (_) { /* gone */ }
+    agents([]);
+  }
+}
+
+test('an end under way: a record its window writes meanwhile for the process being ended goes with the end; one for a process started since stays', { skip: !core.IS_WINDOWS }, async () => {
+  clearRecords(); clearHeartbeats();
+  heartbeat(NEW, root, RUN_NEW);
+  const tracker = core.createKeptTracker(RUN_NEW, NEW);
+  // the window sees the session for the first time while its end is already running
+  let wrote = null;
+  let out = await endUnderWay(K1, (proc) => { wrote = tracker.observe([runRow(K1, NEW, proc)], root); assert.ok(has(K1)); });
+  assert.deepEqual([out.code, wrote], ['ended', { written: 1, removed: 0 }], JSON.stringify(out));
+  assert.equal(has(K1), false, 'written after the end began, but for the process that was ended: no card to keep');
+
+  // the session is resumed while the end of its old process is still running, and its window sees the new process
+  out = await endUnderWay(K1, () => { wrote = tracker.observe([runRow(K1, NEW, { pid: process.pid, startedAt: Date.now() })], root); });
+  assert.deepEqual([out.code, wrote], ['ended', { written: 1, removed: 0 }], JSON.stringify(out));
+  assert.ok(has(K1), 'the end of the old process does not take the record of the new one');
 });
 
 test('heartbeat: carries the run of its host; a value that is no run id is left out', () => {

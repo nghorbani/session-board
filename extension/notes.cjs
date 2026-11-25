@@ -26,14 +26,21 @@ const TEXT_MAX = 16 * 1024;
 /**
  * Write a JSON record so that no reader meets half a file: to a temp name next to it, then a
  * rename. The temp name carries the pid, the time and a random tail, so two writers of one file
- * never share it. `fsx` is the file system to write through (the notes store passes the one it
- * was given; core.cjs writes its locks and kept records with this too).
+ * never share it. A write that fails takes its temp file with it and throws what failed: a
+ * caller that tries again at every poll would otherwise leave one more file each time. `fsx` is
+ * the file system to write through (the notes store passes the one it was given; core.cjs writes
+ * its locks and kept records with this too).
  */
 function writeJsonAtomic(fsx, file, obj) {
   fsx.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + '.tmp-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(16).slice(2);
-  fsx.writeFileSync(tmp, JSON.stringify(obj));
-  fsx.renameSync(tmp, file);
+  try {
+    fsx.writeFileSync(tmp, JSON.stringify(obj));
+    fsx.renameSync(tmp, file);
+  } catch (e) {
+    try { fsx.unlinkSync(tmp); } catch (_) { /* never written, or as stuck as the record */ }
+    throw e;
+  }
 }
 
 function createNotesStore(deps) {
