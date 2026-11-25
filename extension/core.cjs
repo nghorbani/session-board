@@ -1432,7 +1432,7 @@ function lockEntries(obj, what) {
     if (!UUID_RE.test(id)) throw invalidLock('not a session id');
     const slot = obj[id];
     if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > LOCK_MAX_SLOT) throw invalidLock('not a slot: ' + (typeof slot === 'number' ? slot : typeof slot));   // never String(slot): a value from a request may not print
-    return [id, slot];
+    return [id.toLowerCase(), slot];                         // Claude Code's ids are lower case: one spelling per id, so a lock is found under the id its row carries
   });
 }
 
@@ -1444,17 +1444,18 @@ function setLocks(req) {
   const clear = req.clear == null ? [] : req.clear;
   if (!Array.isArray(clear)) throw invalidLock('clear must be a list of session ids');
   if (!clear.every((id) => typeof id === 'string' && UUID_RE.test(id))) throw invalidLock('not a session id');
-  const ids = [...set.map((e) => e[0]), ...move.map((e) => e[0]), ...clear];
+  const clearIds = clear.map((id) => id.toLowerCase());
+  const ids = [...set.map((e) => e[0]), ...move.map((e) => e[0]), ...clearIds];
   if (!ids.length) throw invalidLock('nothing to lock, move or clear');
   if (ids.length > LOCK_MAX_IDS) throw invalidLock('too many ids (' + ids.length + ' over ' + LOCK_MAX_IDS + ')');
-  if (new Set(ids.map((id) => id.toLowerCase())).size !== ids.length) throw invalidLock('a session id is named twice');   // one file per id on a file system that ignores case
+  if (new Set(ids).size !== ids.length) throw invalidLock('a session id is named twice');
   const at = Date.now();
   const write = (id, slot) => writeJsonAtomic(fs, lockFile(id), { slot, at });   // temp file then rename (notes.cjs): no reader meets half a file
   let moved = 0;
   let cleared = 0;
   for (const [id, slot] of set) write(id, slot);
   for (const [id, slot] of move) { if (fs.existsSync(lockFile(id))) { write(id, slot); moved += 1; } }
-  for (const id of clear) {
+  for (const id of clearIds) {
     try { fs.unlinkSync(lockFile(id)); cleared += 1; } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
   }
   return { set: set.length, moved, cleared };
@@ -1516,7 +1517,8 @@ function readKept() { return readMarkers(KEPT_DIR, 0); }
  */
 function createKeptTracker(run, hostPid, clock) {
   const now = typeof clock === 'function' ? clock : Date.now;
-  const lastRunning = new Map();   // sessionId -> when this lifetime last saw it running in its window
+  const lastRunning = new Map();   // sessionId -> { at, proc }: when this lifetime last saw it running in its window, and which process that was
+  const procOf = (r) => (Number(r.pid) || 0) + '@' + (Number(r.startedAt) || 0);
   return {
     observe(rows, folder) {
       const keys = folder ? rootFolderKeys(folder) : [];
@@ -1526,17 +1528,21 @@ function createKeptTracker(run, hostPid, clock) {
       const kept = readKept();
       let written = 0;
       let removed = 0;
+      let failed = null;
       for (const r of rows || []) {
         if (!r || !UUID_RE.test(String(r.sessionId)) || r.archived) continue;
         if (r.pid && !pidAlive(Number(r.pid))) continue;      // the rows are from a moment ago and it has ended since: it runs no more
         if (!r.window) {
-          // Nothing says where it runs (the window lookup failed for this poll). A session this lifetime
-          // saw in its own window is still its card: the wait does not start while it runs on.
-          if (lastRunning.has(r.sessionId)) lastRunning.set(r.sessionId, at);
+          // Nothing says where it runs. For the process this lifetime saw in its own window that is a
+          // window lookup that failed at this poll: still its card, the wait does not start while it
+          // runs on. Another process of the session is a resume elsewhere (a terminal has no window),
+          // and the wait goes on.
+          const seen = lastRunning.get(r.sessionId);
+          if (seen && seen.proc === procOf(r)) seen.at = at;
           continue;
         }
         if (Number(r.window.exthostPid) !== Number(hostPid)) continue;
-        lastRunning.set(r.sessionId, at);
+        lastRunning.set(r.sessionId, { at, proc: procOf(r) });
         const m = kept.get(r.sessionId);
         // One write per process and lifetime. A process younger than the record is the session run again
         // (ended and resumed within the wait): the record follows it, or reconcileKept would read the
@@ -1544,18 +1550,20 @@ function createKeptTracker(run, hostPid, clock) {
         if (m && m.run === run && m.root === root && !(Number(r.startedAt) > Number(m.at))) continue;
         const rec = { root, run, at };
         if (Number(r.startedAt) > 0) rec.startedAt = Number(r.startedAt);   // names the process; an older CLI gives no start time
-        writeJsonAtomic(fs, keptFile(r.sessionId), rec);
-        written += 1;
+        try { writeJsonAtomic(fs, keptFile(r.sessionId), rec); written += 1; }
+        catch (e) { failed = failed || e; }                   // this card is not kept; the others and the clean-up below still are done
       }
-      for (const [id, seenAt] of [...lastRunning]) {
-        if (at - seenAt < KEPT_GRACE_MS) continue;
+      for (const [id, seen] of [...lastRunning]) {
+        if (at - seen.at < KEPT_GRACE_MS) continue;
         const m = kept.get(id);
+        if (!m && fs.existsSync(keptFile(id))) continue;      // there, but not readable at this poll (readMarkers left it out): whose it is shows at the next one
         if (m && m.run === run) {                             // else: another lifetime took the session over, or the record is gone
           try { fs.unlinkSync(keptFile(id)); removed += 1; }
           catch (e) { if (!e || e.code !== 'ENOENT') continue; }   // held by something right now: not forgotten, the next poll tries again
         }
         lastRunning.delete(id);
       }
+      if (failed) throw failed;                               // the host says it once (keepCards); nothing else was left undone for it
       return { written, removed };
     },
   };

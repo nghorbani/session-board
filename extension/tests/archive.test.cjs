@@ -409,6 +409,32 @@ test('stow: a marker removed while the link was being made is honoured; the file
   assert.equal(fs.existsSync(marker(E)), false);
 });
 
+test('search rows of a running session carry the times of its card: what the board orders it by, and since when it works', async () => {
+  const rg = await core.rgProbe(APP_ROOT);
+  if (!rg.path) { assert.ok(true, 'ripgrep not found; the search is checked manually'); return; }
+  const file = live('proj', D);
+  seed(file, JSON.stringify({ type: 'ai-title', aiTitle: 'Busy spike', sessionId: D }) + '\n');   // no message line: the board orders it by the file time
+  const hourAgo = new Date(Date.now() - 3600 * 1000);
+  fs.utimesSync(file, hourAgo, hourAgo);
+  const reg = path.join(sessionsDir, process.pid + '.json');
+  fs.writeFileSync(reg, JSON.stringify({ sessionId: D, status: 'busy', statusUpdatedAt: 7000 }));
+  process.env.SB_SHIM_AGENTS = JSON.stringify([{ sessionId: D, pid: process.pid, status: 'busy', cwd: tmp, name: 'd', kind: 'interactive' }]);
+  try {
+    const snap = await core.snapshot();
+    const card = snap.sessions.find((s) => s.sessionId === D);
+    assert.deepEqual([card.activityAt, card.workingSince], [fs.statSync(file).mtimeMs, 7000], 'the card: the file time of an hour ago, working since the status change');
+    const res = await core.searchSessions('Busy spike', { content: false, requestId: 'live-1', appRoot: APP_ROOT });
+    const row = res.rows.find((r) => r.sessionId === D);
+    assert.ok(row && row.live, JSON.stringify(res.rows));
+    assert.deepEqual([row.activityAt, row.workingSince], [card.activityAt, 7000], 'the same times as on its card, not the moment of the search');
+  } finally {
+    delete process.env.SB_SHIM_AGENTS;
+    fs.rmSync(reg, { force: true });
+    fs.rmSync(file, { force: true });
+    await core.snapshot();
+  }
+});
+
 test('search: a stowed transcript is found once, under its session id, with the archived chip', async () => {
   const rg = await core.rgProbe(APP_ROOT);
   if (!rg.path) { assert.ok(true, 'ripgrep not found; the search of stowed transcripts is checked manually'); return; }

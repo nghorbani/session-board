@@ -57,6 +57,7 @@ function serve(req, res) {
     const html = INDEX
       .replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '">')
       .replace('var POLL_MS = 4000;', 'var POLL_MS = 250;')
+      .replace('var ORDER_PENDING_MS = 10000;', 'var ORDER_PENDING_MS = ' + (Number(u.searchParams.get('hold')) || 10000) + ';')   // a test may shorten the hold of a pending change
       .replace('<script>', '<script>' + (u.searchParams.get('webview') === '1' ? 'window.__posted = []; window.acquireVsCodeApi = function () { return { postMessage: function (m) { window.__posted.push(m); }, getState: function () { return null; }, setState: function () {} }; }; ' : '') + 'window.confirm = function () { return window.__confirmAnswer !== false; }; window.__prompts = []; window.prompt = function (m, v) { window.__prompts.push([m, v]); return window.__promptAnswer === undefined ? null : window.__promptAnswer; };'
         + ' Object.defineProperty(navigator, "clipboard", { value: { writeText: function (t) { window.__copied = t; return Promise.resolve(); } } }); window.Notification = undefined;</script>\n<script>');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -196,8 +197,8 @@ async function attachPage(query) {
 }
 
 /** The page as the browser front end serves it: it polls the fake API. */
-async function openPage() {
-  const page = await attachPage('');
+async function openPage(query) {
+  const page = await attachPage(query || '');
   const ev = page.eval;
   Object.assign(page, {
     search: (q) => ev('(function () { var q = document.getElementById("q"); q.value = ' + JSON.stringify(q) + '; q.dispatchEvent(new Event("input")); q.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); return true; })()'),
@@ -1180,6 +1181,39 @@ test('page (browser): lock requests leave the page one after the other, so the s
   s = await page.sample();
   assert.deepEqual(s.locked, [], 'and the page shows the last click throughout');
   fake.locks = locksOk;
+  await page.close();
+});
+
+test('page (browser): a lock change that waits behind a slow reply is held until it is sent and then for the full hold, not from the click', opts, async () => {
+  fake.calls.length = 0;
+  const unlocked = () => snapshotOf(boardRows(), auto);
+  const locked = () => snapshotOf(boardRows({ [A]: { lockSlot: 2 } }), auto);
+  fake.snapshot = unlocked();
+  // a slow server. The lock is written after 1 s and answered after 2 s, longer than the hold of 1.5 s; the unlock is written just before its answer, after 1.2 s.
+  fake.locks = (body) => {
+    const isClear = Boolean(body.clear && body.clear.length);
+    const delayMs = isClear ? 1200 : 2000;
+    setTimeout(() => { fake.snapshot = isClear ? unlocked() : locked(); }, isClear ? delayMs - 60 : 1000);
+    return Object.assign(locksOk(), { delayMs });
+  };
+  const page = await openPage('?hold=1500');
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
+  await page.click(rowSel(A) + ' .lockbtn');
+  await page.click(rowSel(A) + ' .lockbtn');
+  const clicked = Date.now();
+  await page.until((x) => x.locked.length === 0, 'locked, then unlocked, both shown at once');
+  await sleep(Math.max(0, clicked + 1750 - Date.now()));     // a hold counted from the click would be over, the snapshots say "locked", the unlock still waits to be sent
+  let s = await page.sample();
+  assert.deepEqual(s.locked, [], 'the unlock holds while it waits to be sent');
+  await page.until(() => locksCalls().length === 2, 'the unlock is sent once the lock was answered');   // about 2 s after the clicks
+  await sleep(600);                                          // the snapshots still say "locked"; the answer to the unlock is still out
+  s = await page.sample();
+  assert.deepEqual(s.locked, [], 'and after it was sent: its hold counts from then');
+  await sleep(1300);                                         // the unlock is written and answered
+  s = await page.sample();
+  assert.deepEqual([s.locked, s.sections[0].rows], [[], [D, C, A, B]], 'and the snapshot agrees');
+  fake.locks = locksOk;
+  fake.snapshot = unlocked();
   await page.close();
 });
 

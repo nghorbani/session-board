@@ -426,6 +426,8 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   asks `placeRows()` with the slots it is about to write) does every lock of the section get
   the place it has. The browser page sends its lock requests one after the other, in the
   order of the clicks: two requests on two connections can reach the server in either order.
+  A change that waits to be sent holds on the page until it leaves, and its 10 s count from
+  then. `setLocks()` stores every id in lower case, the way Claude Code writes them.
   A `move` for a lock that another window cleared a moment ago writes nothing, and the page
   that sent it shows that card at the moved place until its hold ends, 10 s at most.
   A lock belongs to the session: in another window's section it sits at
@@ -476,11 +478,15 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   In the tracker a record that could not be removed is tried again on the next poll, and a
   row whose process is gone by the time the tracker reads it gets no record. A session the
   tracker has seen in its window keeps its record while nothing says where it runs (a poll
-  whose window lookup failed): the wait starts only when the session is gone or shows in
-  another window. A session that runs again in a newer process within the same lifetime gets
+  whose window lookup failed), as long as it is the same process: the wait starts when the
+  session is gone, shows in another window, or runs as another process without a window
+  (resumed in a terminal). A session that runs again in a newer process within the same lifetime gets
   a fresh record, so `reconcileKept()` does not take that process for a resume elsewhere once
   the host is gone. A record or a lock that cannot be read at a poll is left out of that poll
-  and left on disk (`readMarkers()`): a failed read is no reason to delete it. Limits: a
+  and left on disk (`readMarkers()`): a failed read is no reason to delete it. The tracker
+  looks at such a record again at its next poll before it lets go of its clean-up. A record
+  that cannot be written costs that one card: the other sessions and the clean-up are still
+  done, and the failure is logged once. Limits: a
   session that ends on its own, or whose tab is closed, less than 60 s before its window
   closes comes back once. So does a kept session resumed and ended in a terminal while no
   board of this version ran, or whose record could not be removed while it ran there

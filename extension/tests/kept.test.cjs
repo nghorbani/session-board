@@ -174,12 +174,14 @@ test('tracker: a session it has seen in its window keeps its record while nothin
   clearRecords();
   let clock = 5700000;
   const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
-  tracker.observe([runRow(LIVE, NEW, { pid: process.pid }), runRow(K1, NEW, { pid: process.pid })], root);
-  assert.deepEqual([has(LIVE), has(K1)], [true, true]);
-  const lost = [{ sessionId: LIVE, window: null, archived: false, pid: process.pid }, runRow(K1, OTHER, { pid: process.pid })];
+  tracker.observe([runRow(LIVE, NEW, { pid: process.pid }), runRow(K1, NEW, { pid: process.pid }), runRow(NOFILE, NEW, { pid: process.pid, startedAt: 1000 })], root);
+  assert.deepEqual([has(LIVE), has(K1), has(NOFILE)], [true, true, true]);
+  const lost = [{ sessionId: LIVE, window: null, archived: false, pid: process.pid }, runRow(K1, OTHER, { pid: process.pid }),
+    { sessionId: NOFILE, window: null, archived: false, pid: process.pid, startedAt: 2000 }];   // ended here and resumed in a terminal: another process, and no window is its true state
   for (let i = 0; i < 13; i++) { clock += 5000; tracker.observe(lost, root); }   // 65 s without a window for LIVE; K1 runs in another window now
   assert.ok(has(LIVE), 'it still runs and was last seen here: the wait does not start');
   assert.equal(has(K1), false, 'seen in another window: no longer this window\'s card');
+  assert.equal(has(NOFILE), false, 'another process of the session without a window is a resume elsewhere: the wait went on');
   assert.deepEqual(core.createKeptTracker(RUN_NEW, NEW, () => clock).observe([{ sessionId: K2, window: null, archived: false, pid: process.pid }], root), { written: 0, removed: 0 }, 'a session without a window that this lifetime never saw in its own gets no record');
   assert.equal(has(K2), false);
 });
@@ -203,6 +205,28 @@ test('a record or a lock that cannot be read for a moment stays; one that is no 
   assert.equal(has(K2), false, 'a file that holds no record is removed, as before');
   assert.deepEqual([core.readKept().get(K1).run, core.readLocks().get(K1).slot], [RUN_OLD, 4], 'readable again: back as it was');
   core.setLocks({ clear: [K1] });
+});
+
+test('tracker: a record it cannot read when the wait is over is looked at again; one that cannot be written does not stop the others', () => {
+  clearRecords();
+  let clock = 5900000;
+  const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
+  tracker.observe([runRow(LIVE, NEW)], root);
+  clock += 60000;
+  const read = fs.readFileSync;
+  fs.readFileSync = (p, ...rest) => { if (String(p) === file(LIVE)) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); return read(p, ...rest); };
+  try { assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 }); } finally { fs.readFileSync = read; }
+  assert.ok(has(LIVE), 'not readable at this poll: nothing says whose it is');
+  clock += 5000;
+  assert.deepEqual(tracker.observe([], root), { written: 0, removed: 1 }, 'readable again: it is this lifetime\'s and the session is gone, so it goes');
+
+  tracker.observe([runRow(K2, NEW)], root);                 // K2 runs, then ends: its record is due when the next rows come
+  clock += 60000;
+  const rename = fs.renameSync;
+  fs.renameSync = (from, to) => { if (String(to) === file(LIVE)) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }); return rename(from, to); };
+  try { assert.throws(() => tracker.observe([runRow(LIVE, NEW), runRow(K1, NEW)], root), /EPERM/, 'the failure is reported'); } finally { fs.renameSync = rename; }
+  assert.deepEqual([has(LIVE), has(K1), has(K2)], [false, true, false], 'the session after the one that failed has its record, and the ended one lost its own');
+  assert.deepEqual(names(), [K1 + '.json'], 'no temp file left behind');
 });
 
 test('tracker: a record that cannot be removed is tried again on the next poll', () => {

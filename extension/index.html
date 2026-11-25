@@ -999,9 +999,10 @@ function renderSwitch(data) {
 function sendLocks(req) {
   var set = req.set || {}, move = req.move || {}, clear = req.clear || [];
   var seq = ++state.lockSeq, until = Date.now() + ORDER_PENDING_MS;
-  Object.keys(set).forEach(function (id) { state.pendingLocks[id] = { slot: set[id], seq: seq, until: until }; });
-  Object.keys(move).forEach(function (id) { state.pendingLocks[id] = { slot: move[id], seq: seq, until: until }; });
-  clear.forEach(function (id) { state.pendingLocks[id] = { slot: null, seq: seq, until: until }; });
+  var waiting = !vsapi;                                    // the browser page queues its requests (below): a change holds while it waits to be sent
+  Object.keys(set).forEach(function (id) { state.pendingLocks[id] = { slot: set[id], seq: seq, until: until, waiting: waiting }; });
+  Object.keys(move).forEach(function (id) { state.pendingLocks[id] = { slot: move[id], seq: seq, until: until, waiting: waiting }; });
+  clear.forEach(function (id) { state.pendingLocks[id] = { slot: null, seq: seq, until: until, waiting: waiting }; });
   render();
   setTimeout(render, ORDER_PENDING_MS + 50);              // the guard's expiry needs a repaint
   if (vsapi) { send({ type: 'locks', set: set, move: move, clear: clear, seq: seq }); return true; }
@@ -1009,6 +1010,10 @@ function sendLocks(req) {
   // the server in either order, and a lock that lands after its unlock would stay. (The host takes
   // the webview's messages in order.) The page shows every change at once all the same.
   state.lockQueue = state.lockQueue.then(function () {
+    // the hold counts from the moment the request leaves: one that waited behind slow replies must not run out before its own answer
+    var sent = Date.now() + ORDER_PENDING_MS;
+    Object.keys(state.pendingLocks).forEach(function (id) { var p = state.pendingLocks[id]; if (p.seq === seq) { p.waiting = false; p.until = sent; } });
+    setTimeout(render, ORDER_PENDING_MS + 50);
     return api('POST', '/api/locks', { set: set, move: move, clear: clear }).then(function (res) {
       var b = res.body || {};
       onLocksResult({ ok: Boolean(res.ok && b.ok), seq: seq, message: b.error || b.message || ('http ' + res.status) });
@@ -1051,7 +1056,7 @@ function toggleLock(sid) {
   return sendLocks({ set: set });
 }
 
-/** Put `sid` directly before or after `targetSid` in their section and lock it there; every other locked card gets the place it then has. */
+/** Put `sid` directly before or after `targetSid` in their section and lock it there; another locked card gets a new slot only when the drop moved it (see below). */
 function applyDrop(sid, targetSid, before) {
   var at = placeOf(sid), target = placeOf(targetSid);
   if (!at || !target || sid === targetSid || at.sec.key !== target.sec.key) return false;
@@ -1218,7 +1223,7 @@ function isMuted(s) { var p = state.pendingMute[s.sessionId]; return p && p.unti
 /** The row's slot as the page places it: a fresh lock change on the page wins over the last snapshot; null means not locked. */
 function slotOf(s) {
   var p = state.pendingLocks[s.sessionId];
-  if (p && p.until > Date.now()) return p.slot;
+  if (p && (p.waiting || p.until > Date.now())) return p.slot;
   return typeof s.lockSlot === 'number' && isFinite(s.lockSlot) && s.lockSlot >= 0 ? s.lockSlot : null;
 }
 
@@ -1457,7 +1462,7 @@ function onSnapshot(data) {
     var p = state.pendingLocks[sid];
     var row = (data.sessions || []).concat(data.ended || []).filter(function (x) { return x.sessionId === sid; })[0];
     var slot = row && typeof row.lockSlot === 'number' ? row.lockSlot : null;
-    if (!row || (p.acked && slot === p.slot) || p.until <= Date.now()) delete state.pendingLocks[sid];
+    if (!row || (p.acked && slot === p.slot) || (!p.waiting && p.until <= Date.now())) delete state.pendingLocks[sid];
   });
   // the switch holds its mode until a snapshot agrees, or the guard expires
   var ps = state.pendingShow;

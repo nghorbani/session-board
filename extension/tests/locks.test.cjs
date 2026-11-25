@@ -58,6 +58,10 @@ test('store: set locks an id at a slot, move changes only a lock that exists, cl
   assert.equal(slot(B), 1);
   assert.deepEqual(core.setLocks({ clear: [A] }), { set: 0, moved: 0, cleared: 0 }, 'clearing an unlocked id is not an error');
   assert.deepEqual(names(), [B + '.json'], 'no temp file left behind');
+  core.setLocks({ set: { [C.toUpperCase()]: 6 } });
+  assert.deepEqual(names(), [B + '.json', C + '.json'].sort(), 'an id sent in upper case is stored the way a row carries it, in lower case');
+  assert.equal(core.readLocks().get(C).slot, 6, 'so the lock is found under the row\'s id');
+  assert.deepEqual(core.setLocks({ clear: [C.toUpperCase()] }), { set: 0, moved: 0, cleared: 1 });
 });
 
 test('store: one bad entry refuses the whole request before any write', () => {
