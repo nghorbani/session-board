@@ -1189,14 +1189,9 @@ test('page (browser): lock requests leave the page one after the other, so the s
 test('page (browser): a lock request that gets no answer fails after its time, what waited behind it is not sent, and the next change goes out', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf(boardRows(), auto);
-  // the server takes the first request and never answers it; from the second on it works again and writes what it is told
+  // the server takes the first request and never answers it; from the second on it answers again
   let taken = 0;
-  fake.locks = (body) => {
-    taken += 1;
-    if (taken === 1) return { never: true };
-    if (taken === 2) fake.snapshot = snapshotOf(boardRows({ [C]: { lockSlot: body.set[C] } }), auto);
-    return locksOk();
-  };
+  fake.locks = () => { taken += 1; return taken === 1 ? { never: true } : locksOk(); };
   // 3 s for an answer: the second click has to land within them also on a slow run. The hold is longer, so it is not what ends the first change.
   const page = await openPage('?hold=9000&reply=3000');
   await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
@@ -1213,11 +1208,16 @@ test('page (browser): a lock request that gets no answer fails after its time, w
   await page.click(rowSel(C) + ' .lockbtn');                 // the page works on
   await page.until(() => locksCalls().length === 2, 'the next change to go out');
   assert.deepEqual(locksCalls()[1], { set: { [C]: 1 }, move: {}, clear: [] });
-  // answered, not only drawn: a pending change ends before its hold of 9 s only when its reply came and a snapshot agrees
+  // answered, not only drawn: the reply marks the pending change (a failure would remove it), and a marked change ends when a snapshot agrees
+  const pendingC = 'state.pendingLocks[' + JSON.stringify(C) + ']';
+  let acked = false;
+  for (let i = 0; i < 25 && !acked; i++) { await sleep(100); acked = await page.eval('Boolean(' + pendingC + ' && ' + pendingC + '.acked)'); }
+  assert.equal(acked, true, 'the reply to the next change was taken as a success');
+  fake.snapshot = snapshotOf(boardRows({ [C]: { lockSlot: 1 } }), auto);   // the server's list now holds the lock
   let pending = -1;
   for (let i = 0; i < 25 && pending !== 0; i++) { await sleep(100); pending = await page.eval('Object.keys(state.pendingLocks).length'); }
-  assert.equal(pending, 0, 'the reply to the next change was taken');
-  assert.deepEqual((await page.sample()).locked, [C], 'and the card is locked as the server says');
+  assert.equal(pending, 0, 'and the change ends when a snapshot agrees');
+  assert.deepEqual((await page.sample()).locked, [C], 'the card is locked as the server says');
   await page.click(rowSel(D) + ' .lockbtn');                 // and the queue is free behind it
   await page.until(() => locksCalls().length === 3, 'a further change to go out');
   fake.locks = locksOk;
