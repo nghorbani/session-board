@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-const { createNotesStore } = require('./notes.cjs');
+const { createNotesStore, writeJsonAtomic } = require('./notes.cjs');
 
 const PKG = require('./package.json');
 const EXTENSION_ID = PKG.publisher + '.' + PKG.name;
@@ -1291,14 +1291,6 @@ function readMarkers(dir, maxAgeMs) {
   return out;
 }
 
-/** Write a JSON record so that no reader meets half a file: to a temp name next to it, then a rename (locks, kept records). */
-function writeJsonAtomic(file, rec) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + '.tmp.' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify(rec));
-  fs.renameSync(tmp, file);
-}
-
 function writeMarker(dir, sessionId, rec) {
   sessionId = String(sessionId || '');
   if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
@@ -1450,7 +1442,7 @@ function setLocks(req) {
   if (ids.length > LOCK_MAX_IDS) throw invalidLock('too many ids (' + ids.length + ' over ' + LOCK_MAX_IDS + ')');
   if (new Set(ids).size !== ids.length) throw invalidLock('a session id is named twice');
   const at = Date.now();
-  const write = (id, slot) => writeJsonAtomic(lockFile(id), { slot, at });
+  const write = (id, slot) => writeJsonAtomic(fs, lockFile(id), { slot, at });   // temp file then rename (notes.cjs): no reader meets half a file
   let moved = 0;
   let cleared = 0;
   for (const [id, slot] of set) write(id, slot);
@@ -1492,7 +1484,7 @@ function reconcileLocks(locks, liveIds, boardIds, claude, index) { reconcileMark
  * again), `at` when that lifetime wrote the record.
  *
  *   host poll ──▶ tracker.observe(rows, folder)
- *                   running row of this host's window, not archived ──▶ record (once per lifetime)
+ *                   running row of this host's window, not archived ──▶ record (once per process and lifetime)
  *                   a row this lifetime saw running, gone for KEPT_GRACE_MS ──▶ record removed
  *                   (it ended while the window lived; the wait covers a host that sees its
  *                    sessions go while it is shutting down itself)
@@ -1536,7 +1528,7 @@ function createKeptTracker(run, hostPid, clock) {
         // (ended and resumed within the wait): the record follows it, or reconcileKept would read the
         // new process as a resume elsewhere once this host is gone.
         if (m && m.run === run && m.root === root && !(Number(r.startedAt) > Number(m.at))) continue;
-        writeJsonAtomic(keptFile(r.sessionId), { root, run, at });
+        writeJsonAtomic(fs, keptFile(r.sessionId), { root, run, at });
         written += 1;
       }
       for (const [id, seenAt] of [...lastRunning]) {
@@ -1569,6 +1561,21 @@ function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
     try { fs.unlinkSync(keptFile(r.sessionId)); } catch (_) { /* gone already, or the next snapshot retries */ }
     kept.delete(r.sessionId);
   }
+}
+
+/**
+ * Drop the kept record of a session that was ended on the user's word; `since` is when that end
+ * began. A record written after it is left alone: the session ran again in a newer process while
+ * the end of the old one was still under way, and that record is not this end's to take. Returns
+ * null, or why the record could not be removed. Its window's tracker then drops it after its
+ * wait, as for a session that ended by itself, so the caller reports the reason and goes on.
+ */
+function forgetKept(sessionId, since) {
+  const file = keptFile(sessionId);
+  let rec = null;
+  try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e && e.code === 'ENOENT') return null; }
+  if (rec && Number(rec.at) > Number(since)) return null;
+  try { fs.unlinkSync(file); return null; } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }
 }
 
 /*
@@ -2578,12 +2585,14 @@ async function endSession(sessionId, opts) {
   if (!UUID_RE.test(sessionId)) return applyArchive(sessionId, { ok: false, code: 'invalid', message: 'Not a session id.' }, archive);
   if (ending.has(sessionId)) return applyArchive(sessionId, { ok: false, code: 'pending', message: 'Already ending this session.' }, archive);
   const p = (async () => {
+    const began = Date.now();
     const ended = await doEndSession(sessionId, Boolean(opts && opts.force));
     // Ended on the user's word: no card to keep, whatever its window does next. Its window's
     // tracker would drop the record only after its wait, and a window closed before that
     // would bring the card back.
-    if (ARCHIVE_OK.has(ended.code)) { try { fs.unlinkSync(keptFile(sessionId)); } catch (_) { /* no record */ } }
+    const keptError = ARCHIVE_OK.has(ended.code) ? forgetKept(sessionId, began) : null;
     const result = applyArchive(sessionId, ended, archive);
+    if (keptError) result.keptError = keptError;             // the end stands; the host says what was left behind
     if (result.archived) Object.assign(result, await stowTranscript(sessionId));
     return result;
   })();

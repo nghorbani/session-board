@@ -102,7 +102,7 @@ test('tracker: one record for a running row of its window; none for another wind
   assert.deepEqual(names(), [LIVE + '.json'], 'no temp file left behind, no record for the other rows');
   assert.deepEqual(rec(LIVE), { root: keyOf(REAL), run: RUN_NEW, at: 1000000 }, 'the folder by its real path, the lifetime, the time');
   clock += 5000;
-  assert.deepEqual(tracker.observe(rows, root), { written: 0, removed: 0 }, 'a running session costs one write per lifetime');
+  assert.deepEqual(tracker.observe(rows, root), { written: 0, removed: 0 }, 'a running session costs one write per process and lifetime, not one per poll');
   assert.equal(rec(LIVE).at, 1000000);
   assert.deepEqual(core.createKeptTracker(RUN_NEW, NEW, () => clock).observe([runRow(K1, NEW)], null), { written: 0, removed: 0 }, 'a window without a folder');
   assert.equal(has(K1), false);
@@ -195,6 +195,23 @@ test('an explicit end drops the record at once: ended by hand and the window clo
   const r = await core.endSession(K1, {});
   assert.equal(r.code, 'unknown', 'the session is not running (any more)');
   assert.equal(has(K1), false, 'the end is the user\'s word: no card to keep');
+  assert.equal('keptError' in r, false);
+
+  // the session ran again while the end was still under way: a record written since the end began is the newer process's
+  record(K1, { run: RUN_NEW, at: Date.now() + 60000 });
+  await core.endSession(K1, {});
+  assert.ok(has(K1), 'the end of the old process does not take the record of the new one');
+
+  // a record that cannot be removed: the end still succeeds and says so, instead of calling the card gone
+  record(K1, { run: RUN_NEW });
+  const unlink = fs.unlinkSync;
+  fs.unlinkSync = (p) => { if (String(p) === file(K1)) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); return unlink(p); };
+  let held;
+  try { held = await core.endSession(K1, {}); } finally { fs.unlinkSync = unlink; }
+  assert.deepEqual([held.code, has(K1)], ['unknown', true]);
+  assert.match(held.keptError, /EPERM/, 'the result names what was left behind');
+  await core.endSession(K1, {});
+  assert.equal(has(K1), false, 'the next end removes it');
   // an end that is refused drops nothing: the session works and no force was given, so nothing is killed
   fs.writeFileSync(path.join(sessionsDir, process.pid + '.json'), JSON.stringify({ sessionId: LIVE, status: 'busy', statusUpdatedAt: Date.now() }));
   agents([Object.assign(liveRow(Date.now() - 1000), { status: 'busy' })]);

@@ -76,4 +76,11 @@ test('a tracker that throws leaves the poll and the push to the page intact, and
   assert.equal(said().length, 3, 'gone and back: said again');
 });
 
+test('an end that left the card\'s record behind says so in the log', async () => {
+  const { provider } = boot({ endSession: async () => ({ ok: true, code: 'ended', keptError: 'EPERM: operation not permitted' }) }, { last: { sessions: [{ sessionId: A, title: 'Spike', status: 'idle' }], limits: {}, usage: null } });
+  provider.schedule = () => {};
+  await provider.endSession(A, false, false);
+  assert.ok(vscode.__log.some(([lvl, m]) => lvl === 'info' && /end .*ended.*card record not removed: EPERM/.test(m)), JSON.stringify(vscode.__log));
+});
+
 test.after(() => cleanup());

@@ -159,7 +159,8 @@ installed.
   is gone, a session resumed in a process younger than its record).
 - `kept-host.test.cjs`: one `run` per activation in every heartbeat and in the tracker; a poll
   hands the tracker the running rows and the first workspace folder, not on a stale snapshot
-  and not after `stop()`; a tracker that throws leaves the poll intact and is logged once.
+  and not after `stop()`; a tracker that throws leaves the poll intact and is logged once; an
+  end that left a card's record behind says so in the log.
 - `activity.test.cjs`: `lastMessageAt()` (top level only, cut lines, bad dates, the larger
   second read) and `activityAt` and `workingSince` on the snapshot across the status changes.
 - `locks-host.test.cjs`: the `locks`, `showMode` and `archivePast` messages and their replies,
@@ -441,9 +442,11 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   with an archive (on the board at once, in `archiveSession()`), with a transcript that is
   gone, and when the session runs again in a process younger than the record while the
   record's lifetime is dead (resumed in a terminal or in a window on an older board: the card
-  is spent). ✕ on the board drops the record at once (`endSession()`), a record that could
-  not be removed is tried again on the next poll, and a row whose process is gone by the time
-  the tracker reads it gets no record. A session that runs again in a newer process within
+  is spent). ✕ on the board drops the record at once (`endSession()`, `forgetKept()`): a
+  record written after that end began is left, since the session ran again in a newer process
+  meanwhile, and a removal that fails is named in the end result (`keptError`) and logged.
+  In the tracker a record that could not be removed is tried again on the next poll, and a
+  row whose process is gone by the time the tracker reads it gets no record. A session that runs again in a newer process within
   the same lifetime gets a fresh record, so `reconcileKept()` does not take that process for
   a resume elsewhere once the host is gone. Limits: a session that ends on its own, or whose
   tab is closed, less than 60 s before its window closes comes back once, and so does a kept

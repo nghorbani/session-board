@@ -927,7 +927,8 @@ class BoardProvider {
     const moveError = result.archived ? (result.moveError || null) : null;
     this.log.info((archive ? 'archive ' : 'end ') + sessionId + ': ' + result.code + (result.archived ? ' +archived' : '') + (result.moved ? ' +moved' : '')
       + (result.message ? ' (' + result.message + ')' : '') + (result.archiveError ? '; archive failed: ' + result.archiveError : '')
-      + (moveError ? '; move failed: ' + moveError : ''));
+      + (moveError ? '; move failed: ' + moveError : '')
+      + (result.keptError ? '; card record not removed: ' + result.keptError : ''));   // its window drops it after a minute; closed before that, the card shows once more
     this.post({ type: 'endResult', sessionId, ok: result.ok, code: result.code, message: result.message || '', archived: Boolean(result.archived), archiveError: result.archiveError || null, moved: Boolean(result.moved), moveError });
     if (result.ok && result.archiveError) vscode.window.showWarningMessage('Ended, not archived: ' + label + ' (' + result.archiveError + ')');
     else if (result.ok && moveError) vscode.window.showWarningMessage('Archived on the board; transcript not moved: ' + moveError);
