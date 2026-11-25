@@ -325,6 +325,11 @@ const SAMPLE = `(function () {
   };
 })()`;
 
+/* What typing into the open note box does: the text, and the input event by which the page keeps
+   the draft. The box is rebuilt on every redraw, so a text set without the event is gone when a
+   push comes in before the click (the push of a note kept a moment earlier, for one). */
+const typeNote = (page, text) => page.eval('(function () { var ta = document.querySelector(".notebox textarea"); ta.value = ' + JSON.stringify(text) + '; ta.dispatchEvent(new Event("input", { bubbles: true })); })()');
+
 async function openPage(sessionId, path) {
   path = path || ('/steps?session=' + sessionId);
   const { targetId } = await cdp.send('Target.createTarget', { url: 'http://127.0.0.1:' + PORT + path });
@@ -341,10 +346,10 @@ async function openPage(sessionId, path) {
     search: (q) => ev('(function () { var i = document.getElementById("q"); i.value = ' + JSON.stringify(q) + '; i.dispatchEvent(new Event("input")); return true; })()'),
     scroll: (top) => ev('(function () { document.getElementById("reader").scrollTop = ' + Number(top) + '; document.getElementById("reader").dispatchEvent(new Event("scroll")); return true; })()'),
     eval: (expr) => ev(expr),
-    until: async (pred, what) => {
+    until: async (pred, what, ms) => {
       const start = Date.now();
       let s = null;
-      while (Date.now() - start < 20000) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
+      while (Date.now() - start < (ms || 20000)) { try { s = await ev(SAMPLE); if (pred(s)) return s; } catch (_) { /* page still loading */ } await sleep(100); }
       throw new Error('timed out waiting for ' + what + '; last sample: ' + JSON.stringify(s));
     },
     close: () => cdp.send('Target.closeTarget', { targetId }),
@@ -1791,7 +1796,7 @@ test('page: the page for the PDF is never wider than the paper: a long token, a 
   assert.ok(w.page <= w.paper, 'nothing reaches past the paper, or a browser shrinks every text to fit it: ' + JSON.stringify(w));
 });
 
-test('page in the VS Code panel: Export hands the story to the host, which saves the Markdown where the dialog says and prints a real PDF', opts, async () => {
+test('page in the VS Code panel: Export hands the story to the host, which saves the Markdown where the dialog says and prints a real PDF', Object.assign({}, opts, { timeout: 120000 }), async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-steps-export-'));
   const file = path.join(dir, A + '.jsonl');
   fs.writeFileSync(file, [rUser(1, 'how is it going?'), rText(2, LONG_ANSWER), rUser(3, 'and the rest?'), rText(4, 'All of it is done.')].map((l) => JSON.stringify(l) + '\n').join(''));
@@ -1823,7 +1828,7 @@ test('page in the VS Code panel: Export hands the story to the host, which saves
     const noticesBefore = s.notices.length;
     await page.click('#exportBtn');
     await page.click('#exportMenu [data-export="pdf"]');
-    s = await page.until((x) => x.notices.length > noticesBefore && x.notices.slice(noticesBefore).some((n) => n.indexOf('Saved ') === 0 || n.indexOf('failed') !== -1), 'the answer to the PDF export');
+    s = await page.until((x) => x.notices.length > noticesBefore && x.notices.slice(noticesBefore).some((n) => n.indexOf('Saved ') === 0 || n.indexOf('failed') !== -1), 'the answer to the PDF export', 90000);   // a browser is started for the print: seen at 27 s on a busy machine
     assert.ok(s.notices.slice(noticesBefore).some((n) => n.indexOf(pdfFile) !== -1), JSON.stringify(s.notices.slice(noticesBefore)));
     const bytes = fs.readFileSync(pdfFile);
     assert.equal(bytes.slice(0, 5).toString('latin1'), '%PDF-');
@@ -2278,7 +2283,7 @@ test('page: "Send to session" shows the reply line and "Sent HH:MM" under the no
   await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
   await page.click('.row.k-you .add-note');
   await page.until((x) => x.noteBoxOpen, 'the note box to open');
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "why this approach?"; })()');
+  await typeNote(page, 'why this approach?');
   await page.click('.notebox .row2 button.primary'); // Send to session
   const s = await page.until((x) => x.noticeText === 'In the chat box and on the clipboard.', 'the reply line to show');
   const kept = await page.until((x) => x.savedNoteSentText, 'the Sent mark to show under the note');
@@ -2297,7 +2302,7 @@ test('page: a copy-only reply from "Send to session" shows that line instead, wi
   await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
   await page.click('.row.k-you .add-note');
   await page.until((x) => x.noteBoxOpen, 'the note box to open');
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "a note"; })()');
+  await typeNote(page, 'a note');
   await page.click('.notebox .row2 button.primary');
   const s = await page.until((x) => x.noticeText === 'On the clipboard. Paste it into the session.', 'the copy-only line to show');
   assert.equal(s.savedNoteSentText, null, 'not recorded as sent on a copy-only reply');
@@ -2319,7 +2324,7 @@ test('page: "Send all notes" sends every kept note in one call and shows the rep
   for (const sid of ['u1:0', 'u2:0']) {
     await page.eval('(function () { document.getElementById("step-' + sid + '").querySelector(".add-note").click(); })()');
     await page.until((x) => x.noteBoxOpen, 'a note box to open for ' + sid);
-    await page.eval('(function () { document.querySelector(".notebox textarea").value = "note on ' + sid + '"; })()');
+    await typeNote(page, 'note on ' + sid);
     await page.click('.notebox .row2 button:first-child'); // Keep note
     await page.until((x) => !x.noteBoxOpen, 'the box to close after keeping');
   }
@@ -2340,13 +2345,13 @@ test('page: editing a kept note changes its text in place', opts, async () => {
   await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
   await page.click('.row.k-you .add-note');
   await page.until((x) => x.noteBoxOpen, 'the note box to open');
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "first version"; })()');
+  await typeNote(page, 'first version');
   await page.click('.notebox .row2 button:first-child');
   await page.until((x) => x.savedNoteText && x.savedNoteText.indexOf('first version') !== -1, 'the first version to show');
   await page.click('.add-note'); // reopen, now showing "Note" since one exists
   const reopened = await page.until((x) => x.noteBoxOpen, 'the box to reopen with the existing text');
   assert.ok(reopened.noteBoxText.indexOf('first version') !== -1);
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "edited version"; })()');
+  await typeNote(page, 'edited version');
   await page.click('.notebox .row2 button:first-child');
   const edited = await page.until((x) => x.savedNoteText && x.savedNoteText.indexOf('edited version') !== -1, 'the edit to land');
   assert.equal(edited.notedRows, 1, 'still one note, not a second one added');
@@ -2362,7 +2367,7 @@ test('page: deleting a note clears it from the step and the tile', opts, async (
   await page.until((x) => x.sectionHeadings.length >= 1, 'first paint');
   await page.click('.row.k-you .add-note');
   await page.until((x) => x.noteBoxOpen, 'the note box to open');
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "to be deleted"; })()');
+  await typeNote(page, 'to be deleted');
   await page.click('.notebox .row2 button:first-child');
   await page.until((x) => x.savedNoteText, 'the note to be kept first');
   await page.click('.add-note');
@@ -2401,7 +2406,7 @@ test('page: the Notes switch narrows the outline to sections with a note, with i
   // now add a note on the second message only, then switch to the notes lens
   await page.eval('(function () { document.getElementById("step-u2:0").querySelector(".add-note").click(); })()');
   await page.until((x) => x.noteBoxOpen, 'the note box on the second message to open');
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "note on the second one"; })()');
+  await typeNote(page, 'note on the second one');
   await page.click('.notebox .row2 button:first-child');
   await page.until((x) => x.notesTileNum === '1', 'the tile to count the new note');
   await page.click('.strip .item:nth-child(5)');
@@ -2425,7 +2430,7 @@ test('page: the notes counter in the header jumps between notes', opts, async ()
   for (const sid of ['u1:0', 'u2:0']) {
     await page.eval('(function () { document.getElementById("step-' + sid + '").querySelector(".add-note").click(); })()');
     await page.until((x) => x.noteBoxOpen, 'a note box to open for ' + sid);
-    await page.eval('(function () { document.querySelector(".notebox textarea").value = "note on ' + sid + '"; })()');
+    await typeNote(page, 'note on ' + sid);
     // a notesChanged push for an earlier note in this same loop can land mid-click and redraw
     // the reader (rebuilding the open box's own DOM in the process); retry the click rather than
     // assume the button found a moment ago by page.until is still the one attached to the page.
@@ -2462,7 +2467,7 @@ test('page: a note on a step off the current path stays listed, marked according
   await page.until((x) => x.sectionHeadings.length >= 2, 'first paint');
   await page.eval('(function () { document.getElementById("step-u1:0").querySelector(".add-note").click(); })()');
   await page.until((x) => x.noteBoxOpen, 'the note box on the first message to open');
-  await page.eval('(function () { document.querySelector(".notebox textarea").value = "note before the retry"; })()');
+  await typeNote(page, 'note before the retry');
   await page.click('.notebox .row2 button:first-child');
   await page.until((x) => x.savedNoteText, 'the note to be kept while the step is still on the path');
   const onPath = await page.sample();
