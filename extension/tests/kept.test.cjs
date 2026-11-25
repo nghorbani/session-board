@@ -283,9 +283,12 @@ test('an end takes the record of the process it was aimed at and leaves that of 
   assert.deepEqual([out.code, wrote], ['ended', one], JSON.stringify(out));
   assert.ok(has(K1), 'a process started later than the one the end was aimed at, also when it started before the end was asked for');
 
-  // a row without a start time (an older CLI): the two processes cannot be told apart, the record goes
+  // a row without a start time (an older CLI): the time the end was asked for stands in for the start of its process
   out = await endUnderWay(K1, {}, null);
-  assert.deepEqual([out.code, has(K1)], ['ended', false], 'its window writes it again at its next poll if the session runs there');
+  assert.deepEqual([out.code, has(K1)], ['ended', false], 'the record names a process that ran before the end was asked for: it may be the one that was ended, so it goes');
+  out = await endUnderWay(K1, { during: () => { wrote = seen({ pid: process.pid, startedAt: Date.now() }); } }, null);
+  assert.deepEqual([out.code, wrote], ['ended', one], JSON.stringify(out));
+  assert.ok(has(K1), 'a process started after the end was asked for is not the one that was ended, whatever is known of that one');
 });
 
 test('heartbeat: carries the run of its host; a value that is no run id is left out', () => {

@@ -1568,26 +1568,28 @@ function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
 
 /**
  * Drop the kept record of a session that was ended on the user's word; `aimedStart` is the start
- * of the process that end was aimed at (the row this board last saw), when it has one. The
- * record of a process started later than that one is left alone: the session ran again, before
- * the end was asked for (this board still showed the old process) or while it was under way,
- * and that record is not this end's to take. The two starts decide, not the time of a write or
- * of the request: a window that sees the session for the first time during the end writes a
- * record for the very process being ended. Where the two cannot be told apart (no row any more,
- * or no start time from an older CLI) the record goes. Returns null, or why the record could
- * not be removed. Its window's tracker then drops it after its wait, as for a session that
- * ended by itself, so the caller reports the reason and goes on.
+ * of the process that end was aimed at (the row this board last saw), `since` when the end was
+ * asked for. The record of a process started later than the aimed one is left alone: the
+ * session ran again, before the end was asked for (this board still showed the old process) or
+ * while it was under way, and that record is not this end's to take. The starts decide, not
+ * the time of a write: a window that sees the session for the first time during the end writes
+ * a record for the very process being ended. Without a start of the aimed process (no row any
+ * more, or an older CLI) `since` stands in for it: a process started after the end was asked
+ * for is a later one in any case, one started before it may be the one that was ended. A record
+ * without a start time goes. Returns null, or why the record could not be removed. Its window's
+ * tracker then drops it after its wait, as for a session that ended by itself, so the caller
+ * reports the reason and goes on.
  *
  * No lock between windows here either: a record another window writes between this read and
  * the removal goes too. Like every record taken from a session that runs on, its window's
  * tracker finds none at its next poll and writes it again.
  */
-function forgetKept(sessionId, aimedStart) {
+function forgetKept(sessionId, aimedStart, since) {
   const file = keptFile(sessionId);
   let rec = null;
   try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e && e.code === 'ENOENT') return null; }
-  const aimed = Number(aimedStart);
-  if (rec && aimed > 0 && Number(rec.startedAt) > aimed) return null;
+  const aimed = Number(aimedStart) > 0 ? Number(aimedStart) : Number(since);
+  if (rec && Number(rec.startedAt) > aimed) return null;
   try { fs.unlinkSync(file); return null; } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }
 }
 
@@ -2598,12 +2600,13 @@ async function endSession(sessionId, opts) {
   if (!UUID_RE.test(sessionId)) return applyArchive(sessionId, { ok: false, code: 'invalid', message: 'Not a session id.' }, archive);
   if (ending.has(sessionId)) return applyArchive(sessionId, { ok: false, code: 'pending', message: 'Already ending this session.' }, archive);
   const p = (async () => {
+    const began = Date.now();
     const row = lastGoodRows().find((r) => r.sessionId === sessionId);   // the process this end is aimed at, as this board last saw it
     const ended = await doEndSession(sessionId, row, Boolean(opts && opts.force));
     // Ended on the user's word: no card to keep, whatever its window does next. Its window's
     // tracker would drop the record only after its wait, and a window closed before that
     // would bring the card back.
-    const keptError = ARCHIVE_OK.has(ended.code) ? forgetKept(sessionId, row && row.startedAt) : null;
+    const keptError = ARCHIVE_OK.has(ended.code) ? forgetKept(sessionId, row && row.startedAt, began) : null;
     const result = applyArchive(sessionId, ended, archive);
     if (keptError) result.keptError = keptError;             // the end stands; the host says what was left behind
     if (result.archived) Object.assign(result, await stowTranscript(sessionId));

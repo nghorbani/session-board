@@ -155,8 +155,9 @@ installed.
   gone; a removal that fails once; a record that went missing written again), an explicit
   end, an end held open at a gate in the `claude stop` shim while its window writes a record
   (for the process being ended, for one started since, for one started before the end was
-  asked for, and with a row that has no start time), `run` in the heartbeat, the `kept` flag
-  of `listedSessions()`
+  asked for; and with a row that has no start time, for a process started before and for
+  one started after the request), `run` in the heartbeat, the `kept` flag of
+  `listedSessions()`
   (a dead lifetime, a live one, another folder, a junction and its target, no row added or
   moved, a dead host that owns no folder) and `reconcileKept()` (an archive, a transcript that
   is gone, a session resumed in a process younger than its record).
@@ -453,12 +454,13 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   at (the row this board last saw) is left, since the session ran again, before the end was
   asked for or while it ran. The two starts decide, not the time of a write or of the
   request: a window that sees the session for the first time while the end runs writes a
-  record for the very process being ended. Without a row or without a start time the two
-  cannot be told apart and the record goes. A removal that fails is named in the end result
-  (`keptError`) and logged. No lock between windows here either: a record another window
-  writes between the end's read and its removal goes too. Whenever a record is taken from a
-  session that runs on, its window's tracker, which reads the folder at every poll, writes
-  it again at its next one.
+  record for the very process being ended. Without a start of the aimed process (no row any
+  more, or an older CLI) the time the end was asked for stands in for it: a process started
+  after that is a later one in any case. A record without a start time goes. A removal that
+  fails is named in the end result (`keptError`) and logged. No lock between windows here
+  either: a record another window writes between the end's read and its removal goes too.
+  Whenever a record is taken from a session that runs on, its window's tracker, which reads
+  the folder at every poll, writes it again at its next one.
   In the tracker a record that could not be removed is tried again on the next poll, and a
   row whose process is gone by the time the tracker reads it gets no record. A session that runs again in a newer process within
   the same lifetime gets a fresh record, so `reconcileKept()` does not take that process for
