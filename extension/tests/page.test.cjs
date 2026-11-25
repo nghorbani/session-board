@@ -1135,6 +1135,54 @@ test('page: with a filter typed the grip stays and Alt+Down goes past the next c
   await page.close();
 });
 
+test('page: a move leaves the slot of a locked card it did not move, also one past the end of this list; when the cards would not come out as dropped, every lock is written at its place', opts, async () => {
+  fake.calls.length = 0;
+  // A was locked tenth in a longer list (auto with many ended rows); this list has four cards, so it shows last
+  fake.snapshot = snapshotOf(boardRows({ [A]: { lockSlot: 9 } }), auto);
+  const page = await openPage();
+  let s = await page.until((x) => x.sections.length === 1 && x.locked.length === 1, 'the rows');
+  assert.deepEqual(s.sections[0].rows, [D, C, B, A], 'the lock past the end sits at the end');
+  await page.key(C, 'ArrowDown');
+  s = await page.until((x) => x.sections[0].rows[1] === B, 'moved at once');
+  assert.deepEqual(s.sections[0].rows, [D, B, C, A]);
+  await page.until(() => locksCalls().length === 1, 'the POST');
+  assert.deepEqual(locksCalls()[0], { set: { [C]: 2 }, move: {}, clear: [] }, 'A did not move: its slot stays 9, its place in the longer list');
+  await page.close();
+
+  // three locks past the end; C goes before B. Kept at 9, A would sort after both: the cards would not come out as dropped
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows({ [A]: { lockSlot: 9 }, [B]: { lockSlot: 12 }, [C]: { lockSlot: 15 } }), auto);
+  const page2 = await openPage();
+  s = await page2.until((x) => x.sections.length === 1 && x.locked.length === 3, 'three locks');
+  assert.deepEqual(s.sections[0].rows, [D, A, B, C]);
+  await page2.key(C, 'ArrowUp');
+  s = await page2.until((x) => x.sections[0].rows[2] === C, 'moved at once');
+  assert.deepEqual(s.sections[0].rows, [D, A, C, B], 'as dropped');
+  await page2.until(() => locksCalls().length === 1, 'the POST');
+  assert.deepEqual(locksCalls()[0], { set: { [C]: 2 }, move: { [A]: 1, [B]: 3 }, clear: [] }, 'here every lock is written at the place it has');
+  await page2.close();
+});
+
+test('page (browser): lock requests leave the page one after the other, so the server never takes a later change first', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  fake.locks = () => Object.assign(locksOk(), { delayMs: 700 });
+  const page = await openPage();
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
+  await page.click(rowSel(A) + ' .lockbtn');
+  await page.click(rowSel(A) + ' .lockbtn');
+  let s = await page.until((x) => x.locked.length === 0, 'both shown at once: locked, then unlocked');
+  await page.until(() => locksCalls().length === 1, 'the first POST');
+  await sleep(300);                                          // the first reply is still out
+  assert.equal(locksCalls().length, 1, 'the unlock waits for the reply to the lock');
+  await page.until(() => locksCalls().length === 2, 'then the second POST');
+  assert.deepEqual(locksCalls(), [{ set: { [A]: 2 }, move: {}, clear: [] }, { set: {}, move: {}, clear: [A] }], 'in the order of the clicks');
+  s = await page.sample();
+  assert.deepEqual(s.locked, [], 'and the page shows the last click throughout');
+  fake.locks = locksOk;
+  await page.close();
+});
+
 test('page: placeRows puts every row once whatever the order it gets them in: all rows locked, one slot twice, and the same list for the same rows shuffled', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf(boardRows(), auto);

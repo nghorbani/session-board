@@ -73,6 +73,8 @@ test('store: one bad entry refuses the whole request before any write', () => {
   assert.throws(() => core.setLocks({ set: { [A]: 1 }, clear: [A] }), /twice/);
   assert.throws(() => core.setLocks({ set: { [A]: 1 }, move: { [A]: 2 } }), /twice/);
   assert.throws(() => core.setLocks({ clear: [A, A] }), /twice/);
+  assert.throws(() => core.setLocks({ set: { [C]: 1 }, clear: [C.toUpperCase()] }), /twice/, 'an id in lower and in upper case is one file on a file system that ignores case');
+  assert.throws(() => core.setLocks({ set: { [A]: { toString: null } } }), (e) => e.code === 'invalid' && /not a slot/.test(e.message), 'a value that cannot even be printed is refused like any other');
   assert.throws(() => core.setLocks({ clear: 'x' }), /list/);
   assert.throws(() => core.setLocks({ clear: [A, 'nope'] }), /not a session id/);
   assert.throws(() => core.setLocks({ set: [A] }), /object/);

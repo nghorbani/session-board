@@ -299,6 +299,7 @@ var state = {
   details: Object.create(null),             // sessionId -> true while its details line is folded out (memory only)
   pendingLocks: Object.create(null),        // sessionId -> { slot (null: unlocked), seq, until, acked } from a lock change until its reply came and a snapshot agrees
   lockSeq: 0,                               // counts the lock requests of this page; a reply names the one it answers
+  lockQueue: Promise.resolve(),             // the browser page's lock requests, one after the other (sendLocks)
   pendingShow: null,                        // { show, until } from the auto | running | all switch until a snapshot agrees
   pendingArchive: Object.create(null),      // sessionId -> until: an ended row archived with ⤓ leaves at once
   searchTimer: null,                        // the pause before typing runs the title search over every session
@@ -1004,10 +1005,15 @@ function sendLocks(req) {
   render();
   setTimeout(render, ORDER_PENDING_MS + 50);              // the guard's expiry needs a repaint
   if (vsapi) { send({ type: 'locks', set: set, move: move, clear: clear, seq: seq }); return true; }
-  api('POST', '/api/locks', { set: set, move: move, clear: clear }).then(function (res) {
-    var b = res.body || {};
-    onLocksResult({ ok: Boolean(res.ok && b.ok), seq: seq, message: b.error || b.message || ('http ' + res.status) });
-  }).catch(function () { onLocksResult({ ok: false, seq: seq, message: 'server not reachable' }); });
+  // One request at a time, in the order of the clicks: two requests on two connections can reach
+  // the server in either order, and a lock that lands after its unlock would stay. (The host takes
+  // the webview's messages in order.) The page shows every change at once all the same.
+  state.lockQueue = state.lockQueue.then(function () {
+    return api('POST', '/api/locks', { set: set, move: move, clear: clear }).then(function (res) {
+      var b = res.body || {};
+      onLocksResult({ ok: Boolean(res.ok && b.ok), seq: seq, message: b.error || b.message || ('http ' + res.status) });
+    }).catch(function () { onLocksResult({ ok: false, seq: seq, message: 'server not reachable' }); });
+  });
   return true;
 }
 
@@ -1053,12 +1059,24 @@ function applyDrop(sid, targetSid, before) {
   var i = rows.indexOf(target.row);
   if (i === -1) return false;
   rows.splice(before ? i : i + 1, 0, at.row);
-  var set = {}, move = {};
-  rows.forEach(function (s, index) {
-    if (s.sessionId === sid) set[sid] = index;
-    else if (slotOf(s) !== null && slotOf(s) !== index) move[s.sessionId] = index;
-  });
-  return sendLocks({ set: set, move: move });
+  // The moved card is locked at its new place. Another locked card gets a new slot when the drop
+  // changed its place; one that stays where it is keeps its slot, which may lie past the end of
+  // this list and mean a place in a longer one (the same section with the switch on auto).
+  var was = at.sec.list;
+  var plan = function (all) {
+    var set = {}, move = {};
+    rows.forEach(function (s, index) {
+      if (s.sessionId === sid) set[sid] = index;
+      else if (slotOf(s) !== null && slotOf(s) !== index && (all || was.indexOf(s) !== index)) move[s.sessionId] = index;
+    });
+    return { set: set, move: move };
+  };
+  var req = plan(false);
+  var slotAfter = function (s) { var id = s.sessionId; return id in req.set ? req.set[id] : id in req.move ? req.move[id] : slotOf(s); };
+  // A slot that was left alone can still sort its card to another place than the one it was
+  // dropped around (two locks past the end, two on one slot). Then every lock is written at the place it has.
+  if (placeRows(rows, slotAfter).some(function (s, index) { return s !== rows[index]; })) req = plan(true);
+  return sendLocks(req);
 }
 
 /** Alt+Up / Alt+Down: the card goes past its visible neighbour (a row the filter hides is no neighbour); the ends are no-ops. */
@@ -1209,14 +1227,15 @@ function slotOf(s) {
  * out once, the locks keep their mutual order, and a slot past the end sits at the end: the
  * i-th of L locks goes to max(the lock before it + 1, min(its slot, n - L + i)).
  */
-function placeRows(list) {
+function placeRows(list, slotFn) {
+  var slot = slotFn || slotOf;                             // applyDrop asks where the cards would sit with the slots it is about to write
   var locked = [], free = [];
-  list.forEach(function (s) { (slotOf(s) === null ? free : locked).push(s); });
+  list.forEach(function (s) { (slot(s) === null ? free : locked).push(s); });
   free.sort(byActivity);
-  locked.sort(function (a, b) { return (slotOf(a) - slotOf(b)) || (a.sessionId < b.sessionId ? -1 : 1); });
+  locked.sort(function (a, b) { return (slot(a) - slot(b)) || (a.sessionId < b.sessionId ? -1 : 1); });
   var n = list.length, L = locked.length, out = new Array(n), prev = -1, f = 0;
   locked.forEach(function (s, i) {
-    var at = Math.max(prev + 1, Math.min(slotOf(s), n - L + i));
+    var at = Math.max(prev + 1, Math.min(slot(s), n - L + i));
     out[at] = s;
     prev = at;
   });

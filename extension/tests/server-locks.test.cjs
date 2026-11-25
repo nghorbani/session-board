@@ -78,6 +78,8 @@ test('POST /api/locks: a bad entry, malformed JSON or an empty request is 400 an
   assert.match(r.body.error, /not a session id/);
   r = await call('POST', '/api/locks', true, { set: { [A]: -1 } });
   assert.equal(r.status, 400);
+  r = await call('POST', '/api/locks', true, '{"set":{"' + A + '":{"toString":null}}}');
+  assert.deepEqual([r.status, /not a slot/.test(r.body.error)], [400, true], 'a slot that cannot be printed is a bad request, not a server error');
   r = await call('POST', '/api/locks', true, '{"set":');
   assert.deepEqual([r.status, r.body.error], [400, 'invalid JSON']);
   r = await call('POST', '/api/locks', true, {});

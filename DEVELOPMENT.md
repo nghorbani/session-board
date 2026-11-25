@@ -152,7 +152,8 @@ installed.
   per running session of its window, none for another window's row, an archived row or a
   window without a folder; the 60 s before a record of an ended session goes; a record of
   another lifetime left alone; a newer process of the same session; a row whose process is
-  gone; a removal that fails once; a record that went missing written again), an explicit
+  gone; a removal that fails once; a record that went missing written again; a window lookup
+  that fails for over a minute), a record and a lock that cannot be read for a moment, an explicit
   end, an end held open at a gate in the `claude stop` shim while its window writes a record
   (for the process being ended, for one started since, for one started before the end was
   asked for; and with a row that has no start time, for a process started before and for
@@ -396,12 +397,15 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
 - **Order and locks**: `titleFromTranscript()` returns `lastMessageAt`, the time of the last
   tail line whose top-level type is user or assistant (`lastMessageAt()`, the rule Claude
   Code's own list uses; one more read of 4 MB when the 256 KB tail holds no whole message
-  line, else the file time stands in). `snapshot()` puts `activityAt` on every running, ended
-  and search row and `workingSince` on a busy row (the registry's `statusUpdatedAt`, the
-  moment it turned busy). The page orders a section with `byActivity()`: working rows on top
-  by `workingSince`, the rest by `activityAt`, newest first. Claude Code's webview gives one
-  `Date.now()` to every running session on each state update, so its working sessions share
-  the newest time; among several working sessions the board's order can differ from it.
+  line, else the file time stands in). `snapshot()` puts `activityAt` on every running and
+  ended row and `workingSince` on a busy row (the registry's `statusUpdatedAt`, the moment it
+  turned busy). `searchSessions()` ranks its hits by file time and puts the same `activityAt`
+  on the 50 rows it shows, so a session reads the same in a section and in the results. The
+  page orders a section with `byActivity()`: working rows on top by `workingSince`, the rest
+  by `activityAt`, newest first. Claude Code's webview gives one `Date.now()` to every running
+  session on each state update, so its working sessions share the newest time; among several
+  working sessions the board's order can differ from it. (Read in the webview bundle of
+  Claude Code 2.1.328; 2.1.332 still sorts its list by that time.)
   A lock is `locks\<id>.json` = `{ slot, at }`, written tmp then rename.
   `setLocks({ set, move, clear })` checks the whole request before the first write; `move`
   changes a slot only where a lock exists, so a page with an old snapshot cannot bring back a
@@ -416,7 +420,15 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   `sendLocks()`: `set` for the card, `move` for the other locked cards of the section whose
   place changed, held in `state.pendingLocks` under a `seq` until a snapshot agrees or 10 s
   pass, sent as `locks` to the host (reply `locksResult { ok, seq }`) or as
-  `POST /api/locks`. A lock belongs to the session: in another window's section it sits at
+  `POST /api/locks`. A locked card that a drop leaves where it is keeps its slot, which may
+  lie past the end of the list shown and mean a place in a longer one (the same section with
+  the switch on auto); only when the cards would then not come out as dropped (`applyDrop()`
+  asks `placeRows()` with the slots it is about to write) does every lock of the section get
+  the place it has. The browser page sends its lock requests one after the other, in the
+  order of the clicks: two requests on two connections can reach the server in either order.
+  A `move` for a lock that another window cleared a moment ago writes nothing, and the page
+  that sent it shows that card at the moved place until its hold ends, 10 s at most.
+  A lock belongs to the session: in another window's section it sits at
   the same place number. Two windows changing locks at once settle on the last write; there is
   no lock between processes, so a move in one window and an unlock of the same card in another
   within the same millisecond can leave that card locked (unlock it again). A board archive
@@ -462,13 +474,20 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   Whenever a record is taken from a session that runs on, its window's tracker, which reads
   the folder at every poll, writes it again at its next one.
   In the tracker a record that could not be removed is tried again on the next poll, and a
-  row whose process is gone by the time the tracker reads it gets no record. A session that runs again in a newer process within
-  the same lifetime gets a fresh record, so `reconcileKept()` does not take that process for
-  a resume elsewhere once the host is gone. Limits: a session that ends on its own, or whose
-  tab is closed, less than 60 s before its window closes comes back once, and so does a kept
-  session resumed and ended in a terminal while no board of this version ran; a host that lingers over 60 s in a stalled shutdown while it still polls
-  loses its records; a session without a window, a window without a folder and a session
-  started with a working directory outside its window's folder are not kept. A wrong verdict
+  row whose process is gone by the time the tracker reads it gets no record. A session the
+  tracker has seen in its window keeps its record while nothing says where it runs (a poll
+  whose window lookup failed): the wait starts only when the session is gone or shows in
+  another window. A session that runs again in a newer process within the same lifetime gets
+  a fresh record, so `reconcileKept()` does not take that process for a resume elsewhere once
+  the host is gone. A record or a lock that cannot be read at a poll is left out of that poll
+  and left on disk (`readMarkers()`): a failed read is no reason to delete it. Limits: a
+  session that ends on its own, or whose tab is closed, less than 60 s before its window
+  closes comes back once. So does a kept session resumed and ended in a terminal while no
+  board of this version ran, or whose record could not be removed while it ran there
+  (`reconcileKept()` tries again only as long as that session runs). A host that lingers over
+  60 s in a stalled shutdown while it still polls loses its records; a session without a
+  window, a window without a folder and a session started with a working directory outside
+  its window's folder are not kept. A wrong verdict
   on "alive" heals by itself: the old pid handed out again while the old heartbeat is still
   fresh delays the cards by up to 45 s, and a live host whose heartbeat went stale shows a
   session that ended in it under a minute ago as kept until its next heartbeat, and only

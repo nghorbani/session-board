@@ -11,6 +11,7 @@
 - Ended sessions are ordered by their last message, not by the file time of their transcript, which a rename or a new title used to move
 - Browser front end: `POST /api/locks` takes a JSON body; `/api/order` and `/api/order/mode` are gone
 - A note that could not be saved no longer leaves a temporary file behind in the notes folder
+- A mute or a lock is no longer lost when its file cannot be read for a moment
 
 ## 0.12.0
 

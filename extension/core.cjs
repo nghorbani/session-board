@@ -1272,7 +1272,12 @@ const SEEN_DIR = path.join(DATA_DIR, 'seen');
 const MARKER_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
 const observedStatus = new Map();   // sessionId -> { status, statusUpdatedAt } from this process's last snapshot
 
-/** UUID-named JSON markers of one dir as a Map; unreadable ones and, with maxAgeMs, stale ones are removed. */
+/**
+ * UUID-named JSON markers of one dir as a Map; the ones that hold no record and, with maxAgeMs,
+ * the stale ones are removed. A file that cannot be read right now (held by another process, a
+ * drive that answers late) is left out and left alone: a failed read says nothing about what the
+ * file holds, and a lock or a kept card deleted on such a moment would not come back.
+ */
 function readMarkers(dir, maxAgeMs) {
   const out = new Map();
   let names = [];
@@ -1282,8 +1287,10 @@ function readMarkers(dir, maxAgeMs) {
     const id = name.endsWith('.json') ? name.slice(0, -5) : null;
     if (!id || !UUID_RE.test(id)) continue;
     const file = path.join(dir, name);
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
     let rec = null;
-    try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
+    try { rec = JSON.parse(text); } catch (_) { rec = null; }
     const at = rec && typeof rec === 'object' ? Number(rec.at) : 0;
     if (!at || at < cutoff) { try { fs.unlinkSync(file); } catch (_) { /* leave it */ } continue; }
     out.set(id, rec);
@@ -1424,7 +1431,7 @@ function lockEntries(obj, what) {
   return Object.keys(obj).map((id) => {
     if (!UUID_RE.test(id)) throw invalidLock('not a session id');
     const slot = obj[id];
-    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > LOCK_MAX_SLOT) throw invalidLock('not a slot: ' + String(slot));
+    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > LOCK_MAX_SLOT) throw invalidLock('not a slot: ' + (typeof slot === 'number' ? slot : typeof slot));   // never String(slot): a value from a request may not print
     return [id, slot];
   });
 }
@@ -1440,7 +1447,7 @@ function setLocks(req) {
   const ids = [...set.map((e) => e[0]), ...move.map((e) => e[0]), ...clear];
   if (!ids.length) throw invalidLock('nothing to lock, move or clear');
   if (ids.length > LOCK_MAX_IDS) throw invalidLock('too many ids (' + ids.length + ' over ' + LOCK_MAX_IDS + ')');
-  if (new Set(ids).size !== ids.length) throw invalidLock('a session id is named twice');
+  if (new Set(ids.map((id) => id.toLowerCase())).size !== ids.length) throw invalidLock('a session id is named twice');   // one file per id on a file system that ignores case
   const at = Date.now();
   const write = (id, slot) => writeJsonAtomic(fs, lockFile(id), { slot, at });   // temp file then rename (notes.cjs): no reader meets half a file
   let moved = 0;
@@ -1521,8 +1528,14 @@ function createKeptTracker(run, hostPid, clock) {
       let removed = 0;
       for (const r of rows || []) {
         if (!r || !UUID_RE.test(String(r.sessionId)) || r.archived) continue;
-        if (!r.window || Number(r.window.exthostPid) !== Number(hostPid)) continue;
         if (r.pid && !pidAlive(Number(r.pid))) continue;      // the rows are from a moment ago and it has ended since: it runs no more
+        if (!r.window) {
+          // Nothing says where it runs (the window lookup failed for this poll). A session this lifetime
+          // saw in its own window is still its card: the wait does not start while it runs on.
+          if (lastRunning.has(r.sessionId)) lastRunning.set(r.sessionId, at);
+          continue;
+        }
+        if (Number(r.window.exthostPid) !== Number(hostPid)) continue;
         lastRunning.set(r.sessionId, at);
         const m = kept.get(r.sessionId);
         // One write per process and lifetime. A process younger than the record is the session run again
@@ -1561,7 +1574,7 @@ function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
     const m = kept.get(r.sessionId);
     if (!m || liveRuns.has(m.run)) continue;
     if (!(Number(r.startedAt) > Number(m.at))) continue;     // no start time, or the old process
-    try { fs.unlinkSync(keptFile(r.sessionId)); } catch (_) { /* gone already, or the next snapshot retries */ }
+    try { fs.unlinkSync(keptFile(r.sessionId)); } catch (_) { /* gone already; else the next snapshot tries again for as long as the session runs there */ }
     kept.delete(r.sessionId);
   }
 }
@@ -2936,13 +2949,20 @@ async function searchSessions(query, opts) {
         live: Boolean(s), status: s ? s.status : 'past', pid: s ? s.pid : null, window: s ? s.window : null,
       }, archiveSource(row.sessionId, archivedSet, claudeSet), {
         name: s ? s.name : null, folder: row.cwd ? String(row.cwd).split(/[\\/]/).filter(Boolean).pop() : null,
-        activityAt: row.mtime || null, snippets: [],
+        activityAt: row.mtime || null, workingSince: s ? s.workingSince : null, snippets: [],
       });
     });
     all.sort((a, b) => (a.live === b.live ? (b.mtime || 0) - (a.mtime || 0) : a.live ? -1 : 1));
     base.total = all.length;
     const shown = all.slice(0, 50);
     base.shown = shown.length;
+    // The rows that are shown carry the time the board orders by, so a session reads the same here
+    // and in its section: the last message (a running row has it, a past one is read from its tail),
+    // else the file time. The hits are ranked by file time: reading every tail would cost a read per hit.
+    for (const row of shown) {
+      const s = live.get(row.sessionId);
+      row.activityAt = (s && s.activityAt) || (row.path ? transcriptFacts(row.sessionId, row.path).lastMessageAt : null) || row.mtime || null;
+    }
 
     // Snippets for the first 20 displayed rows that came from the content pass, 4 at a time.
     if (opts.content && rg.path) {

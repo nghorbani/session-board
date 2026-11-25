@@ -221,14 +221,16 @@ test('search rows carry the archived flag', async () => {
   const dir = path.join(projectsDir, 'proj');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, B + '.jsonl'),
-    JSON.stringify({ type: 'user', cwd: 'C:\\x', sessionId: B, message: { role: 'user', content: 'hello' } }) + '\n'
-    + JSON.stringify({ type: 'ai-title', aiTitle: 'Archived spike', sessionId: B }) + '\n');
+    JSON.stringify({ type: 'user', timestamp: '2026-01-02T03:04:05.000Z', cwd: 'C:\\x', sessionId: B, message: { role: 'user', content: 'hello' } }) + '\n'
+    + JSON.stringify({ type: 'ai-title', aiTitle: 'Archived spike', sessionId: B }) + '\n');   // the title line is newer than the message: the file time is today
   core.archiveSession(B);
   try {
     const res = await core.searchSessions('Archived spike', { content: false, requestId: 'arch-1', appRoot: APP_ROOT });
     const row = res.rows.find((r) => r.sessionId === B);
     assert.ok(row, 'the seeded transcript is found by title: ' + JSON.stringify(res));
     assert.equal(row.archived, true);
+    assert.equal(row.activityAt, Date.parse('2026-01-02T03:04:05.000Z'), 'a search row shows the time of its last message, like the same session in a section, not the file time');
+    assert.deepEqual([row.workingSince, 'ageMinutes' in row], [null, false]);
   } finally {
     core.unarchiveSession(B);
   }

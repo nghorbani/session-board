@@ -170,6 +170,41 @@ test('tracker: a row whose process is gone by now gets no record (a snapshot fro
   assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { pid: process.pid })], root), { written: 1, removed: 0 }, 'a process that lives');
 });
 
+test('tracker: a session it has seen in its window keeps its record while nothing says where it runs (the window lookup failed); one seen in another window loses it after the wait', () => {
+  clearRecords();
+  let clock = 5700000;
+  const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
+  tracker.observe([runRow(LIVE, NEW, { pid: process.pid }), runRow(K1, NEW, { pid: process.pid })], root);
+  assert.deepEqual([has(LIVE), has(K1)], [true, true]);
+  const lost = [{ sessionId: LIVE, window: null, archived: false, pid: process.pid }, runRow(K1, OTHER, { pid: process.pid })];
+  for (let i = 0; i < 13; i++) { clock += 5000; tracker.observe(lost, root); }   // 65 s without a window for LIVE; K1 runs in another window now
+  assert.ok(has(LIVE), 'it still runs and was last seen here: the wait does not start');
+  assert.equal(has(K1), false, 'seen in another window: no longer this window\'s card');
+  assert.deepEqual(core.createKeptTracker(RUN_NEW, NEW, () => clock).observe([{ sessionId: K2, window: null, archived: false, pid: process.pid }], root), { written: 0, removed: 0 }, 'a session without a window that this lifetime never saw in its own gets no record');
+  assert.equal(has(K2), false);
+});
+
+test('a record or a lock that cannot be read for a moment stays; one that is no record is removed', () => {
+  clearRecords();
+  record(K1, { run: RUN_OLD });
+  record(K2, { run: RUN_OLD });
+  fs.writeFileSync(file(K2), '{ no json');
+  core.setLocks({ set: { [K1]: 4 } });
+  const lock = path.join(core.LOCKS_DIR, K1 + '.json');
+  const read = fs.readFileSync;
+  fs.readFileSync = (p, ...rest) => {
+    if (String(p) === file(K1) || String(p) === lock) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+    return read(p, ...rest);
+  };
+  let kept, locks;
+  try { kept = core.readKept(); locks = core.readLocks(); } finally { fs.readFileSync = read; }
+  assert.deepEqual([kept.has(K1), locks.has(K1)], [false, false], 'not listed while it cannot be read');
+  assert.deepEqual([has(K1), fs.existsSync(lock)], [true, true], 'and not deleted: a failed read says nothing about what the file holds');
+  assert.equal(has(K2), false, 'a file that holds no record is removed, as before');
+  assert.deepEqual([core.readKept().get(K1).run, core.readLocks().get(K1).slot], [RUN_OLD, 4], 'readable again: back as it was');
+  core.setLocks({ clear: [K1] });
+});
+
 test('tracker: a record that cannot be removed is tried again on the next poll', () => {
   clearRecords();
   let clock = 6000000;
