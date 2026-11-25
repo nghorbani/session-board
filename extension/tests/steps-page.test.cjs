@@ -1075,7 +1075,8 @@ test('page: with Follow on and the reader at the end, a push keeps it at the end
     sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', [])],
   });
   const page = await openPage(A);
-  await page.until((x) => x.atBottom === true, 'first paint lands at the end');
+  // an empty page is "at the end" too: the push must wait for the first paint, since one that is queued before the page's open came in is older than the open reply and left out
+  await page.until((x) => x.sectionHeadings.length === 2 && x.atBottom === true, 'first paint lands at the end');
   fake.pushes.push({
     type: 'stepsChanged', sessionId: A, appended: ['u2:0'],
     sections: [section('lead', 'Session start', null, []), section('you', 'first', 'u1:0', []), section('you', 'second', 'u2:0', [])],
