@@ -148,6 +148,16 @@ installed.
   write; `move` never creates a lock), `lockSlot` on the snapshot, `reconcileLocks()` (archived
   on the board or in Claude Code, a session without a transcript, one younger than the file
   index), the lock that goes with a board archive, and the old order files left alone.
+- `kept.test.cjs`: the kept cards in `core.cjs`. The tracker of a host lifetime (one record
+  per running session of its window, none for another window's row, an archived row or a
+  window without a folder; the 60 s before a record of an ended session goes; a record of
+  another lifetime left alone), `run` in the heartbeat, the `kept` flag of `listedSessions()`
+  (a dead lifetime, a live one, another folder, a junction and its target, no row added or
+  moved, a dead host that owns no folder) and `reconcileKept()` (an archive, a transcript that
+  is gone, a session resumed in a process younger than its record).
+- `kept-host.test.cjs`: one `run` per activation in every heartbeat and in the tracker; a poll
+  hands the tracker the running rows and the first workspace folder, not on a stale snapshot
+  and not after `stop()`; a tracker that throws leaves the poll intact and is logged once.
 - `activity.test.cjs`: `lastMessageAt()` (top level only, cut lines, bad dates, the larger
   second read) and `activityAt` and `workingSince` on the snapshot across the status changes.
 - `locks-host.test.cjs`: the `locks`, `showMode` and `archivePast` messages and their replies,
@@ -409,6 +419,35 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   agreeing snapshot only after its own reply came (`acked`): a snapshot from before the write
   can agree by chance, as after lock then unlock.
   `order\` and `sort.json` of 0.10.0 to 0.12.0 stay on disk and are never read.
+- **Kept cards**: a session is a child of its window's extension host and ends with it, so
+  under "running" a restart of VS Code or of its extensions used to empty the window's
+  section. Each host lifetime has a name, `run` (a random id per activation; a pid cannot
+  name a lifetime, pids come around again), which it writes into its heartbeat and into
+  `kept\<id>.json = { root, run, at }` for every running session of its window that is not
+  archived (`createKeptTracker()` in `core.cjs`, called from `keepCards()` after every poll
+  that is not stale and never once the provider has stopped). `root` is the folder key of
+  the real path of the window's first workspace folder, so a junction and its target are one
+  folder. A session that ends while its window lives loses its record after 60 s
+  (`KEPT_GRACE_MS`): at shutdown the board may see the sessions go a moment before its own
+  host dies, and removing at once would delete the records the restart needs.
+  `listedSessions()` sets `kept: true` on an ended row when the session's record names one of
+  the row's window's folder keys and a lifetime that is not alive; alive means a fresh
+  heartbeat carries that `run` and its process lives (`aliveRuns()`, `hostAlive()`). It adds
+  no row and moves none, so auto and all list what they listed before, and a heartbeat of a
+  dead process owns no folder any more. The page's `endedRows()` returns the kept rows under
+  "running" and every ended row otherwise. `reconcileKept()` in `snapshot()` drops a record
+  with an archive (on the board at once, in `archiveSession()`), with a transcript that is
+  gone, and when the session runs again in a process younger than the record while the
+  record's lifetime is dead (resumed in a terminal or in a window on an older board: the card
+  is spent). Limits: a session ended by hand less than 60 s before its window closes comes
+  back once, and so does a kept session resumed and ended in a terminal while no board of
+  this version ran; a host that lingers over 60 s in a stalled shutdown while it still polls
+  loses its records; a session without a window, a window without a folder and a session
+  started with a working directory outside its window's folder are not kept. A wrong verdict
+  on "alive" heals by itself: the old pid handed out again while the old heartbeat is still
+  fresh delays the cards by up to 45 s, and a live host whose heartbeat went stale shows a
+  session that ended in it under a minute ago as kept until its next heartbeat, and only
+  where another window owns the same folder.
 - **Titles**: the board keeps none of its own (0.10.x boards wrote `titles\<id>.json`; it is
   no longer read and is left on disk). ✎ sends `retitle`; `suggestTitle()` collects the last six prompts and the
   newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB

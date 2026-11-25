@@ -47,8 +47,19 @@ Anthropic; it reads the local files and CLI output that Claude Code leaves on yo
   drops it too, and search still finds it).
 - **auto | running | all**: the switch in the header picks what the sections hold, board-wide.
   auto (the default): what Claude Code lists, the running sessions and the ended ones that
-  are not archived. running: only the running sessions. all: the archived ones too, after
-  the others, each with its chip ("archived" here or "archived in Claude Code"); ⤒ brings back one the board archived, and a click resumes any of them.
+  are not archived. running: the running sessions, and the ones a restart ended (next item).
+  all: the archived ones too, after the others, each with its chip ("archived" here or
+  "archived in Claude Code"); ⤒ brings back one the board archived, and a click resumes any
+  of them.
+- **After a restart**: a session ends with its window, so closing VS Code or restarting its
+  extensions ends every session of that window. The board remembers which sessions were
+  running there. When a window is open on the same folder again, their cards are back in its
+  section, marked ended, in the order of their last message and with their locks, also when
+  the switch is on running. A click resumes one in place, ⤓ puts one away, and a card whose
+  session runs again is a running card. A session you end while its window stays open leaves
+  the board as before. Not kept: a session without a window, the sessions of a window without
+  a folder, and a session started with a working directory outside its window's folder. A
+  window that still runs an older board keeps nothing until it reloads.
 - **A typed filter says so**: while the search box holds text, a line above the sections reads
   `Filter "cuvis-ai-6c": 1 of 17 sessions`, with a clear button (Esc does the same).
 - **The number on a heading** counts the sessions in that section that wait for you (amber)

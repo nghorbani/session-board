@@ -21,10 +21,10 @@ shows background agents only, not the sessions you talk to.
 
 - **One section per window.** Sessions are grouped by the VS Code window they run in, the
   window you are in first, and each heading carries the number of sessions in it that need
-  you. Inside a section the ones waiting on a permission prompt, a question or a dialog come
-  first, highlighted, with what they are waiting for; working and idle sessions follow, then
-  the ended sessions Claude Code still lists for that folder, until you archive them. A switch
-  shows the running ones only. The activity-bar badge counts the waiting ones.
+  you. A session waiting on a permission prompt, a question or a dialog is highlighted, with
+  what it is waiting for. The ended sessions Claude Code still lists for that folder sit in
+  the same list until you archive them. A switch narrows the list to the running ones. The
+  activity-bar badge counts the waiting ones.
 - **Told when it matters.** A toast says when a session starts waiting and when one finishes
   its answer. When no VS Code window has focus, one Windows notification says it instead, and
   a click on it opens the session.
@@ -49,8 +49,12 @@ shows background agents only, not the sessions you talk to.
   working sessions on top, then by the last message. A lock on a card keeps it in place, and
   a card you drag by its grip stays where you drop it.
 - **Auto, running or all.** A header switch shows what Claude Code's own list shows (auto, the
-  default: running plus ended ones not archived), only the running sessions, or the archived
-  ones too.
+  default: running plus ended ones not archived), the running sessions, or the archived ones
+  too.
+- **Back where you were after a restart.** A session ends with its window, so closing VS Code
+  or restarting its extensions ends every session in it. Their cards stay in that window's
+  section, marked ended and in their places, also when the switch is on running: a click
+  resumes one, ⤓ puts it away.
 - **End a session.** ✕ ends a session and everything it started. Busy sessions ask twice.
 - **Archive a session.** ⤓ ends it the same way and keeps it off the board. It also moves
   the transcript out of Claude Code's project folder, so Claude Code's own session list drops
