@@ -23,6 +23,26 @@ const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 const NOTE_ID_RE = /^[0-9a-f]{32}$/;           // crypto.randomBytes(16).toString('hex')
 const TEXT_MAX = 16 * 1024;
 
+/**
+ * Write a JSON record so that no reader meets half a file: to a temp name next to it, then a
+ * rename. The temp name carries the pid, the time and a random tail, so two writers of one file
+ * never share it. A write that fails takes its temp file with it and throws what failed: a
+ * caller that tries again at every poll would otherwise leave one more file each time. `fsx` is
+ * the file system to write through (the notes store passes the one it was given; core.cjs writes
+ * its locks and kept records with this too).
+ */
+function writeJsonAtomic(fsx, file, obj) {
+  fsx.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+  try {
+    fsx.writeFileSync(tmp, JSON.stringify(obj));
+    fsx.renameSync(tmp, file);
+  } catch (e) {
+    try { fsx.unlinkSync(tmp); } catch (_) { /* never written, or as stuck as the record */ }
+    throw e;
+  }
+}
+
 function createNotesStore(deps) {
   deps = deps || {};
   const fs = deps.fs || nodeFs;
@@ -54,13 +74,6 @@ function createNotesStore(deps) {
     if (!text.trim()) throw new Error('note text is empty');
     if (Buffer.byteLength(text, 'utf8') > TEXT_MAX) throw new Error('note text is over 16 KB');
     return text;
-  }
-
-  function writeJsonAtomic(file, obj) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = file + '.tmp-' + process.pid + '-' + now() + '-' + Math.random().toString(16).slice(2);
-    fs.writeFileSync(tmp, JSON.stringify(obj));
-    fs.renameSync(tmp, file);
   }
 
   function readJsonSafe(file) {
@@ -95,7 +108,7 @@ function createNotesStore(deps) {
     const clean = checkText(text);
     const id = crypto.randomBytes(16).toString('hex');
     const rec = { id, stepId, at: now(), text: clean };
-    writeJsonAtomic(noteFile(sessionId, id), rec);
+    writeJsonAtomic(fs, noteFile(sessionId, id), rec);
     return withSent(sessionId, rec);
   }
 
@@ -112,7 +125,7 @@ function createNotesStore(deps) {
     const existing = readJsonSafe(file);
     if (!existing || typeof existing !== 'object') return null; // deleted meanwhile, or never existed
     const rec = Object.assign({}, existing, { text: clean });
-    writeJsonAtomic(file, rec);
+    writeJsonAtomic(fs, file, rec);
     if (fs.existsSync(tombFile(sessionId, noteId))) {
       try { fs.unlinkSync(file); } catch (_) { /* the delete removed it itself */ }
       return null;
@@ -162,7 +175,7 @@ function createNotesStore(deps) {
     const at = now();
     const file = sentFile(sessionId, noteId, at);
     try {
-      writeJsonAtomic(file, { kind, at });
+      writeJsonAtomic(fs, file, { kind, at });
     } catch (e) {
       // a delete at this moment takes the half-written record with it; that is not an error
       if (fs.existsSync(tombFile(sessionId, noteId))) return null;
@@ -227,4 +240,4 @@ function createNotesStore(deps) {
   return { add, edit, delete: del, addSent, get, list, pruneDead };
 }
 
-module.exports = { createNotesStore, TEXT_MAX, SESSION_ID_RE, NOTE_ID_RE };
+module.exports = { createNotesStore, writeJsonAtomic, TEXT_MAX, SESSION_ID_RE, NOTE_ID_RE };

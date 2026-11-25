@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.0
+
+- The rows come in the order of Claude Code's own session list: sessions that are working sit on top, every other session follows by the time of its last message, yours or Claude's. Running and ended sessions are one list per window; the ended ones no longer sit below the running ones
+- The time on a row is the time since its last message; for a working session it is the time since it started working
+- A rail on the left edge of every card carries a grip and a lock. The lock keeps a card at its place while the others sort around it, also when you write in it. Drag a card by the grip, or press Alt+Up or Alt+Down on it, and it is locked where it lands. Locks are shared by every window and survive restarts; an archived session loses its lock
+- The header switch reads auto | running | all. auto is what open was: what Claude Code lists. A window still on 0.11.3 or 0.12.0 keeps reading the switch correctly
+- A window's cards survive a restart. A session ends with its window, so closing VS Code or restarting its extensions used to empty the section under running. Now the cards of the sessions that were running there stay in that window's section, marked ended, with their locks, also under running: a click resumes one, ⤓ puts it away. A session you end while its window stays open leaves the board as before
+- The "by activity | manual" switch and the manual order are gone. A session that needs you is no longer pulled to the top; its colour, the badge on the window heading and the notification point at it, and a lock keeps it on top if you want it there. The files of the manual order (`order\`, `sort.json`) stay on disk, unread
+- Ended sessions are ordered by their last message, not by the file time of their transcript, which a rename or a new title used to move
+- Browser front end: `POST /api/locks` takes a JSON body; `/api/order` and `/api/order/mode` are gone
+- A note that could not be saved no longer leaves a temporary file behind in the notes folder
+- An unseen mark is no longer lost when its file cannot be read for a moment
+
 ## 0.12.0
 
 - Steps: a new row button (≡) opens a session's story in an editor tab of its own, in the editor group you are in (drag the tab to the side to read it next to the chat). It reads the session's transcript and shows what the chat scrolls away: your messages, the texts Claude Code printed, the short updates between tool calls, questions with your answers, and plans. A running session is followed live

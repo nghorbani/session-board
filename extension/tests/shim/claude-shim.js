@@ -28,9 +28,17 @@ if (process.argv.includes('auth')) {
   }
 }
 // `claude stop <job>`: the daemon would stop the job; here SB_SHIM_STOP_KILL_PID names the
-// process to end (SB_SHIM_STOP_FAIL makes it answer "No job matching" with exit 1).
+// process to end (SB_SHIM_STOP_FAIL makes it answer "No job matching" with exit 1). With
+// SB_SHIM_STOP_GATE the stop writes <gate>.reached and waits (at most 15 s) until the file
+// <gate> exists, so a test can do its part while the end is under way and the job still runs.
 if (process.argv.includes('stop')) {
   if (process.env.SB_SHIM_STOP_FAIL) { process.stderr.write("No job matching '" + process.argv[process.argv.length - 1] + "'.\n"); process.exit(1); }
+  const gate = process.env.SB_SHIM_STOP_GATE;
+  if (gate) {
+    fs.writeFileSync(gate + '.reached', '');
+    const nap = new Int32Array(new SharedArrayBuffer(4));
+    for (const until = Date.now() + 15000; !fs.existsSync(gate) && Date.now() < until;) Atomics.wait(nap, 0, 0, 25);
+  }
   const victim = Number(process.env.SB_SHIM_STOP_KILL_PID);
   if (victim) { try { process.kill(victim); } catch (_) { /* already gone */ } }
   process.stdout.write('Stopped ' + process.argv[process.argv.length - 1] + '\n');

@@ -18,7 +18,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
-const { createNotesStore } = require('./notes.cjs');
+const { createNotesStore, writeJsonAtomic } = require('./notes.cjs');
 
 const PKG = require('./package.json');
 const EXTENSION_ID = PKG.publisher + '.' + PKG.name;
@@ -42,6 +42,7 @@ const CLAUDE_ARCHIVE_TTL_MS = Number(process.env.SB_CLAUDE_ARCHIVE_TTL_MS) || 30
 
 const TAIL_BYTES = 512 * 1024;       // context-guard reads the same window
 const TITLE_TAIL_BYTES = 256 * 1024; // ai-title / last-prompt lines sit near the end
+const MESSAGE_TAIL_BYTES = 4 * 1024 * 1024; // the second look for the last message when the tail above holds none
 const AGENTS_TIMEOUT_MS = 20000;
 const INDEX_TTL_MS = 60000;          // live-row transcript filename index refresh
 const PROCESS_TREE_MIN_INTERVAL_MS = 10000;
@@ -144,8 +145,12 @@ function contextTokens(transcriptPath) {
  */
 function titleFromTranscript(transcriptPath) {
   const text = readTail(transcriptPath, TITLE_TAIL_BYTES);
-  if (text == null) return { title: null, customTitle: null, lastPrompt: null };
+  if (text == null) return { title: null, customTitle: null, lastPrompt: null, lastMessageAt: null };
   const lines = text.split('\n');
+  let messageAt = lastMessageAtOf(lines);
+  // one message larger than the tail leaves no whole message line in it: look once in a larger tail
+  // (a transcript that fits into the first tail has nothing more to show)
+  if (messageAt == null && largerThan(transcriptPath, TITLE_TAIL_BYTES)) messageAt = lastMessageAt(readTail(transcriptPath, MESSAGE_TAIL_BYTES));
   let title = null;
   let customTitle = null;
   let lastPrompt = null;
@@ -166,8 +171,32 @@ function titleFromTranscript(transcriptPath) {
     }
     if (title && customTitle && lastPrompt) break;
   }
-  return { title, customTitle, lastPrompt };
+  return { title, customTitle, lastPrompt, lastMessageAt: messageAt };
 }
+
+/*
+ * The time of the last message in a transcript tail, read the way Claude Code reads it for its
+ * own session list: the last line whose top-level type is user or assistant and whose top-level
+ * timestamp is a date. The two substring tests only pick the lines worth parsing; a line cut by
+ * the tail boundary, a nested match and a timestamp that is no date are passed over.
+ */
+function lastMessageAtOf(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || line.indexOf('"timestamp":') === -1) continue;
+    if (line.indexOf('"type":"user"') === -1 && line.indexOf('"type":"assistant"') === -1) continue;
+    let o = null;
+    try { o = JSON.parse(line); } catch (_) { continue; }
+    if (!o || (o.type !== 'user' && o.type !== 'assistant') || typeof o.timestamp !== 'string') continue;
+    const at = Date.parse(o.timestamp);
+    if (Number.isFinite(at)) return at;
+  }
+  return null;
+}
+
+function lastMessageAt(text) { return text ? lastMessageAtOf(String(text).split('\n')) : null; }
+
+function largerThan(file, bytes) { try { return fs.statSync(file).size > bytes; } catch (_) { return false; } }
 
 /**
  * sessionId -> transcript path for live rows. Deriving the path from a session's cwd
@@ -225,12 +254,12 @@ function readSidecarTitle(file, sessionId) {
 }
 
 /**
- * Tokens, titles and the last prompt of a transcript, cached until the transcript or its title
+ * Tokens, titles, the last prompt and the time of the last message of a transcript, cached until the transcript or its title
  * sidecar changes. The Claude name is the newest custom-title line in the tail, else the
  * sidecar: the order Claude Code's own session list uses.
  */
 function transcriptFacts(sessionId, file) {
-  const empty = { tokens: null, title: null, customTitle: null, lastPrompt: null };
+  const empty = { tokens: null, title: null, customTitle: null, lastPrompt: null, lastMessageAt: null, mtime: null };
   if (!file) return empty;
   let stat;
   try { stat = fs.statSync(file); } catch (_) { return empty; }
@@ -240,9 +269,9 @@ function transcriptFacts(sessionId, file) {
   const hit = factsCache.get(sessionId);
   if (hit && hit.key === key) return hit;
   const tokens = contextTokens(file);
-  const { title, customTitle: inTail, lastPrompt } = titleFromTranscript(file);
+  const { title, customTitle: inTail, lastPrompt, lastMessageAt: messageAt } = titleFromTranscript(file);
   const customTitle = inTail || (sideAt ? readSidecarTitle(file, sessionId) : null);
-  const facts = { key, tokens, title, customTitle, lastPrompt };
+  const facts = { key, tokens, title, customTitle, lastPrompt, lastMessageAt: messageAt, mtime: stat.mtimeMs };
   factsCache.set(sessionId, facts);
   return facts;
 }
@@ -414,6 +443,20 @@ function windowIdForExthost(pid) {
   return windowByExthost.get(pid) || null;
 }
 
+/**
+ * Whether the extension host behind a heartbeat still runs. A heartbeat stays fresh for a while
+ * after its host died, and a host that is gone owns no folder and keeps no lifetime alive.
+ * Under SB_WINDOW_MAP the hosts are made-up pids: alive unless the map says `dead`.
+ */
+function hostAlive(pid) {
+  pid = Number(pid);
+  if (WINDOW_MAP) {
+    for (const k of Object.keys(WINDOW_MAP)) if (Number(WINDOW_MAP[k].exthostPid) === pid) return WINDOW_MAP[k].dead !== true;
+    return true;
+  }
+  return pidAlive(pid);
+}
+
 // ---------------------------------------------------------------------------------------
 // Board heartbeats: which windows run this extension, under which id
 // ---------------------------------------------------------------------------------------
@@ -421,13 +464,15 @@ function windowIdForExthost(pid) {
 const HEARTBEAT_DIR = process.env.SB_HEARTBEAT_DIR || path.join(os.tmpdir(), 'claude-sessions-board');   // overridable for the tests
 const HEARTBEAT_FRESH_MS = 45000;
 const HEARTBEAT_KEEP_MS = 24 * 60 * 60 * 1000;   // an older record belongs to a window long closed; the readers delete it
+const RUN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;   // the name of one host lifetime: a random UUID
 
 /**
  * One record per host and extension id; `name` is the window's workspace name, so other boards
  * can label its section; `focused` says whether that VS Code window has the OS focus, so the
- * other boards leave a notification to it; `root` is its first workspace folder (listedSessions).
+ * other boards leave a notification to it; `root` is its first workspace folder (listedSessions);
+ * `run` names this lifetime of the host, which a pid cannot: pids come around again (kept cards).
  */
-function writeHeartbeat(exthostPid, extensionId, name, focused, version, root) {
+function writeHeartbeat(exthostPid, extensionId, name, focused, version, root, run) {
   const id = EXTENSION_ID_RE.test(String(extensionId || '')) ? extensionId : EXTENSION_ID;
   try {
     fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });
@@ -438,6 +483,7 @@ function writeHeartbeat(exthostPid, extensionId, name, focused, version, root) {
     if (typeof focused === 'boolean') rec.focused = focused;
     if (typeof version === 'string' && /^\d+\.\d+\.\d+/.test(version)) rec.version = version;
     if (typeof root === 'string' && root.trim()) rec.root = root.trim().slice(0, 1000);   // the window's first workspace folder: its ended sessions
+    if (typeof run === 'string' && RUN_RE.test(run)) rec.run = run;
     fs.writeFileSync(tmp, JSON.stringify(rec));
     fs.renameSync(tmp, target);
   } catch (_) { /* best effort */ }
@@ -495,6 +541,17 @@ function focusedPeerAt(ownExthostPid) {
     if (at > best) best = at;
   }
   return best;
+}
+
+/** The host lifetimes that are alive: the `run` of every fresh heartbeat whose host still runs (kept cards). */
+function aliveRuns() {
+  const out = new Set();
+  for (const { rec } of readHeartbeats()) {
+    if (!rec || typeof rec.run !== 'string' || !rec.run) continue;
+    if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;   // a missing `at` is never fresh
+    if (hostAlive(rec.pid)) out.add(rec.run);
+  }
+  return out;
 }
 
 /** Workspace names of the hosts with a fresh heartbeat, by extension-host pid (the freshest record per pid). */
@@ -661,11 +718,14 @@ function headFacts(file, size, mtime) {
 function listedSessions(liveIds, claudeIds, boardIds, opts) {
   const withArchived = Boolean(opts && opts.withArchived);
   const includeProgrammatic = Boolean(opts && opts.includeProgrammatic);
+  const kept = (opts && opts.kept) || null;                  // readKept(): the sessions that ran in a window
+  const liveRuns = kept ? ((opts && opts.liveRuns) || aliveRuns()) : null;
   const windows = [];
   const seen = new Set();
   for (const { rec } of readHeartbeats()) {
     if (!rec || typeof rec.root !== 'string' || !rec.root) continue;
     if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;
+    if (!hostAlive(rec.pid)) continue;                       // its window closed a moment ago: a host that is gone owns no folder
     const windowId = windowIdForExthost(Number(rec.pid));
     if (!windowId || seen.has(windowId)) continue;
     seen.add(windowId);
@@ -688,7 +748,6 @@ function listedSessions(liveIds, claudeIds, boardIds, opts) {
       }
     }
   }
-  const now = Date.now();
   const ended = [];
   const archived = [];
   for (const [id, { f, w, stowed }] of best) {
@@ -700,19 +759,22 @@ function listedSessions(liveIds, claudeIds, boardIds, opts) {
     if (head.programmatic && !includeProgrammatic) continue;
     const facts = transcriptFacts(id, f.path);
     if (!head.hasUser && !facts.title && !facts.customTitle && !facts.lastPrompt) continue;
+    // kept: it ran in a window on this folder, and the host lifetime that saw it running is gone (a restart, a closed window)
+    const mark = kept && !isArchived ? kept.get(id) : null;
     const row = {
-      sessionId: id, status: 'ended', live: false,
+      sessionId: id, status: 'ended', live: false, kept: Boolean(mark && w.keys.includes(mark.root) && !liveRuns.has(mark.run)),
       window: { id: w.windowId, exthostPid: w.exthostPid, label: w.label },
       title: facts.customTitle || facts.title || null, renamedTitle: facts.customTitle || null, generatedTitle: facts.title || null,
       lastPrompt: facts.lastPrompt, cwd: head.cwd || '', transcriptPath: f.path, path: f.path,
-      folder: path.basename(path.dirname(f.path)), ageMinutes: Math.max(0, Math.round((now - f.mtime) / 60000)),
+      folder: path.basename(path.dirname(f.path)), activityAt: facts.lastMessageAt || f.mtime || null, workingSince: null, lockSlot: null,
       hasTranscript: true,
       archived: isArchived, archivedBy: onBoard && inClaude ? 'both' : onBoard ? 'board' : inClaude ? 'claude-code' : null,
     };
     (isArchived ? archived : ended).push(row);
   }
-  ended.sort((a, b) => a.ageMinutes - b.ageMinutes);
-  archived.sort((a, b) => a.ageMinutes - b.ageMinutes);
+  const newestFirst = (a, b) => (b.activityAt || 0) - (a.activityAt || 0);
+  ended.sort(newestFirst);
+  archived.sort(newestFirst);
   return { ended, archived };
 }
 
@@ -857,6 +919,10 @@ function archiveSession(sessionId) {
   if (!UUID_RE.test(sessionId)) throw new Error('not a session id');
   fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
   fs.writeFileSync(archiveMarker(sessionId), JSON.stringify({ at: Date.now() }));
+  // an archived session holds no place: its lock goes now, so a restore before the next snapshot does not bring it back locked
+  try { fs.unlinkSync(lockFile(sessionId)); } catch (_) { /* no lock, or reconcileLocks() drops it with the next snapshot */ }
+  // and it is no kept card any more: archiving is how a kept card leaves
+  try { fs.unlinkSync(keptFile(sessionId)); } catch (_) { /* no record, or reconcileKept() drops it with the next snapshot */ }
 }
 
 function unlinkMarker(sessionId) {
@@ -1206,7 +1272,12 @@ const SEEN_DIR = path.join(DATA_DIR, 'seen');
 const MARKER_MAX_AGE_MS = 14 * 24 * 3600 * 1000;
 const observedStatus = new Map();   // sessionId -> { status, statusUpdatedAt } from this process's last snapshot
 
-/** UUID-named JSON markers of one dir as a Map; unreadable ones and, with maxAgeMs, stale ones are removed. */
+/**
+ * UUID-named JSON markers of one dir as a Map; the ones that hold no record and, with maxAgeMs,
+ * the stale ones are removed. A file that cannot be read right now (held by another process, a
+ * drive that answers late) is left out and left alone: a failed read says nothing about what the
+ * file holds, and a lock or a kept card deleted on such a moment would not come back.
+ */
 function readMarkers(dir, maxAgeMs) {
   const out = new Map();
   let names = [];
@@ -1216,8 +1287,10 @@ function readMarkers(dir, maxAgeMs) {
     const id = name.endsWith('.json') ? name.slice(0, -5) : null;
     if (!id || !UUID_RE.test(id)) continue;
     const file = path.join(dir, name);
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch (_) { continue; }
     let rec = null;
-    try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { rec = null; }
+    try { rec = JSON.parse(text); } catch (_) { rec = null; }
     const at = rec && typeof rec === 'object' ? Number(rec.at) : 0;
     if (!at || at < cutoff) { try { fs.unlinkSync(file); } catch (_) { /* leave it */ } continue; }
     out.set(id, rec);
@@ -1308,8 +1381,8 @@ function unmuteSession(sessionId) {
 
 /**
  * Drop the markers in `dir` whose sessions are neither live nor resumable (no transcript in
- * the index); `coll` is the Set or Map of their ids and loses them too. Shared by the muted
- * and the order stores.
+ * the index); `coll` is the Set or Map of their ids and loses them too. The muted store uses
+ * it; the lock store has its own reconcile step.
  */
 function pruneDead(dir, coll, liveIds, transcripts) {
   for (const id of [...coll.keys()]) {
@@ -1320,85 +1393,268 @@ function pruneDead(dir, coll, liveIds, transcripts) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Manual order: a rank per session and the board-wide sort mode
+// Locks: a card that keeps its place
 // ---------------------------------------------------------------------------------------
 
 /*
- * a move on the page ──▶ setOrder(ids) ──▶ the whole list is checked, then DATA_DIR/order/<id>.json
- *                         = { rank: index, at } for every id in it; ids outside the list keep theirs
- * the header switch ──▶ setSortMode('activity' | 'manual') ──▶ DATA_DIR/sort.json, tmp then rename
- * snapshot() ──▶ readOrder() ──▶ `rank` on every live row (null without a record or a finite rank)
- *                 and `order: { mode }`; a record whose session is neither live nor has a transcript
- *                 is pruned like a mute marker. Ranks are global by id and read inside whichever
- *                 section the row is in; the page sorts unranked rows first (new work on top).
- * The per-file read is the pattern of four stores; revisit when `order/` holds about 1000 files
- * (a 90-day `at` expiry through readMarkers' maxAgeMs is the cheap mitigation).
+ * the lock button      ──▶ setLocks({ set: { id: slot } })  or  setLocks({ clear: [id] })
+ * a drop, Alt+Up/Down  ──▶ setLocks({ set: { moved: slot }, move: { otherLocked: slot, ... } })
+ *                            set   locks an id at a slot, whether or not it held a lock
+ *                            move  changes a slot only where a lock exists at write time, so a page
+ *                                  with an old snapshot cannot bring back a lock another window cleared
+ *                            clear unlocks
+ *                          the whole request is checked first, then DATA_DIR/locks/<id>.json = { slot, at },
+ *                          each written to a temp file and renamed so no reader meets half a file
+ * snapshot() ──▶ readLocks() ──▶ reconcileLocks() ──▶ `lockSlot` on every running and ended row
+ *                 (null without a lock). A slot is a place number counted from 0 in the list the
+ *                 page shows for the row's window; the page does the placing.
+ * A lock belongs to its session, not to a window. It goes when the session is archived: at once
+ * on the board (archiveSession), with the next snapshot in Claude Code; and when the session is
+ * not running and no transcript is left.
  */
-const ORDER_DIR = path.join(DATA_DIR, 'order');
-const SORT_FILE = path.join(DATA_DIR, 'sort.json');
-const ORDER_MAX_IDS = 500;   // the host transport's bound; the browser route caps the query at 8000 characters (about 216 ids)
-const SORT_MODES = ['activity', 'manual'];
+const LOCKS_DIR = path.join(DATA_DIR, 'locks');
+const LOCK_MAX_IDS = 500;
+const LOCK_MAX_SLOT = 9999;
 
-function readOrder() { return readMarkers(ORDER_DIR, 0); }
+function lockFile(sessionId) { return path.join(LOCKS_DIR, sessionId + '.json'); }
+function readLocks() { return readMarkers(LOCKS_DIR, 0); }
 
-/** Rank every id by its position in `ids`; the whole list is checked before the first write. */
-function setOrder(ids) {
-  if (!Array.isArray(ids)) throw new Error('order must be a list of session ids');
-  if (!ids.length) throw new Error('order list is empty');
-  if (ids.length > ORDER_MAX_IDS) throw new Error('too many ids (' + ids.length + ' over ' + ORDER_MAX_IDS + ')');
-  const clean = ids.map((id) => String(id || ''));
-  if (!clean.every((id) => UUID_RE.test(id))) throw new Error('not a session id');
+/** The slot of a lock record as the page reads it: a whole number from 0, else null (not locked). */
+function slotOf(rec) { return rec && Number.isInteger(rec.slot) && rec.slot >= 0 ? rec.slot : null; }
+
+/** What setLocks refuses: an Error with code 'invalid', which the browser server answers with a 400. */
+function invalidLock(message) { return Object.assign(new Error(message), { code: 'invalid' }); }
+
+function lockEntries(obj, what) {
+  if (obj == null) return [];
+  if (typeof obj !== 'object' || Array.isArray(obj)) throw invalidLock(what + ' must be an object of session id to slot');
+  return Object.keys(obj).map((id) => {
+    if (!UUID_RE.test(id)) throw invalidLock('not a session id');
+    const slot = obj[id];
+    if (typeof slot !== 'number' || !Number.isInteger(slot) || slot < 0 || slot > LOCK_MAX_SLOT) throw invalidLock('not a slot: ' + (typeof slot === 'number' ? slot : typeof slot));   // never String(slot): a value from a request may not print
+    return [id.toLowerCase(), slot];                         // Claude Code's ids are lower case: one spelling per id, so a lock is found under the id its row carries
+  });
+}
+
+/** Lock, move and unlock in one request; nothing is written unless every entry is sound. */
+function setLocks(req) {
+  if (!req || typeof req !== 'object' || Array.isArray(req)) throw invalidLock('locks must be an object with set, move or clear');
+  const set = lockEntries(req.set, 'set');
+  const move = lockEntries(req.move, 'move');
+  const clear = req.clear == null ? [] : req.clear;
+  if (!Array.isArray(clear)) throw invalidLock('clear must be a list of session ids');
+  if (!clear.every((id) => typeof id === 'string' && UUID_RE.test(id))) throw invalidLock('not a session id');
+  const clearIds = clear.map((id) => id.toLowerCase());
+  const ids = [...set.map((e) => e[0]), ...move.map((e) => e[0]), ...clearIds];
+  if (!ids.length) throw invalidLock('nothing to lock, move or clear');
+  if (ids.length > LOCK_MAX_IDS) throw invalidLock('too many ids (' + ids.length + ' over ' + LOCK_MAX_IDS + ')');
+  if (new Set(ids).size !== ids.length) throw invalidLock('a session id is named twice');
   const at = Date.now();
-  clean.forEach((id, rank) => writeMarker(ORDER_DIR, id, { rank, at }));
-  return clean.length;
+  const write = (id, slot) => writeJsonAtomic(fs, lockFile(id), { slot, at });   // temp file then rename (notes.cjs): no reader meets half a file
+  let moved = 0;
+  let cleared = 0;
+  for (const [id, slot] of set) write(id, slot);
+  for (const [id, slot] of move) { if (fs.existsSync(lockFile(id))) { write(id, slot); moved += 1; } }
+  for (const id of clearIds) {
+    try { fs.unlinkSync(lockFile(id)); cleared += 1; } catch (e) { if (!e || e.code !== 'ENOENT') throw e; }
+  }
+  return { set: set.length, moved, cleared };
 }
 
-function readSortMode() {
-  try {
-    const rec = JSON.parse(fs.readFileSync(SORT_FILE, 'utf8'));
-    return rec && rec.mode === 'manual' ? 'manual' : 'activity';
-  } catch (_) { return 'activity'; }   // missing, unreadable or unknown: today's order
+/**
+ * Drop the markers of one store (locks, kept records) that no longer have a card to hold: a
+ * session archived on the board or in Claude Code (its word counts only when its archive was
+ * read: not before the first read, and not while a read fails, when the ids are those of an
+ * earlier read and a session unarchived since would lose its marker on them), and a session
+ * that is not running and has no transcript in either root. A
+ * transcript the file index lists is there (the index is at most a minute old, so a deleted one
+ * keeps its marker a minute longer); one the index does not list is looked for on disk, so a
+ * session younger than the index keeps its marker. A marker that cannot be removed stays for
+ * the next snapshot.
+ */
+function reconcileMarkers(markers, fileOf, liveIds, boardIds, claude, index) {
+  const claudeKnown = Boolean(claude) && claude.known !== false && !claude.error && Boolean(claude.ids);
+  for (const id of [...markers.keys()]) {
+    const archived = boardIds.has(id) || (claudeKnown && claude.ids.has(id));
+    if (!archived && (liveIds.has(id) || (index && index.has(id)) || !transcriptGone(id))) continue;
+    try { fs.unlinkSync(fileOf(id)); } catch (_) { /* gone already, or the next snapshot retries */ }
+    markers.delete(id);
+  }
 }
 
-function setSortMode(mode) {
-  if (!SORT_MODES.includes(mode)) throw new Error('unknown sort mode: ' + String(mode));
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = SORT_FILE + '.tmp.' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify({ mode, at: Date.now() }));
-  fs.renameSync(tmp, SORT_FILE);   // another window never reads a half file
-  return mode;
+function reconcileLocks(locks, liveIds, boardIds, claude, index) { reconcileMarkers(locks, lockFile, liveIds, boardIds, claude, index); }
+
+/*
+ * Kept cards: the sessions that were running in a window when its extension host went away (a
+ * restart of VS Code or of its extensions, a closed window) stay on the board as ended cards,
+ * also with the switch on "running". One record per session in DATA_DIR/kept/<id>.json =
+ * { root, run, at, startedAt } (tmp then rename): `root` is the folder key of the real path of
+ * the window's first workspace folder, `run` the host lifetime that saw the session running (a
+ * random id per activation, also in that host's heartbeat; a pid cannot name a lifetime, pids
+ * come around again), `at` when that lifetime wrote the record, `startedAt` when the session's
+ * process started (left out when the CLI gives no start time).
+ *
+ *   host poll ──▶ tracker.observe(rows, folder)
+ *                   running row of this host's window, not archived ──▶ record (once per process and lifetime)
+ *                   a row this lifetime saw running, gone for KEPT_GRACE_MS ──▶ record removed
+ *                   (it ended while the window lived; the wait covers a host that sees its
+ *                    sessions go while it is shutting down itself)
+ *   snapshot ──▶ reconcileKept: archived, transcript gone, or running again in a process younger
+ *                than the record while the record's lifetime is dead ──▶ record removed
+ *            ──▶ listedSessions: an ended row gets kept: true when its record names one of its
+ *                window's folder keys and a lifetime that is not alive (aliveRuns). No row is
+ *                added and none moved; the page shows the kept ones with "running".
+ */
+const KEPT_DIR = path.join(DATA_DIR, 'kept');
+const KEPT_GRACE_MS = 60000;
+
+function keptFile(sessionId) { return path.join(KEPT_DIR, sessionId + '.json'); }
+function readKept() { return readMarkers(KEPT_DIR, 0); }
+
+/**
+ * The writer of the kept records for one host lifetime: `run` names the lifetime, `hostPid` its
+ * extension host (a row belongs to this window when its window's host is that pid), `clock`
+ * replaces Date.now in a test. observe() is called after a poll that is not stale, with the
+ * snapshot's running rows and the window's first workspace folder; it returns what it did.
+ */
+function createKeptTracker(run, hostPid, clock) {
+  const now = typeof clock === 'function' ? clock : Date.now;
+  const lastRunning = new Map();   // sessionId -> { proc, gone }: the process this lifetime saw running in its window, and when a poll first saw it gone (null while it runs)
+  const procOf = (r) => (Number(r.pid) || 0) + '@' + (Number(r.startedAt) || 0);
+  return {
+    observe(rows, folder) {
+      const keys = folder ? rootFolderKeys(folder) : [];
+      if (!keys.length) return { written: 0, removed: 0 };   // a window without a folder: nothing ties a card to it
+      const root = keys[keys.length - 1];                     // the real path's key: a junction and its target are one folder
+      const at = now();
+      const kept = readKept();
+      let written = 0;
+      let removed = 0;
+      let failed = null;
+      const here = new Set();                                 // the sessions this poll sees running in this window
+      for (const r of rows || []) {
+        if (!r || !UUID_RE.test(String(r.sessionId)) || r.archived) continue;
+        if (r.pid && !pidAlive(Number(r.pid))) continue;      // the rows are from a moment ago and it has ended since: it runs no more
+        if (!r.window) {
+          // Nothing says where it runs. For the process this lifetime saw in its own window that is a
+          // window lookup that failed at this poll: still its card, the wait does not start while it
+          // runs on. Another process of the session is a resume elsewhere (a terminal has no window),
+          // and the wait goes on.
+          const seen = lastRunning.get(r.sessionId);
+          if (seen && seen.proc === procOf(r)) { seen.gone = null; here.add(r.sessionId); }
+          continue;
+        }
+        if (Number(r.window.exthostPid) !== Number(hostPid)) continue;
+        lastRunning.set(r.sessionId, { proc: procOf(r), gone: null });
+        here.add(r.sessionId);
+        const m = kept.get(r.sessionId);
+        // One write per process and lifetime. A process younger than the record is the session run again
+        // (ended and resumed within the wait): the record follows it, or reconcileKept would read the
+        // new process as a resume elsewhere once this host is gone.
+        if (m && m.run === run && m.root === root && !(Number(r.startedAt) > Number(m.at))) continue;
+        const rec = { root, run, at };
+        if (Number(r.startedAt) > 0) rec.startedAt = Number(r.startedAt);   // names the process; an older CLI gives no start time
+        try { writeJsonAtomic(fs, keptFile(r.sessionId), rec); written += 1; }
+        catch (e) { failed = failed || e; }                   // this card is not kept; the others and the clean-up below still are done
+      }
+      for (const [id, seen] of [...lastRunning]) {
+        if (here.has(id)) continue;
+        // The wait starts at the first poll that sees it gone, not at the last one that saw it run:
+        // polls that failed in between saw nothing, and a session that ended during them (as its
+        // window shuts down, say) must not have used its wait up before anyone looked.
+        if (seen.gone === null) seen.gone = at;
+        if (at - seen.gone < KEPT_GRACE_MS) continue;
+        const m = kept.get(id);
+        if (!m && fs.existsSync(keptFile(id))) continue;      // there, but not readable at this poll (readMarkers left it out): whose it is shows at the next one
+        if (m && m.run === run) {                             // else: another lifetime took the session over, or the record is gone
+          try { fs.unlinkSync(keptFile(id)); removed += 1; }
+          catch (e) { if (!e || e.code !== 'ENOENT') continue; }   // held by something right now: not forgotten, the next poll tries again
+        }
+        lastRunning.delete(id);
+      }
+      if (failed) throw failed;                               // the host says it once (keepCards); nothing else was left undone for it
+      return { written, removed };
+    },
+  };
+}
+
+/**
+ * reconcileMarkers for the kept records, and one rule of their own: a record goes when its
+ * session runs in a process that started after the record was written while the record's
+ * lifetime is not alive. That session was resumed where no tracker owns it (a terminal, a window
+ * on an older board), so its card is spent and must not come back when the session ends there.
+ * A process older than its record is the one the record was written for, still running.
+ */
+function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
+  reconcileMarkers(kept, keptFile, liveIds, boardIds, claude, index);
+  for (const r of rows || []) {
+    const m = kept.get(r.sessionId);
+    if (!m || liveRuns.has(m.run)) continue;
+    if (!(Number(r.startedAt) > Number(m.at))) continue;     // no start time, or the old process
+    try { fs.unlinkSync(keptFile(r.sessionId)); } catch (_) { /* gone already; else the next snapshot tries again for as long as the session runs there */ }
+    kept.delete(r.sessionId);
+  }
+}
+
+/**
+ * Drop the kept record of a session that was ended on the user's word; `aimedStart` is the start
+ * of the process that end was aimed at (the row this board last saw), `since` when the end was
+ * asked for. The record of a process started later than the aimed one is left alone: the
+ * session ran again, before the end was asked for (this board still showed the old process) or
+ * while it was under way, and that record is not this end's to take. The starts decide, not
+ * the time of a write: a window that sees the session for the first time during the end writes
+ * a record for the very process being ended. Without a start of the aimed process (no row any
+ * more, or an older CLI) `since` stands in for it: a process started after the end was asked
+ * for is a later one in any case, one started before it may be the one that was ended. A record
+ * without a start time goes. A record that cannot be read at this moment stays: nothing says
+ * whose it is (readMarkers leaves such a file too). Returns null, or why the record could not be
+ * read or removed. Its window's tracker then drops it after its wait, as for a session that
+ * ended by itself, so the caller reports the reason and goes on.
+ *
+ * No lock between windows here either: a record another window writes between this read and
+ * the removal goes too. Like every record taken from a session that runs on, its window's
+ * tracker finds none at its next poll and writes it again.
+ */
+function forgetKept(sessionId, aimedStart, since) {
+  const file = keptFile(sessionId);
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }
+  let rec = null;
+  try { rec = JSON.parse(text); } catch (_) { rec = null; }   // holds no record: it goes
+  const aimed = Number(aimedStart) > 0 ? Number(aimedStart) : Number(since);
+  if (rec && Number(rec.startedAt) > aimed) return null;
+  try { fs.unlinkSync(file); return null; } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }
 }
 
 /*
- * The header's "running | open | all" switch, board-wide like the order, in DATA_DIR/show.json
- * (tmp then rename): running shows only the running sessions; open adds the ended ones Claude
- * Code still lists (not archived); all adds the archived ones too. A missing or unreadable file
- * means open. 0.11.2 wrote { show } without a version and had two modes, all and running; its
- * "all" is today's "open". Boards of 0.11.2 read every value but "running" as their all.
+ * The header's "auto | running | all" switch, board-wide like the locks, in DATA_DIR/show.json
+ * (tmp then rename): auto shows what Claude Code lists (the running sessions and the ended ones
+ * that are not archived); running the running ones and the kept cards; all adds the archived. A missing or
+ * unreadable file means auto. The file keeps the format boards of 0.11.3 and 0.12.0 read and
+ * write: { show, v: 2 } with "open" standing for auto, so a window still on one of them and a
+ * window on this version share the switch in both directions. 0.11.2 wrote { show } without a
+ * version and had two modes; its "all" is auto.
  */
 const SHOW_FILE = path.join(DATA_DIR, 'show.json');
-const SHOW_MODES = ['running', 'open', 'all'];
+const SHOW_MODES = ['auto', 'running', 'all'];
 const SHOW_VERSION = 2;
 
 function readShowMode() {
   try {
     const rec = JSON.parse(fs.readFileSync(SHOW_FILE, 'utf8'));
-    if (rec && rec.v === SHOW_VERSION && SHOW_MODES.includes(rec.show)) return rec.show;
-    return rec && rec.show === 'running' ? 'running' : 'open';
-  } catch (_) { return 'open'; }
+    if (rec && rec.show === 'running') return 'running';
+    return rec && rec.v === SHOW_VERSION && rec.show === 'all' ? 'all' : 'auto';
+  } catch (_) { return 'auto'; }
 }
 
 function setShowMode(show) {
   if (!SHOW_MODES.includes(show)) throw new Error('unknown show mode: ' + String(show));
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = SHOW_FILE + '.tmp.' + process.pid;
-  fs.writeFileSync(tmp, JSON.stringify({ show, v: SHOW_VERSION, at: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ show: show === 'auto' ? 'open' : show, v: SHOW_VERSION, at: Date.now() }));
   fs.renameSync(tmp, SHOW_FILE);
   return show;
 }
-
-/** The rank of an order record as the page reads it: a finite number, else null (unranked). */
-function rankOf(rec) { return rec && Number.isFinite(Number(rec.rank)) ? Number(rec.rank) : null; }
 
 // ---------------------------------------------------------------------------------------
 // Titles: Claude Code's own, suggested by a small model, written where Claude reads them
@@ -2241,14 +2497,16 @@ async function snapshot(opts) {
   const unseen = readUnseen();
   const seen = readSeen();
   const muted = readMuted();
-  const order = readOrder();
-  const sortMode = readSortMode();
+  const locks = readLocks();
   const showMode = readShowMode();
   const now = Date.now();
   const liveIds = new Set(rows.map((r) => r.sessionId));
   forgetStatuses(liveIds);
   pruneDead(MUTED_DIR, muted, liveIds, index);
-  pruneDead(ORDER_DIR, order, liveIds, index);
+  reconcileLocks(locks, liveIds, archived, claude, index);
+  const kept = readKept();
+  const liveRuns = aliveRuns();
+  reconcileKept(kept, rows, liveRuns, liveIds, archived, claude, index);
   notesStore.pruneDead(liveIds, index, transcriptGone);
 
   const windows = new Map();
@@ -2305,7 +2563,8 @@ async function snapshot(opts) {
       waitingFor: r.waitingFor || null,
       startedAt: r.startedAt || null,
       statusUpdatedAt: changedAt,
-      ageMinutes: changedAt ? Math.round((now - changedAt) / 60000) : null,
+      activityAt: facts.lastMessageAt || facts.mtime || changedAt || Number(r.startedAt) || null,   // the last message, as Claude Code orders its list
+      workingSince: r.status === 'busy' ? changedAt : null,   // the moment it turned busy; working rows sit on top
       contextTokens: tokens,
       pct: tokens == null || !limits.compact ? null : Math.min(100, Math.round((tokens / limits.compact) * 100)),
       hasTranscript: Boolean(file),
@@ -2314,18 +2573,19 @@ async function snapshot(opts) {
       unseen: isUnseen,
       unseenAt: isUnseen ? Number(u.at) : null,   // the finished answer's time, the same in every window
       muted: muted.has(r.sessionId),
-      rank: rankOf(order.get(r.sessionId)),
+      lockSlot: slotOf(locks.get(r.sessionId)),
     };
   });
 
   if (!stale) lastGood = { rows, at: now };
   // Until Claude Code's archive has been read once, every session it archived would look ended: list none.
   const listed = claude.known === false ? { ended: [], archived: [] }
-    : listedSessions(liveIds, claude.ids, archived, { withArchived: showMode === 'all', includeProgrammatic });
+    : listedSessions(liveIds, claude.ids, archived, { withArchived: showMode === 'all', includeProgrammatic, kept, liveRuns });
+  for (const row of listed.ended) row.lockSlot = slotOf(locks.get(row.sessionId));
   lastSnapshot = {
     at: now, stale, error, limits, platform: process.platform, sessions,
     ended: listed.ended, archivedEnded: listed.archived,
-    order: { mode: sortMode, show: showMode }, usage: safeUsage(), claudeArchiveError: claude.error,
+    order: { show: showMode }, usage: safeUsage(), claudeArchiveError: claude.error,
   };
   return lastSnapshot;
 }
@@ -2373,7 +2633,15 @@ async function endSession(sessionId, opts) {
   if (!UUID_RE.test(sessionId)) return applyArchive(sessionId, { ok: false, code: 'invalid', message: 'Not a session id.' }, archive);
   if (ending.has(sessionId)) return applyArchive(sessionId, { ok: false, code: 'pending', message: 'Already ending this session.' }, archive);
   const p = (async () => {
-    const result = applyArchive(sessionId, await doEndSession(sessionId, Boolean(opts && opts.force)), archive);
+    const began = Date.now();
+    const row = lastGoodRows().find((r) => r.sessionId === sessionId);   // the process this end is aimed at, as this board last saw it
+    const ended = await doEndSession(sessionId, row, Boolean(opts && opts.force));
+    // Ended on the user's word: no card to keep, whatever its window does next. Its window's
+    // tracker would drop the record only after its wait, and a window closed before that
+    // would bring the card back.
+    const keptError = ARCHIVE_OK.has(ended.code) ? forgetKept(sessionId, row && row.startedAt, began) : null;
+    const result = applyArchive(sessionId, ended, archive);
+    if (keptError) result.keptError = keptError;             // the end stands; the host says what was left behind
     if (result.archived) Object.assign(result, await stowTranscript(sessionId));
     return result;
   })();
@@ -2381,9 +2649,8 @@ async function endSession(sessionId, opts) {
   try { return await p; } finally { ending.delete(sessionId); }
 }
 
-async function doEndSession(sessionId, force) {
+async function doEndSession(sessionId, row, force) {
   if (!IS_WINDOWS) return { ok: false, code: 'unsupported', message: 'Ending sessions is Windows-only in this version.' };
-  const row = lastGoodRows().find((r) => r.sessionId === sessionId);
   if (!row) return { ok: false, code: 'unknown', message: 'Unknown session.' };
   const pid = Number(row.pid);
   if (!Number.isInteger(pid) || pid <= 0) return { ok: false, code: 'invalid', message: 'Bad pid.' };
@@ -2702,13 +2969,20 @@ async function searchSessions(query, opts) {
         live: Boolean(s), status: s ? s.status : 'past', pid: s ? s.pid : null, window: s ? s.window : null,
       }, archiveSource(row.sessionId, archivedSet, claudeSet), {
         name: s ? s.name : null, folder: row.cwd ? String(row.cwd).split(/[\\/]/).filter(Boolean).pop() : null,
-        ageMinutes: row.mtime ? Math.round((Date.now() - row.mtime) / 60000) : null, snippets: [],
+        activityAt: row.mtime || null, workingSince: s ? s.workingSince : null, snippets: [],
       });
     });
     all.sort((a, b) => (a.live === b.live ? (b.mtime || 0) - (a.mtime || 0) : a.live ? -1 : 1));
     base.total = all.length;
     const shown = all.slice(0, 50);
     base.shown = shown.length;
+    // The rows that are shown carry the time the board orders by, so a session reads the same here
+    // and in its section: the last message (a running row has it, a past one is read from its tail),
+    // else the file time. The hits are ranked by file time: reading every tail would cost a read per hit.
+    for (const row of shown) {
+      const s = live.get(row.sessionId);
+      row.activityAt = (s && s.activityAt) || (row.path ? transcriptFacts(row.sessionId, row.path).lastMessageAt : null) || row.mtime || null;
+    }
 
     // Snippets for the first 20 displayed rows that came from the content pass, 4 at a time.
     if (opts.content && rg.path) {
@@ -2798,12 +3072,16 @@ module.exports = {
   readMuted,
   muteSession,
   unmuteSession,
-  ORDER_DIR,
-  SORT_FILE,
-  readOrder,
-  setOrder,
-  readSortMode,
-  setSortMode,
+  LOCKS_DIR,
+  readLocks,
+  setLocks,
+  reconcileLocks,
+  KEPT_DIR,
+  KEPT_GRACE_MS,
+  readKept,
+  createKeptTracker,
+  reconcileKept,
+  lastMessageAt,
   SHOW_FILE,
   SHOW_MODES,
   readShowMode,
@@ -2818,6 +3096,7 @@ module.exports = {
   transcriptIndex,
   transcriptOf,
   transcriptFacts,
+  titleFromTranscript,
   liveTranscripts,
   stowedTranscripts,
   registryRecords,

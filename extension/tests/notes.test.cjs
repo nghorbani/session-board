@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { createNotesStore, TEXT_MAX } = require('../notes.cjs');
+const { createNotesStore, writeJsonAtomic, TEXT_MAX } = require('../notes.cjs');
 
 const A = 'aaaaaaaa-1111-4111-8111-111111111111';
 const B = 'bbbbbbbb-2222-4222-8222-222222222222';
@@ -21,6 +21,25 @@ function freshStore() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-notes-'));
   return { dataDir, store: createNotesStore({ dataDir }) };
 }
+
+test('writeJsonAtomic: a write that cannot be finished leaves no temp file behind, keeps the record that was there and reports its own failure', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-atomic-'));
+  const file = path.join(dir, 'rec.json');
+  writeJsonAtomic(fs, file, { n: 1 });
+  const refuse = (code) => () => { throw Object.assign(new Error(code + ': refused'), { code }); };
+  const held = Object.assign({}, fs, { renameSync: refuse('EPERM') });      // the record is held by something: the temp file is written, the swap fails
+  for (let i = 0; i < 2; i++) assert.throws(() => writeJsonAtomic(held, file, { n: 2 }), /EPERM/);
+  assert.deepEqual(fs.readdirSync(dir), ['rec.json'], 'a caller that tries again at every poll must not fill the folder');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { n: 1 });
+  const full = Object.assign({}, fs, { writeFileSync(p, data) { fs.writeFileSync(p, String(data).slice(0, 3)); refuse('ENOSPC')(); } });   // the disk fills up in the middle of the temp file
+  for (let i = 0; i < 2; i++) assert.throws(() => writeJsonAtomic(full, file, { n: 3 }), /ENOSPC/);
+  assert.deepEqual(fs.readdirSync(dir), ['rec.json'], 'the half-written temp file went with its write');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { n: 1 });
+  const none = Object.assign({}, fs, { writeFileSync: refuse('EACCES') });  // not even the temp file can be made, so the clean-up finds nothing
+  assert.throws(() => writeJsonAtomic(none, file, { n: 4 }), /EACCES/, 'the failure of the write, not that of the clean-up after it');
+  assert.deepEqual(fs.readdirSync(dir), ['rec.json']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 test('add: writes one file per note and returns it with an empty sent list', () => {
   const { dataDir, store } = freshStore();

@@ -65,8 +65,8 @@ per-run token the page embeds (`X-Board-Token`) and a matching Host/Origin; JSON
 `POST /api/end/<id>[?force=1][&archive=1]`, `POST /api/unarchive/<id>` (replies with `restoredTo`),
 `GET /api/search?q=&content=0|1`, `POST /api/usage/refresh`, `POST /api/seen/<id>`,
 `POST /api/title/suggest/<id>`, `POST /api/title/<id>?title=`, `POST /api/mute/<id>`, `POST /api/unmute/<id>`,
-`POST /api/order?ids=<comma-joined ids>`, `POST /api/order/mode?mode=activity|manual`,
-`POST /api/order/show?show=all|running`, `POST /api/archive/<id>` (an ended session).
+`POST /api/locks` (JSON body `{ set, move, clear }`),
+`POST /api/order/show?show=auto|running|all`, `POST /api/archive/<id>` (an ended session).
 
 **The VS Code host.** `pwsh -File build.ps1` runs the tests, packages the `.vsix` and installs
 it (`-NoInstall` stops after packaging). What to expect from VS Code (seen on 1.138): a first
@@ -144,16 +144,38 @@ installed.
 - `heartbeats.test.cjs`: the heartbeat readers delete records older than a day and leftover
   `.tmp` files, keep fresh and merely stale ones, and `boardAlive()` answers against a temp
   installed-extension list.
-- `order.test.cjs`: the order store (`setOrder()` checks the whole list before the first
-  write, `readOrder()`), the sort-mode file, pruning shared with the muted store, and
-  `rank` and `order.mode` on the snapshot.
-- `order-host.test.cjs`: the `order`, `sortMode`, `showMode` and `archivePast` messages and their
-  replies, and `claudeCode.claudeProcessWrapper` reaching `snapshot()`.
+- `locks.test.cjs`: the lock store (`setLocks()` checks the whole request before the first
+  write; `move` never creates a lock), `lockSlot` on the snapshot, `reconcileLocks()` (archived
+  on the board or in Claude Code, a session without a transcript, one younger than the file
+  index), the lock that goes with a board archive, and the old order files left alone.
+- `kept.test.cjs`: the kept cards in `core.cjs`. The tracker of a host lifetime (one record
+  per running session of its window, none for another window's row, an archived row or a
+  window without a folder; the 60 s before a record of an ended session goes; a record of
+  another lifetime left alone; a newer process of the same session; a row whose process is
+  gone; a removal that fails once; a record that went missing written again; a window lookup
+  that fails for over a minute), a record and a lock that cannot be read for a moment, an explicit
+  end, an end held open at a gate in the `claude stop` shim while its window writes a record
+  (for the process being ended, for one started since, for one started before the end was
+  asked for; and with a row that has no start time, for a process started before and for
+  one started after the request), `run` in the heartbeat, the `kept` flag of
+  `listedSessions()`
+  (a dead lifetime, a live one, another folder, a junction and its target, no row added or
+  moved, a dead host that owns no folder) and `reconcileKept()` (an archive, a transcript that
+  is gone, a session resumed in a process younger than its record).
+- `kept-host.test.cjs`: one `run` per activation in every heartbeat and in the tracker; a poll
+  hands the tracker the running rows and the first workspace folder, not on a stale snapshot
+  and not after `stop()`; a tracker that throws leaves the poll intact and is logged once; an
+  end that left a card's record behind says so in the log.
+- `activity.test.cjs`: `lastMessageAt()` (top level only, cut lines, bad dates, the larger
+  second read) and `activityAt` and `workingSince` on the snapshot across the status changes.
+- `locks-host.test.cjs`: the `locks`, `showMode` and `archivePast` messages and their replies,
+  the retired `order` and `sortMode` messages, and `claudeCode.claudeProcessWrapper` reaching
+  `snapshot()`.
 - `ended.test.cjs`: `listedSessions()` (the root's folder and its real path's, no worktree
   folders, programmatic and daemon sessions left out, archived and stowed rows apart, which
-  window owns a session), an unreadable Claude Code archive, the show store and its 0.11.2
-  file, `archivePast()`.
-- `server-order.test.cjs`: `server.cjs` as a child process answering the order, show and archive routes.
+  window owns a session), an unreadable Claude Code archive, the show store with the file
+  format older boards read, `archivePast()`.
+- `server-locks.test.cjs`: `server.cjs` as a child process answering the lock, show and archive routes; the retired order routes are 404.
 - `shim/transcript.cjs`: the transcript line constructors that `steps.test.cjs` and
   `steps-service.test.cjs` share.
 - `steps.test.cjs`: `steps.cjs` against JSONL written into a temp dir: the active path across a
@@ -169,7 +191,9 @@ installed.
   steps it adds, follow, search (ripgrep faked, the Node scan, the 500 cap, notes), the seen
   marker, the note messages and the hand-over text.
 - `notes.test.cjs`: the notes store: one file per note, sent records as files of their own,
-  the 16 KB cap, an edit racing a delete, two writers at once, pruning.
+  the 16 KB cap, an edit racing a delete, two writers at once, pruning; and
+  `writeJsonAtomic()`, which the locks and the kept records of `core.cjs` use too: a write
+  that fails leaves no temp file and reports its own failure.
 - `steps-host.test.cjs`: the Steps panel of `extension.js` against the fake `vscode`: one panel
   per session, links (web, folder, file, Markdown, `file:line`, refused network paths, the
   question for a path outside the trusted folders), `revealHere()` with and without a prompt,
@@ -329,10 +353,11 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   newest file. The host passes the wrapper setting as `snapshot({ includeProgrammatic })`; the
   browser server has no VS Code settings and always leaves them out. Until Claude Code's archive
   has been read once (`readClaudeArchived().known`), the snapshot lists no ended rows, since
-  every archived session would look ended. The header switch "running | open | all" lives in
-  `show.json` as `{ show, v: 2 }` (`setShowMode()`); a file without `v` is from 0.11.2, whose
-  "all" reads as "open" (a 0.11.2 window that writes "all" therefore shows "open" in 0.11.3
-  windows until it reloads). ⤓ on an ended row is `archivePast()`: the archive marker, then
+  every archived session would look ended. The header switch "auto | running | all" lives in
+  `show.json` as `{ show, v: 2 }` (`setShowMode()`), with `open` stored for auto: that is the
+  format boards of 0.11.3 and 0.12.0 read and write, so a window still on one of them shares
+  the switch with a newer window in both directions. A file without `v` is from 0.11.2, whose
+  "all" reads as auto. ⤓ on an ended row is `archivePast()`: the archive marker, then
   `stowTranscript()`. Typing in the search box filters the sections and, after 400 ms without a
   key, runs the title search (`startSearch(false)`); Enter adds content.
 - **Ids copy on click**: the agent name and "Session <8>" on a row, and every value in the
@@ -369,23 +394,117 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   AppUserModelID, with the session's `openUri()` as a protocol launch. A failed batch releases
   its claims and is retried once, then reported once. `SB_TOAST_LOG` writes the script to a file
   instead of spawning (tests).
-- **Manual order**: the header switch (`#sortMode`, `applyMode()`) writes
-  `%LOCALAPPDATA%\SessionBoard\sort.json` through `setSortMode()` (tmp then rename); `snapshot()`
-  reads it back as `order.mode`. In manual mode `rowOrder()` sorts a section
-  by `rank` (a row without one sits on top, newest first); by activity it is waiting,
-  busy, unseen, idle, then age. A move (the ⋮⋮ handle, HTML5 drag and drop on the handle
-  only, or Alt+Up/Down on the focused row) ends in `applyOrder(key, ids)`: the whole group's
-  ids in their new order, held in
-  `state.pendingOrder[key]` until a snapshot agrees or 10 s pass, sent as `order` to the host
-  or `POST /api/order?ids=` (comma-joined, 8000 characters at most; core caps the list at
-  500). `setOrder()` checks every id before the first write, then writes
-  `order\<id>.json` = `{ rank: index, at }`; ids outside the list keep their ranks, and a marker is
-  pruned like a mute marker. Ranks are global by id and read inside whichever section the
-  row is in, so a session resumed in another window lands somewhere plausible there until its
-  next move; two windows reordering one group at once settle on the last write. A typed
-  filter disables moving, and so does the activity mode. The per-file read runs once per
-  snapshot like the other stores; revisit it when `order\` holds about 1000 files (a 90-day
-  expiry through `readMarkers()` is the cheap mitigation).
+- **Order and locks**: `titleFromTranscript()` returns `lastMessageAt`, the time of the last
+  tail line whose top-level type is user or assistant (`lastMessageAt()`, the rule Claude
+  Code's own list uses; one more read of 4 MB when the 256 KB tail holds no whole message
+  line, else the file time stands in). `snapshot()` puts `activityAt` on every running and
+  ended row and `workingSince` on a busy row (the registry's `statusUpdatedAt`, the moment it
+  turned busy). `searchSessions()` ranks its hits by file time and puts the same `activityAt`
+  on the 50 rows it shows, so a session reads the same in a section and in the results. The
+  page orders a section with `byActivity()`: working rows on top by `workingSince`, the rest
+  by `activityAt`, newest first. Claude Code's webview gives one `Date.now()` to every running
+  session on each state update, so its working sessions share the newest time; among several
+  working sessions the board's order can differ from it. (Read in the webview bundle of
+  Claude Code 2.1.328; 2.1.332 still sorts its list by that time.)
+  A lock is `locks\<id>.json` = `{ slot, at }`, written tmp then rename.
+  `setLocks({ set, move, clear })` checks the whole request before the first write; `move`
+  changes a slot only where a lock exists, so a page with an old snapshot cannot bring back a
+  lock another window cleared. `reconcileLocks()` in `snapshot()` drops the lock of a session
+  archived on the board or in Claude Code (when its archive was read: not before the first
+  read and not while a read fails, since the ids are then those of an earlier read) and of one that
+  is not running and has no transcript left (`transcriptGone()`, not the minute-old index).
+  The page builds one placed list per section in `groupSessions()`: `placeRows()` puts the
+  locked rows at their slots and the others around them, on the rows the switch shows, so a
+  card locked third is third on screen in running and in auto. A typed filter only hides
+  rows; archived rows that show in a section follow the placed rows, without a rail. The lock
+  button, a drop on the grip (HTML5 drag and drop on the grip only) and Alt+Up/Down end in
+  `sendLocks()`: `set` for the card, `move` for the other locked cards of the section whose
+  place changed, held in `state.pendingLocks` under a `seq` until a snapshot agrees or 10 s
+  pass, sent as `locks` to the host (reply `locksResult { ok, seq }`) or as
+  `POST /api/locks`. A locked card that a drop leaves where it is keeps its slot, which may
+  lie past the end of the list shown and mean a place in a longer one (the same section with
+  the switch on auto); only when the cards would then not come out as dropped (`applyDrop()`
+  asks `placeRows()` with the slots it is about to write) does every lock of the section get
+  the place it has. The browser page sends its lock requests one after the other, in the
+  order of the clicks: two requests on two connections can reach the server in either order.
+  A change that waits to be sent holds on the page until it leaves, and its 10 s count from
+  then. A request gets 30 s for its answer (`LOCK_REPLY_MS`); without one it is aborted and
+  has failed like any other, and so has every change that waited behind it: what the server
+  holds is not known then, so they are not sent, and the cards show what the next snapshot
+  says. `setLocks()` stores every id in lower case, the way Claude Code writes them.
+  A `move` for a lock that another window cleared a moment ago writes nothing, and the page
+  that sent it shows that card at the moved place until its hold ends, 10 s at most.
+  A lock belongs to the session: in another window's section it sits at
+  the same place number. Two windows changing locks at once settle on the last write; there is
+  no lock between processes, so a move in one window and an unlock of the same card in another
+  within the same millisecond can leave that card locked (unlock it again). A board archive
+  removes the session's lock at once (`archiveSession()`). A render hands the keyboard focus to
+  the replacement of the control that held it (`focusedInRow()`, `restoreFocus()`), so a
+  focused lock button or card stays usable across the polls. Controls that share an action in
+  one row (the copy buttons) each carry a `data-key`: the focus follows that key, not the
+  position, because the agent name before the id comes and goes. A pending lock change ends on an
+  agreeing snapshot only after its own reply came (`acked`): a snapshot from before the write
+  can agree by chance, as after lock then unlock.
+  `order\` and `sort.json` of 0.10.0 to 0.12.0 stay on disk and are never read.
+- **Kept cards**: a session is a child of its window's extension host and ends with it, so
+  under "running" a restart of VS Code or of its extensions used to empty the window's
+  section. Each host lifetime has a name, `run` (a random id per activation; a pid cannot
+  name a lifetime, pids come around again), which it writes into its heartbeat and into
+  `kept\<id>.json = { root, run, at, startedAt }` for every running session of its window
+  that is not archived (`createKeptTracker()` in `core.cjs`, called from `keepCards()` after
+  every poll that is not stale and never once the provider has stopped). `root` is the folder
+  key of the real path of the window's first workspace folder, so a junction and its target
+  are one folder; `startedAt` is the start of the session's process, left out when the CLI
+  gives none. A session that ends while its window lives loses its record after 60 s
+  (`KEPT_GRACE_MS`): at shutdown the board may see the sessions go a moment before its own
+  host dies, and removing at once would delete the records the restart needs. The 60 s count
+  from the first poll that sees the session gone, so polls that fail in between (a CLI that
+  does not answer) do not use them up.
+  `listedSessions()` sets `kept: true` on an ended row when the session's record names one of
+  the row's window's folder keys and a lifetime that is not alive; alive means a fresh
+  heartbeat carries that `run` and its process lives (`aliveRuns()`, `hostAlive()`). It adds
+  no row and moves none, so auto and all list what they listed before, and a heartbeat of a
+  dead process owns no folder any more. The page's `endedRows()` returns the kept rows under
+  "running" and every ended row otherwise. `reconcileKept()` in `snapshot()` drops a record
+  with an archive (on the board at once, in `archiveSession()`), with a transcript that is
+  gone, and when the session runs again in a process younger than the record while the
+  record's lifetime is dead (resumed in a terminal or in a window on an older board: the card
+  is spent). ✕ on the board drops the record at once (`endSession()`, `forgetKept()`), with
+  one exception: the record of a process that started later than the one the end was aimed
+  at (the row this board last saw) is left, since the session ran again, before the end was
+  asked for or while it ran. The two starts decide, not the time of a write or of the
+  request: a window that sees the session for the first time while the end runs writes a
+  record for the very process being ended. Without a start of the aimed process (no row any
+  more, or an older CLI) the time the end was asked for stands in for it: a process started
+  after that is a later one in any case. A record without a start time goes. A record that
+  cannot be read at that moment stays, and so does one whose removal fails; either is named
+  in the end result (`keptError`) and logged. No lock between windows here
+  either: a record another window writes between the end's read and its removal goes too.
+  Whenever a record is taken from a session that runs on, its window's tracker, which reads
+  the folder at every poll, writes it again at its next one.
+  In the tracker a record that could not be removed is tried again on the next poll, and a
+  row whose process is gone by the time the tracker reads it gets no record. A session the
+  tracker has seen in its window keeps its record while nothing says where it runs (a poll
+  whose window lookup failed), as long as it is the same process: the wait starts when the
+  session is gone, shows in another window, or runs as another process without a window
+  (resumed in a terminal). A session that runs again in a newer process within the same lifetime gets
+  a fresh record, so `reconcileKept()` does not take that process for a resume elsewhere once
+  the host is gone. A record or a lock that cannot be read at a poll is left out of that poll
+  and left on disk (`readMarkers()`): a failed read is no reason to delete it. The tracker
+  looks at such a record again at its next poll before it lets go of its clean-up. A record
+  that cannot be written costs that one card: the other sessions and the clean-up are still
+  done, and the failure is logged once. Limits: a
+  session that ends on its own, or whose tab is closed, less than 60 s before its window
+  closes comes back once. So does a kept session resumed and ended in a terminal while no
+  board of this version ran, or whose record could not be removed while it ran there
+  (`reconcileKept()` tries again only as long as that session runs). A host that lingers over
+  60 s in a stalled shutdown while it still polls loses its records; a session without a
+  window, a window without a folder and a session started with a working directory outside
+  its window's folder are not kept. A wrong verdict
+  on "alive" heals by itself: the old pid handed out again while the old heartbeat is still
+  fresh delays the cards by up to 45 s, and a live host whose heartbeat went stale shows a
+  session that ended in it under a minute ago as kept until its next heartbeat, and only
+  where another window owns the same folder.
 - **Titles**: the board keeps none of its own (0.10.x boards wrote `titles\<id>.json`; it is
   no longer read and is left on disk). ✎ sends `retitle`; `suggestTitle()` collects the last six prompts and the
   newest answer with `transcriptExcerpt()`, which reads the transcript from its end in 1 MB
