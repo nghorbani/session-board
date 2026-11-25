@@ -28,7 +28,11 @@ const B = 'bbbbbbbb-2222-4222-8222-222222222222';
 const P = 'cccccccc-3333-4333-8333-333333333333';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const ago = (minutes) => Date.now() - minutes * 60000;   // the time of a last message that many minutes back
+// One "now" per test for the fixtures. Rows built a moment apart with the same ago() must carry the
+// same time, or the clock ticking between two of them decides their order instead of the test.
+const fixtureClock = { now: Date.now() };
+test.beforeEach(() => { fixtureClock.now = Date.now(); });
+const ago = (minutes) => fixtureClock.now - minutes * 60000;   // the time of a last message that many minutes back
 function row(sessionId, title, status, extra) {
   const r = Object.assign({ sessionId, title, status, waitingFor: status === 'waiting' ? 'permission prompt' : null, name: null, lastPrompt: null, cwd: 'C:\\code\\x', window: { id: 1, label: 'x' }, activityAt: ago(1), workingSince: null, lockSlot: null, contextTokens: 1000, pct: 1, transcriptPath: null, kind: 'interactive', pid: 100, archived: false }, extra);
   if (r.status === 'busy' && r.workingSince == null) r.workingSince = r.activityAt;   // a busy row works since its last message unless the test says otherwise
@@ -765,7 +769,7 @@ test('page: a waiting muted row stays in its section in the waiting colour but c
   fake.snapshot = snapshotOf([row(A, 'Spike', 'waiting', { muted: true }), row(B, 'Old', 'idle', { pid: 200, muted: true, archived: true, archivedBy: 'board' }), row(C, 'Plain', 'idle', { pid: 300 })]);
   const page = await openPage();
   const s = await page.until((x) => x.sections[0] && x.toggleArchived !== null, 'the section and the archived toggle');
-  assert.deepEqual(s.sections[0].rows, [A, C], 'waiting first, in place');
+  assert.deepEqual(s.sections[0].rows, [A, C], 'in its place: the two share the time of their last message, so the id decides, not the waiting');
   assert.deepEqual([s.sections[0].badge, s.sections[0].tone], [null, null], 'the section badge leaves the muted row out');
   assert.equal(s.toggleArchived, 'Show 1 archived', 'archived wins over muted');
   assert.equal(s.counts, '0 need you · 0 working · 1 idle', 'the waiting muted row counts nowhere');
