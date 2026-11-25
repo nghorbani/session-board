@@ -1519,7 +1519,7 @@ function readKept() { return readMarkers(KEPT_DIR, 0); }
  */
 function createKeptTracker(run, hostPid, clock) {
   const now = typeof clock === 'function' ? clock : Date.now;
-  const lastRunning = new Map();   // sessionId -> { at, proc }: when this lifetime last saw it running in its window, and which process that was
+  const lastRunning = new Map();   // sessionId -> { proc, gone }: the process this lifetime saw running in its window, and when a poll first saw it gone (null while it runs)
   const procOf = (r) => (Number(r.pid) || 0) + '@' + (Number(r.startedAt) || 0);
   return {
     observe(rows, folder) {
@@ -1531,6 +1531,7 @@ function createKeptTracker(run, hostPid, clock) {
       let written = 0;
       let removed = 0;
       let failed = null;
+      const here = new Set();                                 // the sessions this poll sees running in this window
       for (const r of rows || []) {
         if (!r || !UUID_RE.test(String(r.sessionId)) || r.archived) continue;
         if (r.pid && !pidAlive(Number(r.pid))) continue;      // the rows are from a moment ago and it has ended since: it runs no more
@@ -1540,11 +1541,12 @@ function createKeptTracker(run, hostPid, clock) {
           // runs on. Another process of the session is a resume elsewhere (a terminal has no window),
           // and the wait goes on.
           const seen = lastRunning.get(r.sessionId);
-          if (seen && seen.proc === procOf(r)) seen.at = at;
+          if (seen && seen.proc === procOf(r)) { seen.gone = null; here.add(r.sessionId); }
           continue;
         }
         if (Number(r.window.exthostPid) !== Number(hostPid)) continue;
-        lastRunning.set(r.sessionId, { at, proc: procOf(r) });
+        lastRunning.set(r.sessionId, { proc: procOf(r), gone: null });
+        here.add(r.sessionId);
         const m = kept.get(r.sessionId);
         // One write per process and lifetime. A process younger than the record is the session run again
         // (ended and resumed within the wait): the record follows it, or reconcileKept would read the
@@ -1556,7 +1558,12 @@ function createKeptTracker(run, hostPid, clock) {
         catch (e) { failed = failed || e; }                   // this card is not kept; the others and the clean-up below still are done
       }
       for (const [id, seen] of [...lastRunning]) {
-        if (at - seen.at < KEPT_GRACE_MS) continue;
+        if (here.has(id)) continue;
+        // The wait starts at the first poll that sees it gone, not at the last one that saw it run:
+        // polls that failed in between saw nothing, and a session that ended during them (as its
+        // window shuts down, say) must not have used its wait up before anyone looked.
+        if (seen.gone === null) seen.gone = at;
+        if (at - seen.gone < KEPT_GRACE_MS) continue;
         const m = kept.get(id);
         if (!m && fs.existsSync(keptFile(id))) continue;      // there, but not readable at this poll (readMarkers left it out): whose it is shows at the next one
         if (m && m.run === run) {                             // else: another lifetime took the session over, or the record is gone

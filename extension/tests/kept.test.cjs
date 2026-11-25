@@ -129,6 +129,7 @@ test('tracker: a session gone for 59 s keeps its record and one gone for 60 s lo
   const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
   record(K1, { run: RUN_OLD });                             // a kept card of the lifetime before
   tracker.observe([runRow(LIVE, NEW)], root);
+  tracker.observe([], root);                                // the next poll does not list it any more: the wait starts when it is seen gone
   clock += 59000;
   assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 });
   assert.ok(has(LIVE), 'gone for 59 s: the host may be shutting down, the record stays');
@@ -139,9 +140,32 @@ test('tracker: a session gone for 59 s keeps its record and one gone for 60 s lo
 
   tracker.observe([runRow(LIVE, NEW)], root);
   record(LIVE, { run: RUN_OTHER });                         // another lifetime took the session over meanwhile
+  tracker.observe([], root);                                // the next poll does not list it any more: the wait starts when it is seen gone
   clock += 60000;
   assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 });
   assert.ok(has(LIVE), 'a record that names another lifetime is not this one\'s to remove');
+});
+
+test('tracker: polls that fail do not use the wait up: it starts at the first poll that sees the session gone, and anew when the session is seen again', () => {
+  clearRecords();
+  let clock = 6500000;
+  const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
+  tracker.observe([runRow(LIVE, NEW)], root);
+  clock += 5 * 60000;                                       // five minutes in which no poll could be used (the CLI did not answer): the tracker saw nothing
+  assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 });
+  assert.ok(has(LIVE), 'the first poll that sees it gone: it may have ended a moment ago, as its window shuts down, so the record stays');
+  clock += 59000;
+  assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 });
+  clock += 1000;
+  assert.deepEqual(tracker.observe([], root), { written: 0, removed: 1 }, 'seen gone for a minute: it ended on its own');
+
+  tracker.observe([runRow(LIVE, NEW)], root);               // it runs again
+  tracker.observe([], root);                                // gone
+  clock += 30000;
+  tracker.observe([runRow(LIVE, NEW)], root);               // and back
+  clock += 45000;
+  assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 }, 'seen running in between: the earlier absence does not count towards this one');
+  assert.ok(has(LIVE));
 });
 
 test('tracker: a session that runs again in a newer process within the same lifetime gets a fresh record, so a process that outlives the host keeps its card', () => {
@@ -212,6 +236,7 @@ test('tracker: a record it cannot read when the wait is over is looked at again;
   let clock = 5900000;
   const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
   tracker.observe([runRow(LIVE, NEW)], root);
+  tracker.observe([], root);                                // the next poll does not list it any more: the wait starts when it is seen gone
   clock += 60000;
   const read = fs.readFileSync;
   fs.readFileSync = (p, ...rest) => { if (String(p) === file(LIVE)) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); return read(p, ...rest); };
@@ -221,6 +246,7 @@ test('tracker: a record it cannot read when the wait is over is looked at again;
   assert.deepEqual(tracker.observe([], root), { written: 0, removed: 1 }, 'readable again: it is this lifetime\'s and the session is gone, so it goes');
 
   tracker.observe([runRow(K2, NEW)], root);                 // K2 runs, then ends: its record is due when the next rows come
+  tracker.observe([], root);                                // the next poll does not list it any more: the wait starts when it is seen gone
   clock += 60000;
   const rename = fs.renameSync;
   fs.renameSync = (from, to) => { if (String(to) === file(LIVE)) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' }); return rename(from, to); };
@@ -234,6 +260,7 @@ test('tracker: a record that cannot be removed is tried again on the next poll',
   let clock = 6000000;
   const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
   tracker.observe([runRow(LIVE, NEW)], root);
+  tracker.observe([], root);                                // the next poll does not list it any more: the wait starts when it is seen gone
   clock += 60000;
   const unlink = fs.unlinkSync;
   let refused = 0;

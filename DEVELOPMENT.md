@@ -457,7 +457,9 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   are one folder; `startedAt` is the start of the session's process, left out when the CLI
   gives none. A session that ends while its window lives loses its record after 60 s
   (`KEPT_GRACE_MS`): at shutdown the board may see the sessions go a moment before its own
-  host dies, and removing at once would delete the records the restart needs.
+  host dies, and removing at once would delete the records the restart needs. The 60 s count
+  from the first poll that sees the session gone, so polls that fail in between (a CLI that
+  does not answer) do not use them up.
   `listedSessions()` sets `kept: true` on an ended row when the session's record names one of
   the row's window's folder keys and a lifetime that is not alive; alive means a fresh
   heartbeat carries that `run` and its process lives (`aliveRuns()`, `hostAlive()`). It adds
