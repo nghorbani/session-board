@@ -427,7 +427,10 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   the place it has. The browser page sends its lock requests one after the other, in the
   order of the clicks: two requests on two connections can reach the server in either order.
   A change that waits to be sent holds on the page until it leaves, and its 10 s count from
-  then. `setLocks()` stores every id in lower case, the way Claude Code writes them.
+  then. A request gets 30 s for its answer (`LOCK_REPLY_MS`); without one it is aborted and
+  has failed like any other, and so has every change that waited behind it: what the server
+  holds is not known then, so they are not sent, and the cards show what the next snapshot
+  says. `setLocks()` stores every id in lower case, the way Claude Code writes them.
   A `move` for a lock that another window cleared a moment ago writes nothing, and the page
   that sent it shows that card at the moved place until its hold ends, 10 s at most.
   A lock belongs to the session: in another window's section it sits at

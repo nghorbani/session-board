@@ -58,6 +58,7 @@ function serve(req, res) {
       .replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="board-token" content="' + TOKEN + '">')
       .replace('var POLL_MS = 4000;', 'var POLL_MS = 250;')
       .replace('var ORDER_PENDING_MS = 10000;', 'var ORDER_PENDING_MS = ' + (Number(u.searchParams.get('hold')) || 10000) + ';')   // a test may shorten the hold of a pending change
+      .replace('var LOCK_REPLY_MS = 30000;', 'var LOCK_REPLY_MS = ' + (Number(u.searchParams.get('reply')) || 30000) + ';')   // and the time a lock request gets for its answer
       .replace('<script>', '<script>' + (u.searchParams.get('webview') === '1' ? 'window.__posted = []; window.acquireVsCodeApi = function () { return { postMessage: function (m) { window.__posted.push(m); }, getState: function () { return null; }, setState: function () {} }; }; ' : '') + 'window.confirm = function () { return window.__confirmAnswer !== false; }; window.__prompts = []; window.prompt = function (m, v) { window.__prompts.push([m, v]); return window.__promptAnswer === undefined ? null : window.__promptAnswer; };'
         + ' Object.defineProperty(navigator, "clipboard", { value: { writeText: function (t) { window.__copied = t; return Promise.resolve(); } } }); window.Notification = undefined;</script>\n<script>');
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -74,6 +75,7 @@ function serve(req, res) {
       try { body = JSON.parse(text); } catch (_) { /* recorded as null */ }
       fake.calls.push({ method: req.method, path: u.pathname, query: u.search, body });
       const r = fake.locks(body || {});
+      if (r.never) return;                                   // taken, never answered: the page has to give up on it by itself
       setTimeout(() => json(res, r.status, r.body), r.delayMs || 0);
     });
     return;
@@ -1181,6 +1183,40 @@ test('page (browser): lock requests leave the page one after the other, so the s
   s = await page.sample();
   assert.deepEqual(s.locked, [], 'and the page shows the last click throughout');
   fake.locks = locksOk;
+  await page.close();
+});
+
+test('page (browser): a lock request that gets no answer fails after its time, what waited behind it is not sent, and the next change goes out', opts, async () => {
+  fake.calls.length = 0;
+  fake.snapshot = snapshotOf(boardRows(), auto);
+  // the server takes the first request and never answers it; from the second on it works again and writes what it is told
+  let taken = 0;
+  fake.locks = (body) => {
+    taken += 1;
+    if (taken === 1) return { never: true };
+    fake.snapshot = snapshotOf(boardRows({ [C]: { lockSlot: body.set[C] } }), auto);
+    return locksOk();
+  };
+  // 3 s for an answer: the second click has to land within them also on a slow run. The hold is longer, so it is not what ends the first change.
+  const page = await openPage('?hold=9000&reply=3000');
+  await page.until((x) => x.sections.length === 1 && x.sections[0].rows.length === 4, 'the rows');
+  await page.click(rowSel(A) + ' .lockbtn');                 // sent, and never answered
+  await page.click(rowSel(B) + ' .lockbtn');                 // waits behind it
+  let s = await page.until((x) => x.locked.length === 2, 'both changes shown at once');
+  await page.until(() => locksCalls().length >= 1, 'the first POST');
+  assert.deepEqual(locksCalls(), [{ set: { [A]: 2 }, move: {}, clear: [] }], 'the first is out, the second waits');
+  s = await page.until((x) => x.locked.length === 0, 'the request to run out of its time');
+  assert.match(String(s.notice), /^lock failed: /, 'and the notice says so');
+  await sleep(400);
+  assert.equal(locksCalls().length, 1, 'the change that waited is not sent on top of a request nobody knows the fate of');
+  assert.deepEqual((await page.sample()).locked, [], 'and it is not shown as done any more');
+  await page.click(rowSel(C) + ' .lockbtn');                 // the page works on
+  await page.until(() => locksCalls().length === 2, 'the next change to go out');
+  assert.deepEqual(locksCalls()[1], { set: { [C]: 1 }, move: {}, clear: [] });
+  s = await page.until((x) => x.locked.length === 1, 'and to be answered');
+  assert.deepEqual(s.locked, [C]);
+  fake.locks = locksOk;
+  fake.snapshot = snapshotOf(boardRows(), auto);
   await page.close();
 });
 

@@ -286,7 +286,8 @@ var POLL_MS = 4000;
 var CONFIRM_MS = 3000;
 var MUTE_PENDING_MS = 10000;    // the bell keeps the flag it was clicked to until a snapshot agrees, at most this long
 var SEARCH_PAUSE_MS = 400;     // typing searches every session by title after this much quiet
-var ORDER_PENDING_MS = 10000;   // a lock change or a switch holds its result until a snapshot agrees, at most this long
+var ORDER_PENDING_MS = 10000;   // a lock change or a switch holds its result until a snapshot agrees, at most this long (a lock change of the browser page: counted from the moment its request leaves)
+var LOCK_REPLY_MS = 30000;      // the browser page gives a lock request this long for its answer; then the request has failed
 var GRIP = '<svg width="10" height="16" viewBox="0 0 10 16" aria-hidden="true"><circle cx="3" cy="3" r="1.25" fill="currentColor"/><circle cx="7" cy="3" r="1.25" fill="currentColor"/><circle cx="3" cy="8" r="1.25" fill="currentColor"/><circle cx="7" cy="8" r="1.25" fill="currentColor"/><circle cx="3" cy="13" r="1.25" fill="currentColor"/><circle cx="7" cy="13" r="1.25" fill="currentColor"/></svg>';
 var LOCK_OFF = '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 7.2V5.1a2.8 2.8 0 0 1 5.3-1.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><rect x="3.4" y="7.2" width="9.2" height="6.4" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>';
 var LOCK_ON = '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 7.2V5.1a2.8 2.8 0 0 1 5.6 0v2.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><rect x="3.4" y="7.2" width="9.2" height="6.4" rx="1.3" fill="currentColor"/></svg>';
@@ -297,9 +298,10 @@ var state = {
   folded: Object.create(null),              // section key -> folded; a section starts open
   pendingMute: Object.create(null),         // sessionId -> { muted, until } from the bell until a snapshot agrees
   details: Object.create(null),             // sessionId -> true while its details line is folded out (memory only)
-  pendingLocks: Object.create(null),        // sessionId -> { slot (null: unlocked), seq, until, acked } from a lock change until its reply came and a snapshot agrees
+  pendingLocks: Object.create(null),        // sessionId -> { slot (null: unlocked), seq, until, waiting, acked } from a lock change until its reply came and a snapshot agrees
   lockSeq: 0,                               // counts the lock requests of this page; a reply names the one it answers
   lockQueue: Promise.resolve(),             // the browser page's lock requests, one after the other (sendLocks)
+  lockEpoch: 0,                             // goes up when a lock request got no answer: what waited behind it is not sent
   pendingShow: null,                        // { show, until } from the auto | running | all switch until a snapshot agrees
   pendingArchive: Object.create(null),      // sessionId -> until: an ended row archived with ⤓ leaves at once
   searchTimer: null,                        // the pause before typing runs the title search over every session
@@ -507,9 +509,14 @@ function onUsageResult(r) {
 // -- transport ------------------------------------------------------------------------
 
 function send(msg) { if (vsapi) vsapi.postMessage(msg); }
-function api(method, url, body) {
-  return fetch(url, { method: method, cache: 'no-store', headers: { 'X-Board-Token': TOKEN, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
-    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); });
+/* `ms`: give up on the answer after that long. The request is then aborted and the promise rejects with an AbortError. */
+function api(method, url, body, ms) {
+  var ctl = ms ? new AbortController() : null;
+  var timer = ctl ? setTimeout(function () { ctl.abort(); }, ms) : null;
+  var settle = function () { if (timer) clearTimeout(timer); };
+  return fetch(url, { method: method, cache: 'no-store', headers: { 'X-Board-Token': TOKEN, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: ctl ? ctl.signal : undefined })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+    .then(function (v) { settle(); return v; }, function (e) { settle(); throw e; });
 }
 
 // -- rows --------------------------------------------------------------------------------
@@ -995,6 +1002,12 @@ function renderSwitch(data) {
  *    not ok ──▶ the entries of that seq go (a newer change of the same card stays), the cards return, the notice says why
  * set locks a card at a place; move gives the other locked cards of the section the place they now have
  * (core applies it only where a lock still exists); clear unlocks.
+ *
+ * The browser page sends one request at a time, so there the 10 s are not counted from the click:
+ *    an entry is `waiting` until its request leaves, and holds for all of that time;
+ *    its 10 s start when the request leaves;
+ *    a request gets LOCK_REPLY_MS for its answer. Without one it has failed (not ok, as above), and so has
+ *    every change that waited behind it: nobody knows what the server holds then, so they are not sent.
  */
 function sendLocks(req) {
   var set = req.set || {}, move = req.move || {}, clear = req.clear || [];
@@ -1009,15 +1022,22 @@ function sendLocks(req) {
   // One request at a time, in the order of the clicks: two requests on two connections can reach
   // the server in either order, and a lock that lands after its unlock would stay. (The host takes
   // the webview's messages in order.) The page shows every change at once all the same.
+  var epoch = state.lockEpoch;
   state.lockQueue = state.lockQueue.then(function () {
+    // a request before this one got no answer: what the server holds is not known, and this change was made on top of it
+    if (epoch !== state.lockEpoch) { onLocksResult({ ok: false, seq: seq, message: 'not sent, an earlier change got no answer' }); return; }
     // the hold counts from the moment the request leaves: one that waited behind slow replies must not run out before its own answer
     var sent = Date.now() + ORDER_PENDING_MS;
     Object.keys(state.pendingLocks).forEach(function (id) { var p = state.pendingLocks[id]; if (p.seq === seq) { p.waiting = false; p.until = sent; } });
     setTimeout(render, ORDER_PENDING_MS + 50);
-    return api('POST', '/api/locks', { set: set, move: move, clear: clear }).then(function (res) {
+    return api('POST', '/api/locks', { set: set, move: move, clear: clear }, LOCK_REPLY_MS).then(function (res) {
       var b = res.body || {};
       onLocksResult({ ok: Boolean(res.ok && b.ok), seq: seq, message: b.error || b.message || ('http ' + res.status) });
-    }).catch(function () { onLocksResult({ ok: false, seq: seq, message: 'server not reachable' }); });
+    }).catch(function (e) {
+      var noAnswer = Boolean(e && e.name === 'AbortError');  // the time for the answer ran out
+      if (noAnswer) state.lockEpoch += 1;                    // what waited behind this request is not sent
+      onLocksResult({ ok: false, seq: seq, message: noAnswer ? 'no answer from the server' : 'server not reachable' });
+    });
   });
   return true;
 }

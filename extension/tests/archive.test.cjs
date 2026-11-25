@@ -410,9 +410,7 @@ test('stow: a marker removed while the link was being made is honoured; the file
 });
 
 test('search rows of a running session carry the times of its card: what the board orders it by, and since when it works', async () => {
-  const rg = await core.rgProbe(APP_ROOT);
-  if (!rg.path) { assert.ok(true, 'ripgrep not found; the search is checked manually'); return; }
-  const file = live('proj', D);
+  const file = live('proj', D);   // a running session is found by the title of its card: no ripgrep needed
   seed(file, JSON.stringify({ type: 'ai-title', aiTitle: 'Busy spike', sessionId: D }) + '\n');   // no message line: the board orders it by the file time
   const hourAgo = new Date(Date.now() - 3600 * 1000);
   fs.utimesSync(file, hourAgo, hourAgo);
