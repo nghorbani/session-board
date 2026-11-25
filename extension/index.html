@@ -244,7 +244,7 @@
     <div class="counts" id="counts">loading…</div>
     <div class="order" id="showMode" role="group" aria-label="Which sessions" style="display:none">
       <button type="button" data-act="show" data-show="auto" aria-pressed="true" title="what Claude Code lists, in its order: the running sessions and the ended ones that are not archived">auto</button>
-      <button type="button" data-act="show" data-show="running" aria-pressed="false" title="only the running sessions">running</button>
+      <button type="button" data-act="show" data-show="running" aria-pressed="false" title="the running sessions, and the ones that were running when their window closed or restarted">running</button>
       <button type="button" data-act="show" data-show="all" aria-pressed="false" title="also the archived sessions">all</button>
     </div>
   </header>
@@ -629,7 +629,8 @@ function rowHtml(s, limits, opts) {
 
   var h = heading(s);
   var chips = '';
-  if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : opts.ended ? 'ended' : 'past') + '</span>';
+  if (opts.past && !isLive && opts.ended && s.kept) chips += '<span class="chip kept" title="it was running when its window closed or restarted, so its card stays; a click resumes it, ⤓ puts it away">ended</span>';
+  else if (opts.past) chips += '<span class="chip' + (isLive ? ' live' : '') + '">' + (isLive ? 'live' : opts.ended ? 'ended' : 'past') + '</span>';
   var by = archivedBy(s);
   if (by === 'claude-code') chips += '<span class="chip archived" title="archived in Claude Code\'s sidebar; unarchive it there">archived in Claude Code</span>';
   else if (by === 'both') chips += '<span class="chip archived" title="archived on the board and in Claude Code\'s sidebar; ⤒ clears the board\'s flag">archived here and in Claude Code</span>';
@@ -935,10 +936,11 @@ function onShowModeResult(r) {
   render();
 }
 
-/** The ended rows the sections show: none with "running", none while ⤓ on them is pending. */
+/** The ended rows the sections show: with "running" only the kept ones; none while ⤓ on them is pending. */
 function endedRows() {
-  if (currentShow() === 'running') return [];
-  return ((state.data && state.data.ended) || []).filter(function (s) { var p = state.pendingArchive[s.sessionId]; return !(p && p > Date.now()); });
+  var rows = ((state.data && state.data.ended) || []).filter(function (s) { var p = state.pendingArchive[s.sessionId]; return !(p && p > Date.now()); });
+  // "running" keeps the cards that were running when their window closed or restarted (kept), and no other ended row
+  return currentShow() === 'running' ? rows.filter(function (s) { return s.kept === true; }) : rows;
 }
 
 /** The archived sessions that are not running: only with "all". */
@@ -1185,8 +1187,8 @@ function isMuted(s) { var p = state.pendingMute[s.sessionId]; return p && p.unti
  * Sections: one per VS Code window, "Elsewhere" for rows without one, and at the bottom of the
  * page the archived running rows that are put away.
  *
- *   running rows that are not archived ─┐
- *   ended rows (not with "running")     ─┴─▶ placeRows ─▶ sec.list ─▶ the typed filter hides rows ─▶ sec.shown
+ *   running rows that are not archived              ─┐
+ *   ended rows (with "running": only the kept ones) ─┴─▶ placeRows ─▶ sec.list ─▶ the typed filter hides rows ─▶ sec.shown
  *   archived rows that show here (with "all", one that waits, a filter match) ─▶ sec.archived, after the placed rows
  *
  * A card has a place only in sec.list: locked cards sit at their slot, the others around them

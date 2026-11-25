@@ -626,6 +626,42 @@ test('page: the switch "running" hides the ended rows and a section that only ha
   await page.close();
 });
 
+test('page: with "running" an ended row that was running when its window closed (kept) stays in its section, with the rail, its lock and its place, and a plain ended row does not; ⤓ on it archives; "auto" lists both kinds', opts, async () => {
+  fake.calls.length = 0;
+  const running = [row(A, 'Running one', 'idle', { activityAt: ago(5) })];
+  const kept = ended(B, 'Was open at the restart', { kept: true, activityAt: ago(1), lockSlot: 1 });
+  const plain = ended(C, 'Ended long ago', { kept: false, activityAt: ago(500) });
+  const keptElsewhere = ended(D, 'Was open in the other window', { kept: true, window: { id: 2, label: 'other' } });
+  fake.snapshot = snapshotOf(running, { ended: [kept, plain, keptElsewhere], order: { show: 'running' } });
+  const page = await openPage();
+  let s = await page.until((x) => x.endedRows.length === 2, 'the kept rows');
+  assert.deepEqual(s.endedRows.slice().sort(), [B, D].sort(), 'the plain ended row is hidden, as before');
+  assert.deepEqual(s.sections.map((x) => [x.label, x.rows]), [['other', [D]], ['x', [A, B]]], 'each in its window; the locked one at its place, below a card with an older last message');
+  assert.deepEqual(s.heads, ['0 + 1 ended', '1 + 1 ended']);
+  assert.deepEqual(s.locked, [B], 'it kept its lock');
+  assert.equal(await page.eval('document.querySelectorAll(' + JSON.stringify(rowSel(B) + ' .rail, ' + rowSel(D) + ' .rail') + ').length'), 2, 'a kept card has the rail like any card with a place');
+  assert.match(await page.eval('(document.querySelector(' + JSON.stringify(rowSel(B) + ' .chip.kept') + ') || {}).title || ""'), /running when its window closed/, 'the chip says why an ended card shows here');
+  assert.match(await page.eval('document.querySelector(\'#showMode button[data-show="running"]\').title'), /window closed/, 'and so does the switch');
+  await page.click(rowSel(B) + ' .iconbtn[data-act="archivepast"]');
+  s = await page.until((x) => !x.endedRows.includes(B), 'gone at once');
+  await page.until(() => fake.calls.some((c) => c.method === 'POST' && c.path === '/api/archive/' + B), 'the POST');
+  fake.snapshot = snapshotOf(running, { ended: [plain, keptElsewhere], order: { show: 'running' } });
+  await page.click('#showMode button[data-show="auto"]');
+  s = await page.until((x) => x.endedRows.length === 2, 'auto');
+  assert.deepEqual(s.endedRows.slice().sort(), [C, D].sort(), 'auto lists every ended row, kept or not');
+  fake.snapshot = snapshotOf(running, { ended: [plain, keptElsewhere], order: { show: 'auto' } });
+  await page.close();
+});
+
+test('page (webview): a click on a kept card with "running" asks the host to resume it, with its transcript and its folder', opts, async () => {
+  const page = await openWebviewPage(snapshotOf([row(A, 'Running one', 'idle')], { ended: [ended(B, 'Was open at the restart', { kept: true })], order: { show: 'running' } }));
+  await page.until((x) => x.endedRows.length === 1, 'the kept row');
+  await page.click(rowSel(B));
+  const s = await page.until((x) => x.posted.some((m) => m.type === 'openPast'), 'the open');
+  assert.deepEqual(s.posted.filter((m) => m.type === 'openPast'), [{ type: 'openPast', sessionId: B, path: 'C:\\p\\x\\' + B + '.jsonl', cwd: 'C:\\code\\x' }]);
+  await page.close();
+});
+
 test('page: typing filters running and ended rows and, after a pause, searches every session by title once; the results skip what the board shows; Enter adds the text', opts, async () => {
   fake.calls.length = 0;
   fake.snapshot = snapshotOf([row(A, 'Parser running', 'idle')], { ended: [ended(B, 'Parser ended'), ended(C, 'Unrelated')], order: { show: 'all' } });

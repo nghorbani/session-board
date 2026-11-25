@@ -443,6 +443,20 @@ function windowIdForExthost(pid) {
   return windowByExthost.get(pid) || null;
 }
 
+/**
+ * Whether the extension host behind a heartbeat still runs. A heartbeat stays fresh for a while
+ * after its host died, and a host that is gone owns no folder and keeps no lifetime alive.
+ * Under SB_WINDOW_MAP the hosts are made-up pids: alive unless the map says `dead`.
+ */
+function hostAlive(pid) {
+  pid = Number(pid);
+  if (WINDOW_MAP) {
+    for (const k of Object.keys(WINDOW_MAP)) if (Number(WINDOW_MAP[k].exthostPid) === pid) return WINDOW_MAP[k].dead !== true;
+    return true;
+  }
+  return pidAlive(pid);
+}
+
 // ---------------------------------------------------------------------------------------
 // Board heartbeats: which windows run this extension, under which id
 // ---------------------------------------------------------------------------------------
@@ -450,13 +464,15 @@ function windowIdForExthost(pid) {
 const HEARTBEAT_DIR = process.env.SB_HEARTBEAT_DIR || path.join(os.tmpdir(), 'claude-sessions-board');   // overridable for the tests
 const HEARTBEAT_FRESH_MS = 45000;
 const HEARTBEAT_KEEP_MS = 24 * 60 * 60 * 1000;   // an older record belongs to a window long closed; the readers delete it
+const RUN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;   // the name of one host lifetime: a random UUID
 
 /**
  * One record per host and extension id; `name` is the window's workspace name, so other boards
  * can label its section; `focused` says whether that VS Code window has the OS focus, so the
- * other boards leave a notification to it; `root` is its first workspace folder (listedSessions).
+ * other boards leave a notification to it; `root` is its first workspace folder (listedSessions);
+ * `run` names this lifetime of the host, which a pid cannot: pids come around again (kept cards).
  */
-function writeHeartbeat(exthostPid, extensionId, name, focused, version, root) {
+function writeHeartbeat(exthostPid, extensionId, name, focused, version, root, run) {
   const id = EXTENSION_ID_RE.test(String(extensionId || '')) ? extensionId : EXTENSION_ID;
   try {
     fs.mkdirSync(HEARTBEAT_DIR, { recursive: true });
@@ -467,6 +483,7 @@ function writeHeartbeat(exthostPid, extensionId, name, focused, version, root) {
     if (typeof focused === 'boolean') rec.focused = focused;
     if (typeof version === 'string' && /^\d+\.\d+\.\d+/.test(version)) rec.version = version;
     if (typeof root === 'string' && root.trim()) rec.root = root.trim().slice(0, 1000);   // the window's first workspace folder: its ended sessions
+    if (typeof run === 'string' && RUN_RE.test(run)) rec.run = run;
     fs.writeFileSync(tmp, JSON.stringify(rec));
     fs.renameSync(tmp, target);
   } catch (_) { /* best effort */ }
@@ -524,6 +541,17 @@ function focusedPeerAt(ownExthostPid) {
     if (at > best) best = at;
   }
   return best;
+}
+
+/** The host lifetimes that are alive: the `run` of every fresh heartbeat whose host still runs (kept cards). */
+function aliveRuns() {
+  const out = new Set();
+  for (const { rec } of readHeartbeats()) {
+    if (!rec || typeof rec.run !== 'string' || !rec.run) continue;
+    if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;   // a missing `at` is never fresh
+    if (hostAlive(rec.pid)) out.add(rec.run);
+  }
+  return out;
 }
 
 /** Workspace names of the hosts with a fresh heartbeat, by extension-host pid (the freshest record per pid). */
@@ -690,11 +718,14 @@ function headFacts(file, size, mtime) {
 function listedSessions(liveIds, claudeIds, boardIds, opts) {
   const withArchived = Boolean(opts && opts.withArchived);
   const includeProgrammatic = Boolean(opts && opts.includeProgrammatic);
+  const kept = (opts && opts.kept) || null;                  // readKept(): the sessions that ran in a window
+  const liveRuns = kept ? ((opts && opts.liveRuns) || aliveRuns()) : null;
   const windows = [];
   const seen = new Set();
   for (const { rec } of readHeartbeats()) {
     if (!rec || typeof rec.root !== 'string' || !rec.root) continue;
     if (!(Date.now() - Number(rec.at) < HEARTBEAT_FRESH_MS)) continue;
+    if (!hostAlive(rec.pid)) continue;                       // its window closed a moment ago: a host that is gone owns no folder
     const windowId = windowIdForExthost(Number(rec.pid));
     if (!windowId || seen.has(windowId)) continue;
     seen.add(windowId);
@@ -728,8 +759,10 @@ function listedSessions(liveIds, claudeIds, boardIds, opts) {
     if (head.programmatic && !includeProgrammatic) continue;
     const facts = transcriptFacts(id, f.path);
     if (!head.hasUser && !facts.title && !facts.customTitle && !facts.lastPrompt) continue;
+    // kept: it ran in a window on this folder, and the host lifetime that saw it running is gone (a restart, a closed window)
+    const mark = kept && !isArchived ? kept.get(id) : null;
     const row = {
-      sessionId: id, status: 'ended', live: false,
+      sessionId: id, status: 'ended', live: false, kept: Boolean(mark && w.keys.includes(mark.root) && !liveRuns.has(mark.run)),
       window: { id: w.windowId, exthostPid: w.exthostPid, label: w.label },
       title: facts.customTitle || facts.title || null, renamedTitle: facts.customTitle || null, generatedTitle: facts.title || null,
       lastPrompt: facts.lastPrompt, cwd: head.cwd || '', transcriptPath: f.path, path: f.path,
@@ -888,6 +921,8 @@ function archiveSession(sessionId) {
   fs.writeFileSync(archiveMarker(sessionId), JSON.stringify({ at: Date.now() }));
   // an archived session holds no place: its lock goes now, so a restore before the next snapshot does not bring it back locked
   try { fs.unlinkSync(lockFile(sessionId)); } catch (_) { /* no lock, or reconcileLocks() drops it with the next snapshot */ }
+  // and it is no kept card any more: archiving is how a kept card leaves
+  try { fs.unlinkSync(keptFile(sessionId)); } catch (_) { /* no record, or reconcileKept() drops it with the next snapshot */ }
 }
 
 function unlinkMarker(sessionId) {
@@ -1424,27 +1459,120 @@ function setLocks(req) {
 }
 
 /**
- * Drop the locks that no longer have a card to hold: a session archived on the board or in
- * Claude Code (its word counts only once its archive has been read), and a session that is not
- * running and has no transcript in either root. A transcript the file index lists is there
- * (the index is at most a minute old, so a deleted one keeps its lock a minute longer); one the
- * index does not list is looked for on disk, so a session younger than the index keeps its lock.
- * A lock that cannot be removed stays for the next snapshot.
+ * Drop the markers of one store (locks, kept records) that no longer have a card to hold: a
+ * session archived on the board or in Claude Code (its word counts only once its archive has
+ * been read), and a session that is not running and has no transcript in either root. A
+ * transcript the file index lists is there (the index is at most a minute old, so a deleted one
+ * keeps its marker a minute longer); one the index does not list is looked for on disk, so a
+ * session younger than the index keeps its marker. A marker that cannot be removed stays for
+ * the next snapshot.
  */
-function reconcileLocks(locks, liveIds, boardIds, claude, index) {
+function reconcileMarkers(markers, fileOf, liveIds, boardIds, claude, index) {
   const claudeKnown = Boolean(claude) && claude.known !== false && Boolean(claude.ids);
-  for (const id of [...locks.keys()]) {
+  for (const id of [...markers.keys()]) {
     const archived = boardIds.has(id) || (claudeKnown && claude.ids.has(id));
     if (!archived && (liveIds.has(id) || (index && index.has(id)) || !transcriptGone(id))) continue;
-    try { fs.unlinkSync(lockFile(id)); } catch (_) { /* gone already, or the next snapshot retries */ }
-    locks.delete(id);
+    try { fs.unlinkSync(fileOf(id)); } catch (_) { /* gone already, or the next snapshot retries */ }
+    markers.delete(id);
+  }
+}
+
+function reconcileLocks(locks, liveIds, boardIds, claude, index) { reconcileMarkers(locks, lockFile, liveIds, boardIds, claude, index); }
+
+/*
+ * Kept cards: the sessions that were running in a window when its extension host went away (a
+ * restart of VS Code or of its extensions, a closed window) stay on the board as ended cards,
+ * also with the switch on "running". One record per session in DATA_DIR/kept/<id>.json =
+ * { root, run, at } (tmp then rename): `root` is the folder key of the real path of the window's
+ * first workspace folder, `run` the host lifetime that saw the session running (a random id per
+ * activation, also in that host's heartbeat; a pid cannot name a lifetime, pids come around
+ * again), `at` when that lifetime wrote the record.
+ *
+ *   host poll ──▶ tracker.observe(rows, folder)
+ *                   running row of this host's window, not archived ──▶ record (once per lifetime)
+ *                   a row this lifetime saw running, gone for KEPT_GRACE_MS ──▶ record removed
+ *                   (it ended while the window lived; the wait covers a host that sees its
+ *                    sessions go while it is shutting down itself)
+ *   snapshot ──▶ reconcileKept: archived, transcript gone, or running again in a process younger
+ *                than the record while the record's lifetime is dead ──▶ record removed
+ *            ──▶ listedSessions: an ended row gets kept: true when its record names one of its
+ *                window's folder keys and a lifetime that is not alive (aliveRuns). No row is
+ *                added and none moved; the page shows the kept ones with "running".
+ */
+const KEPT_DIR = path.join(DATA_DIR, 'kept');
+const KEPT_GRACE_MS = 60000;
+
+function keptFile(sessionId) { return path.join(KEPT_DIR, sessionId + '.json'); }
+function readKept() { return readMarkers(KEPT_DIR, 0); }
+
+function writeKept(sessionId, rec) {
+  fs.mkdirSync(KEPT_DIR, { recursive: true });
+  const tmp = keptFile(sessionId) + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(rec));
+  fs.renameSync(tmp, keptFile(sessionId));
+}
+
+/**
+ * The writer of the kept records for one host lifetime: `run` names the lifetime, `hostPid` its
+ * extension host (a row belongs to this window when its window's host is that pid), `clock`
+ * replaces Date.now in a test. observe() is called after a poll that is not stale, with the
+ * snapshot's running rows and the window's first workspace folder; it returns what it did.
+ */
+function createKeptTracker(run, hostPid, clock) {
+  const now = typeof clock === 'function' ? clock : Date.now;
+  const lastRunning = new Map();   // sessionId -> when this lifetime last saw it running in its window
+  return {
+    observe(rows, folder) {
+      const keys = folder ? rootFolderKeys(folder) : [];
+      if (!keys.length) return { written: 0, removed: 0 };   // a window without a folder: nothing ties a card to it
+      const root = keys[keys.length - 1];                     // the real path's key: a junction and its target are one folder
+      const at = now();
+      const kept = readKept();
+      let written = 0;
+      let removed = 0;
+      for (const r of rows || []) {
+        if (!r || !UUID_RE.test(String(r.sessionId)) || r.archived) continue;
+        if (!r.window || Number(r.window.exthostPid) !== Number(hostPid)) continue;
+        lastRunning.set(r.sessionId, at);
+        const m = kept.get(r.sessionId);
+        if (m && m.run === run && m.root === root) continue;
+        writeKept(r.sessionId, { root, run, at });
+        written += 1;
+      }
+      for (const [id, seenAt] of [...lastRunning]) {
+        if (at - seenAt < KEPT_GRACE_MS) continue;
+        lastRunning.delete(id);
+        const m = kept.get(id);
+        if (!m || m.run !== run) continue;                    // another lifetime took the session over, or the record is gone
+        try { fs.unlinkSync(keptFile(id)); removed += 1; } catch (_) { /* gone already */ }
+      }
+      return { written, removed };
+    },
+  };
+}
+
+/**
+ * reconcileMarkers for the kept records, and one rule of their own: a record goes when its
+ * session runs in a process that started after the record was written while the record's
+ * lifetime is not alive. That session was resumed where no tracker owns it (a terminal, a window
+ * on an older board), so its card is spent and must not come back when the session ends there.
+ * A process older than its record is the one the record was written for, still running.
+ */
+function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
+  reconcileMarkers(kept, keptFile, liveIds, boardIds, claude, index);
+  for (const r of rows || []) {
+    const m = kept.get(r.sessionId);
+    if (!m || liveRuns.has(m.run)) continue;
+    if (!(Number(r.startedAt) > Number(m.at))) continue;     // no start time, or the old process
+    try { fs.unlinkSync(keptFile(r.sessionId)); } catch (_) { /* gone already, or the next snapshot retries */ }
+    kept.delete(r.sessionId);
   }
 }
 
 /*
  * The header's "auto | running | all" switch, board-wide like the locks, in DATA_DIR/show.json
  * (tmp then rename): auto shows what Claude Code lists (the running sessions and the ended ones
- * that are not archived); running only the running ones; all adds the archived. A missing or
+ * that are not archived); running the running ones and the kept cards; all adds the archived. A missing or
  * unreadable file means auto. The file keeps the format boards of 0.11.3 and 0.12.0 read and
  * write: { show, v: 2 } with "open" standing for auto, so a window still on one of them and a
  * window on this version share the switch in both directions. 0.11.2 wrote { show } without a
@@ -2319,6 +2447,9 @@ async function snapshot(opts) {
   forgetStatuses(liveIds);
   pruneDead(MUTED_DIR, muted, liveIds, index);
   reconcileLocks(locks, liveIds, archived, claude, index);
+  const kept = readKept();
+  const liveRuns = aliveRuns();
+  reconcileKept(kept, rows, liveRuns, liveIds, archived, claude, index);
   notesStore.pruneDead(liveIds, index, transcriptGone);
 
   const windows = new Map();
@@ -2392,7 +2523,7 @@ async function snapshot(opts) {
   if (!stale) lastGood = { rows, at: now };
   // Until Claude Code's archive has been read once, every session it archived would look ended: list none.
   const listed = claude.known === false ? { ended: [], archived: [] }
-    : listedSessions(liveIds, claude.ids, archived, { withArchived: showMode === 'all', includeProgrammatic });
+    : listedSessions(liveIds, claude.ids, archived, { withArchived: showMode === 'all', includeProgrammatic, kept, liveRuns });
   for (const row of listed.ended) row.lockSlot = slotOf(locks.get(row.sessionId));
   lastSnapshot = {
     at: now, stale, error, limits, platform: process.platform, sessions,
@@ -2874,6 +3005,11 @@ module.exports = {
   readLocks,
   setLocks,
   reconcileLocks,
+  KEPT_DIR,
+  KEPT_GRACE_MS,
+  readKept,
+  createKeptTracker,
+  reconcileKept,
   lastMessageAt,
   SHOW_FILE,
   SHOW_MODES,

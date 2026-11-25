@@ -9,6 +9,7 @@
  * front end uses; this file is the VS Code host for them.
  */
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
@@ -81,6 +82,11 @@ class BoardProvider {
     this.searchRequestId = null;
     this.accountError = null;  // the account probe failure last logged, so it is said once per change
     this.claudeArchiveError = null;   // same for the read of Claude Code's archive
+    // This lifetime of the extension host: its name goes into every heartbeat and into the record of
+    // every session that runs in this window, so the next lifetime can tell which cards to keep.
+    this.run = crypto.randomUUID();
+    this.keptTracker = core.createKeptTracker(this.run, process.pid);
+    this.keptError = null;     // the tracker failure last logged
     this.stepsService = createStepsService({
       resolveTranscript: (sessionId) => core.transcriptOf(sessionId),
       sessionTitle: (sessionId) => this.stepsSessionTitle(sessionId),
@@ -261,6 +267,7 @@ class BoardProvider {
         this.push();
         this.updateBadge();
         this.notifier.observe(snap.sessions);
+        this.keepCards(snap);
       }
     } catch (e) {
       this.log.error('poll failed: ' + String((e && e.message) || e));
@@ -287,12 +294,32 @@ class BoardProvider {
       : undefined;
   }
 
+  /** The window's first workspace folder, or null: the folder its ended sessions and its kept cards belong to. */
+  rootFolder() {
+    const folders = vscode.workspace.workspaceFolders;
+    return (folders && folders[0] && folders[0].uri.fsPath) || null;
+  }
+
   /** This window's heartbeat, with whether it has the OS focus (the other boards leave a notification to a focused window). */
   beat() {
     const ext = this.context.extension;
     core.writeHeartbeat(process.pid, (ext && ext.id) || core.EXTENSION_ID, vscode.workspace.name || null, Boolean(vscode.window.state.focused),
-      (ext && ext.packageJSON && ext.packageJSON.version) || null,
-      (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0] && vscode.workspace.workspaceFolders[0].uri.fsPath) || null);
+      (ext && ext.packageJSON && ext.packageJSON.version) || null, this.rootFolder(), this.run);
+  }
+
+  /**
+   * Remember which sessions run in this window, so their cards stay on the board after a restart
+   * (core: createKeptTracker). Rows from the cache after a failed poll say nothing about what runs,
+   * and a provider that has stopped is going down with its sessions: neither is handed over. A
+   * failure never costs a poll; it is logged when it appears or changes.
+   */
+  keepCards(snap) {
+    if (this.stopped || !snap || snap.stale) return;
+    let err = null;
+    try { this.keptTracker.observe(snap.sessions, this.rootFolder()); } catch (e) { err = String((e && e.message) || e); }
+    if (err === this.keptError) return;
+    this.keptError = err;
+    if (err) this.log.warn('the cards of this window could not be remembered for the next restart: ' + err);
   }
 
   /**
