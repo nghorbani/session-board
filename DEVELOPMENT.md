@@ -151,7 +151,9 @@ installed.
 - `kept.test.cjs`: the kept cards in `core.cjs`. The tracker of a host lifetime (one record
   per running session of its window, none for another window's row, an archived row or a
   window without a folder; the 60 s before a record of an ended session goes; a record of
-  another lifetime left alone), `run` in the heartbeat, the `kept` flag of `listedSessions()`
+  another lifetime left alone; a newer process of the same session; a row whose process is
+  gone; a removal that fails once), an explicit end, `run` in the heartbeat, the `kept` flag
+  of `listedSessions()`
   (a dead lifetime, a live one, another folder, a junction and its target, no row added or
   moved, a dead host that owns no folder) and `reconcileKept()` (an archive, a transcript that
   is gone, a session resumed in a process younger than its record).
@@ -439,9 +441,13 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   with an archive (on the board at once, in `archiveSession()`), with a transcript that is
   gone, and when the session runs again in a process younger than the record while the
   record's lifetime is dead (resumed in a terminal or in a window on an older board: the card
-  is spent). Limits: a session ended by hand less than 60 s before its window closes comes
-  back once, and so does a kept session resumed and ended in a terminal while no board of
-  this version ran; a host that lingers over 60 s in a stalled shutdown while it still polls
+  is spent). ✕ on the board drops the record at once (`endSession()`), a record that could
+  not be removed is tried again on the next poll, and a row whose process is gone by the time
+  the tracker reads it gets no record. A session that runs again in a newer process within
+  the same lifetime gets a fresh record, so `reconcileKept()` does not take that process for
+  a resume elsewhere once the host is gone. Limits: a session that ends on its own, or whose
+  tab is closed, less than 60 s before its window closes comes back once, and so does a kept
+  session resumed and ended in a terminal while no board of this version ran; a host that lingers over 60 s in a stalled shutdown while it still polls
   loses its records; a session without a window, a window without a folder and a session
   started with a working directory outside its window's folder are not kept. A wrong verdict
   on "alive" heals by itself: the old pid handed out again while the old heartbeat is still

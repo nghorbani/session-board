@@ -140,6 +140,71 @@ test('tracker: a session gone for 59 s keeps its record and one gone for 60 s lo
   assert.ok(has(LIVE), 'a record that names another lifetime is not this one\'s to remove');
 });
 
+test('tracker: a session that runs again in a newer process within the same lifetime gets a fresh record, so a process that outlives the host keeps its card', () => {
+  clearRecords();
+  let clock = 5000000;
+  const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
+  tracker.observe([runRow(LIVE, NEW, { startedAt: clock - 1000 })], root);
+  assert.equal(rec(LIVE).at, 5000000);
+  clock += 20000;                                           // ended and resumed within the minute: the record is still there
+  const resumedAt = clock - 5000;
+  assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { startedAt: resumedAt })], root), { written: 1, removed: 0 }, 'the record is for the process that runs now');
+  assert.equal(rec(LIVE).at, clock);
+  clock += 5000;
+  assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { startedAt: resumedAt })], root), { written: 0, removed: 0 }, 'and then once per process');
+  const map = core.readKept();                              // the host is gone, the new process lives on: no lifetime is alive
+  core.reconcileKept(map, [{ sessionId: LIVE, startedAt: resumedAt }], new Set(), new Set([LIVE]), new Set(), { known: true, ids: new Set() });
+  assert.ok(has(LIVE), 'reconcile reads it as the process the record was written for, not as a resume elsewhere');
+});
+
+test('tracker: a row whose process is gone by now gets no record (a snapshot from before the session ended)', () => {
+  clearRecords();
+  const gone = require('child_process').spawnSync(process.execPath, ['-e', '']).pid;   // a pid that has just exited
+  const tracker = core.createKeptTracker(RUN_NEW, NEW, () => 5500000);
+  assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { pid: gone })], root), { written: 0, removed: 0 });
+  assert.equal(has(LIVE), false);
+  assert.deepEqual(tracker.observe([runRow(LIVE, NEW, { pid: process.pid })], root), { written: 1, removed: 0 }, 'a process that lives');
+});
+
+test('tracker: a record that cannot be removed is tried again on the next poll', () => {
+  clearRecords();
+  let clock = 6000000;
+  const tracker = core.createKeptTracker(RUN_NEW, NEW, () => clock);
+  tracker.observe([runRow(LIVE, NEW)], root);
+  clock += 60000;
+  const unlink = fs.unlinkSync;
+  let refused = 0;
+  fs.unlinkSync = (p) => {
+    if (String(p) === file(LIVE) && refused === 0) { refused += 1; throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); }
+    return unlink(p);
+  };
+  try {
+    assert.deepEqual(tracker.observe([], root), { written: 0, removed: 0 });
+    assert.deepEqual([refused, has(LIVE)], [1, true], 'the file was held: the record is still there');
+    clock += 5000;
+    assert.deepEqual(tracker.observe([], root), { written: 0, removed: 1 }, 'not forgotten: the next poll removes it');
+  } finally { fs.unlinkSync = unlink; }
+  assert.equal(has(LIVE), false);
+});
+
+test('an explicit end drops the record at once: ended by hand and the window closed within the minute, the card does not come back', { skip: !core.IS_WINDOWS }, async () => {
+  clearRecords(); clearHeartbeats();
+  heartbeat(NEW, root, RUN_NEW);
+  agents([]);
+  record(K1, { run: RUN_NEW });                             // its window lives; the tracker would drop it only a minute after it went
+  const r = await core.endSession(K1, {});
+  assert.equal(r.code, 'unknown', 'the session is not running (any more)');
+  assert.equal(has(K1), false, 'the end is the user\'s word: no card to keep');
+  // an end that is refused drops nothing: the session works and no force was given, so nothing is killed
+  fs.writeFileSync(path.join(sessionsDir, process.pid + '.json'), JSON.stringify({ sessionId: LIVE, status: 'busy', statusUpdatedAt: Date.now() }));
+  agents([Object.assign(liveRow(Date.now() - 1000), { status: 'busy' })]);
+  await core.snapshot();
+  record(LIVE, { run: RUN_NEW, at: Date.now() });
+  const refused = await core.endSession(LIVE, {});
+  assert.deepEqual([refused.code, has(LIVE)], ['needs-force', true], 'it still runs: its record stays');
+  agents([]);
+});
+
 test('heartbeat: carries the run of its host; a value that is no run id is left out', () => {
   clearHeartbeats();
   heartbeat(NEW, root, RUN_NEW);
@@ -232,6 +297,9 @@ test('reconcile: a kept session that runs again in a process younger than its re
   record(LIVE, { run: RUN_NEW, at: Date.now() - 60000 });
   await core.snapshot();
   assert.ok(has(LIVE), 'the lifetime that wrote the record is alive: the record is its own');
+  const map = core.readKept();                              // a row without a start time (an older CLI): nothing can be told, the record stays
+  core.reconcileKept(map, [{ sessionId: LIVE }, { sessionId: LIVE, startedAt: 'soon' }], new Set(), new Set([LIVE]), new Set(), { known: true, ids: new Set() });
+  assert.ok(has(LIVE));
   agents([]);
 });
 
