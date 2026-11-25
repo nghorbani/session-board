@@ -221,48 +221,71 @@ test('an explicit end drops the record at once: ended by hand and the window clo
   agents([]);
 });
 
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
 /**
  * End a session whose process really runs, and call `during` while that end is under way. The
- * session is a background job, so the end goes through the `claude stop` shim, a process of its
- * own: nothing after the call below can come later than the end's finish, since the end cannot
- * go on before this function gives the event loop back. `during` gets the process of the session.
+ * session is a background job, so the end goes through the `claude stop` shim, and the shim is
+ * told to wait at a gate: it says when it has reached it, `during` runs, then the gate opens and
+ * the stop ends the process. `before` runs after the board has seen the session and before the
+ * end is asked for. Both get the process of the session; `start` is the start time its row
+ * carries (5 s ago when none is given).
  */
-async function endUnderWay(id, during) {
+async function endUnderWay(id, steps, start) {
   const child = spawn(process.execPath, ['-e', 'setTimeout(function () {}, 60000)'], { stdio: 'ignore' });
   const reg = path.join(sessionsDir, child.pid + '.json');
-  const proc = { pid: child.pid, startedAt: Date.now() - 5000 };
+  const gate = path.join(tmp, 'stop-gate-' + child.pid);
+  const proc = { pid: child.pid, startedAt: start === undefined ? Date.now() - 5000 : start };
   try {
     fs.writeFileSync(reg, JSON.stringify({ sessionId: id, status: 'idle', procStart: '0' }));
     agents([Object.assign({ id: id.slice(0, 8), sessionId: id, status: 'idle', kind: 'background', cwd: root, name: 'bg' }, proc)]);
     process.env.SB_SHIM_STOP_KILL_PID = String(child.pid);
+    process.env.SB_SHIM_STOP_GATE = gate;
     await core.snapshot();
+    if (steps.before) steps.before(proc);
     const pending = core.endSession(id, {});
-    const called = Date.now();
-    while (Date.now() === called) { /* into the next millisecond: later than the moment the end began */ }
-    during(proc);
+    for (let i = 0; i < 400 && !fs.existsSync(gate + '.reached'); i++) await sleep(25);
+    assert.ok(fs.existsSync(gate + '.reached') && core.pidAlive(child.pid), 'the stop was asked for and waits: the end is under way and the session still runs');
+    if (steps.during) steps.during(proc);
+    fs.writeFileSync(gate, '');
     return await pending;
   } finally {
     delete process.env.SB_SHIM_STOP_KILL_PID;
+    delete process.env.SB_SHIM_STOP_GATE;
+    try { fs.writeFileSync(gate, ''); } catch (_) { /* the temp dir is gone */ }
     try { child.kill(); } catch (_) { /* the end stopped it */ }
     try { fs.unlinkSync(reg); } catch (_) { /* gone */ }
     agents([]);
   }
 }
 
-test('an end under way: a record its window writes meanwhile for the process being ended goes with the end; one for a process started since stays', { skip: !core.IS_WINDOWS }, async () => {
+test('an end takes the record of the process it was aimed at and leaves that of a process started later, whenever either was written', { skip: !core.IS_WINDOWS }, async () => {
   clearRecords(); clearHeartbeats();
   heartbeat(NEW, root, RUN_NEW);
   const tracker = core.createKeptTracker(RUN_NEW, NEW);
+  const seen = (proc) => tracker.observe([runRow(K1, NEW, proc)], root);
+  const one = { written: 1, removed: 0 };
+
   // the window sees the session for the first time while its end is already running
   let wrote = null;
-  let out = await endUnderWay(K1, (proc) => { wrote = tracker.observe([runRow(K1, NEW, proc)], root); assert.ok(has(K1)); });
-  assert.deepEqual([out.code, wrote], ['ended', { written: 1, removed: 0 }], JSON.stringify(out));
+  let out = await endUnderWay(K1, { during: (proc) => { wrote = seen(proc); assert.ok(has(K1)); } });
+  assert.deepEqual([out.code, wrote], ['ended', one], JSON.stringify(out));
   assert.equal(has(K1), false, 'written after the end began, but for the process that was ended: no card to keep');
 
   // the session is resumed while the end of its old process is still running, and its window sees the new process
-  out = await endUnderWay(K1, () => { wrote = tracker.observe([runRow(K1, NEW, { pid: process.pid, startedAt: Date.now() })], root); });
-  assert.deepEqual([out.code, wrote], ['ended', { written: 1, removed: 0 }], JSON.stringify(out));
+  out = await endUnderWay(K1, { during: () => { wrote = seen({ pid: process.pid, startedAt: Date.now() }); } });
+  assert.deepEqual([out.code, wrote], ['ended', one], JSON.stringify(out));
   assert.ok(has(K1), 'the end of the old process does not take the record of the new one');
+
+  // resumed before the end was asked for: the board that ends it still shows the old process, the record is the new one's already
+  clearRecords();
+  out = await endUnderWay(K1, { before: (proc) => { wrote = core.createKeptTracker(RUN_NEW, NEW).observe([runRow(K1, NEW, { pid: process.pid, startedAt: proc.startedAt + 2000 })], root); } });
+  assert.deepEqual([out.code, wrote], ['ended', one], JSON.stringify(out));
+  assert.ok(has(K1), 'a process started later than the one the end was aimed at, also when it started before the end was asked for');
+
+  // a row without a start time (an older CLI): the two processes cannot be told apart, the record goes
+  out = await endUnderWay(K1, {}, null);
+  assert.deepEqual([out.code, has(K1)], ['ended', false], 'its window writes it again at its next poll if the session runs there');
 });
 
 test('heartbeat: carries the run of its host; a value that is no run id is left out', () => {

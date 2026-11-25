@@ -10,6 +10,7 @@
 - The "by activity | manual" switch and the manual order are gone. A session that needs you is no longer pulled to the top; its colour, the badge on the window heading and the notification point at it, and a lock keeps it on top if you want it there. The files of the manual order (`order\`, `sort.json`) stay on disk, unread
 - Ended sessions are ordered by their last message, not by the file time of their transcript, which a rename or a new title used to move
 - Browser front end: `POST /api/locks` takes a JSON body; `/api/order` and `/api/order/mode` are gone
+- A note that could not be saved no longer leaves a temporary file behind in the notes folder
 
 ## 0.12.0
 

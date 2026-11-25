@@ -31,8 +31,12 @@ test('writeJsonAtomic: a write that cannot be finished leaves no temp file behin
   for (let i = 0; i < 2; i++) assert.throws(() => writeJsonAtomic(held, file, { n: 2 }), /EPERM/);
   assert.deepEqual(fs.readdirSync(dir), ['rec.json'], 'a caller that tries again at every poll must not fill the folder');
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { n: 1 });
-  const full = Object.assign({}, fs, { writeFileSync: refuse('ENOSPC') });  // not even the temp file can be written
-  assert.throws(() => writeJsonAtomic(full, file, { n: 3 }), /ENOSPC/, 'the failure of the write, not that of the clean-up after it');
+  const full = Object.assign({}, fs, { writeFileSync(p, data) { fs.writeFileSync(p, String(data).slice(0, 3)); refuse('ENOSPC')(); } });   // the disk fills up in the middle of the temp file
+  for (let i = 0; i < 2; i++) assert.throws(() => writeJsonAtomic(full, file, { n: 3 }), /ENOSPC/);
+  assert.deepEqual(fs.readdirSync(dir), ['rec.json'], 'the half-written temp file went with its write');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { n: 1 });
+  const none = Object.assign({}, fs, { writeFileSync: refuse('EACCES') });  // not even the temp file can be made, so the clean-up finds nothing
+  assert.throws(() => writeJsonAtomic(none, file, { n: 4 }), /EACCES/, 'the failure of the write, not that of the clean-up after it');
   assert.deepEqual(fs.readdirSync(dir), ['rec.json']);
   fs.rmSync(dir, { recursive: true, force: true });
 });

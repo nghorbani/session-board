@@ -153,8 +153,9 @@ installed.
   window without a folder; the 60 s before a record of an ended session goes; a record of
   another lifetime left alone; a newer process of the same session; a row whose process is
   gone; a removal that fails once; a record that went missing written again), an explicit
-  end, an end held open by a real process while its window writes a record (for the process
-  being ended, and for one started since), `run` in the heartbeat, the `kept` flag
+  end, an end held open at a gate in the `claude stop` shim while its window writes a record
+  (for the process being ended, for one started since, for one started before the end was
+  asked for, and with a row that has no start time), `run` in the heartbeat, the `kept` flag
   of `listedSessions()`
   (a dead lifetime, a live one, another folder, a junction and its target, no row added or
   moved, a dead host that owns no folder) and `reconcileKept()` (an archive, a transcript that
@@ -447,14 +448,17 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   with an archive (on the board at once, in `archiveSession()`), with a transcript that is
   gone, and when the session runs again in a process younger than the record while the
   record's lifetime is dead (resumed in a terminal or in a window on an older board: the card
-  is spent). ✕ on the board drops the record at once (`endSession()`, `forgetKept()`): a
-  record of a process that started after that end began is left, since the session ran again
-  meanwhile. The record's `startedAt` decides, not the time of its write: a window that sees
-  the session for the first time while the end runs writes a record for the very process
-  being ended. A removal that fails is named in the end result (`keptError`) and logged. No
-  lock between windows here either: a record another window writes between the end's read
-  and its removal goes too, and that window's tracker, which reads the folder at every poll,
-  writes it again at its next one.
+  is spent). ✕ on the board drops the record at once (`endSession()`, `forgetKept()`), with
+  one exception: the record of a process that started later than the one the end was aimed
+  at (the row this board last saw) is left, since the session ran again, before the end was
+  asked for or while it ran. The two starts decide, not the time of a write or of the
+  request: a window that sees the session for the first time while the end runs writes a
+  record for the very process being ended. Without a row or without a start time the two
+  cannot be told apart and the record goes. A removal that fails is named in the end result
+  (`keptError`) and logged. No lock between windows here either: a record another window
+  writes between the end's read and its removal goes too. Whenever a record is taken from a
+  session that runs on, its window's tracker, which reads the folder at every poll, writes
+  it again at its next one.
   In the tracker a record that could not be removed is tried again on the next poll, and a
   row whose process is gone by the time the tracker reads it gets no record. A session that runs again in a newer process within
   the same lifetime gets a fresh record, so `reconcileKept()` does not take that process for
