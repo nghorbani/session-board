@@ -280,6 +280,24 @@ test('an explicit end drops the record at once: ended by hand and the window clo
   agents([]);
 });
 
+test('an end that cannot read the record leaves it and says so; a file that holds no record goes', { skip: !core.IS_WINDOWS }, async () => {
+  clearRecords(); clearHeartbeats();
+  heartbeat(NEW, root, RUN_NEW);
+  agents([]);
+  record(K1, { run: RUN_NEW, startedAt: Date.now() + 60000 });   // the record of a process started after this end is asked for: not this end's to take
+  const read = fs.readFileSync;
+  fs.readFileSync = (p, ...rest) => { if (String(p) === file(K1)) throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }); return read(p, ...rest); };
+  let held;
+  try { held = await core.endSession(K1, {}); } finally { fs.readFileSync = read; }
+  assert.deepEqual([held.code, has(K1)], ['unknown', true], 'not readable at this moment: nothing says whose record it is, so it stays');
+  assert.match(String(held.keptError), /EBUSY/, 'and the result says what was left behind');
+  const again = await core.endSession(K1, {});
+  assert.deepEqual([has(K1), 'keptError' in again], [true, false], 'readable again: the record of a process started after the end was asked for is left, without a complaint');
+  fs.writeFileSync(file(K1), '{ no json');
+  const gone = await core.endSession(K1, {});
+  assert.deepEqual([has(K1), 'keptError' in gone], [false, false], 'a file that can be read and holds no record goes, as before');
+});
+
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 /**
@@ -463,6 +481,8 @@ test('reconcile: a record goes with an archive (on the board at once, in Claude 
   let map = core.readKept();
   core.reconcileKept(map, [], new Set(), new Set(), new Set(), { known: false, ids: new Set([K1]) });
   assert.deepEqual([map.has(K1), has(K1)], [true, true], 'Claude Code\'s archive not read yet: nothing is dropped on its word');
+  core.reconcileKept(map, [], new Set(), new Set(), new Set(), { known: true, error: 'database is locked', ids: new Set([K1]) });
+  assert.deepEqual([map.has(K1), has(K1)], [true, true], 'the last read of the archive failed and the ids are those of an earlier read: nothing is dropped on their word either');
   core.reconcileKept(map, [], new Set(), new Set(), new Set(), { known: true, ids: new Set([K1]) });
   assert.deepEqual([map.has(K1), has(K1)], [false, false], 'archived in Claude Code');
   await core.unarchiveSession(ARCH);

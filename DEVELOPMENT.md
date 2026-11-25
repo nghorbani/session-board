@@ -410,7 +410,8 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   `setLocks({ set, move, clear })` checks the whole request before the first write; `move`
   changes a slot only where a lock exists, so a page with an old snapshot cannot bring back a
   lock another window cleared. `reconcileLocks()` in `snapshot()` drops the lock of a session
-  archived on the board or in Claude Code (once its archive has been read) and of one that
+  archived on the board or in Claude Code (when its archive was read: not before the first
+  read and not while a read fails, since the ids are then those of an earlier read) and of one that
   is not running and has no transcript left (`transcriptGone()`, not the minute-old index).
   The page builds one placed list per section in `groupSessions()`: `placeRows()` puts the
   locked rows at their slots and the others around them, on the rows the switch shows, so a
@@ -473,8 +474,9 @@ real `claude` call; new page behaviour gets a scripted snapshot in the page suit
   request: a window that sees the session for the first time while the end runs writes a
   record for the very process being ended. Without a start of the aimed process (no row any
   more, or an older CLI) the time the end was asked for stands in for it: a process started
-  after that is a later one in any case. A record without a start time goes. A removal that
-  fails is named in the end result (`keptError`) and logged. No lock between windows here
+  after that is a later one in any case. A record without a start time goes. A record that
+  cannot be read at that moment stays, and so does one whose removal fails; either is named
+  in the end result (`keptError`) and logged. No lock between windows here
   either: a record another window writes between the end's read and its removal goes too.
   Whenever a record is taken from a session that runs on, its window's tracker, which reads
   the folder at every poll, writes it again at its next one.

@@ -1463,15 +1463,17 @@ function setLocks(req) {
 
 /**
  * Drop the markers of one store (locks, kept records) that no longer have a card to hold: a
- * session archived on the board or in Claude Code (its word counts only once its archive has
- * been read), and a session that is not running and has no transcript in either root. A
+ * session archived on the board or in Claude Code (its word counts only when its archive was
+ * read: not before the first read, and not while a read fails, when the ids are those of an
+ * earlier read and a session unarchived since would lose its marker on them), and a session
+ * that is not running and has no transcript in either root. A
  * transcript the file index lists is there (the index is at most a minute old, so a deleted one
  * keeps its marker a minute longer); one the index does not list is looked for on disk, so a
  * session younger than the index keeps its marker. A marker that cannot be removed stays for
  * the next snapshot.
  */
 function reconcileMarkers(markers, fileOf, liveIds, boardIds, claude, index) {
-  const claudeKnown = Boolean(claude) && claude.known !== false && Boolean(claude.ids);
+  const claudeKnown = Boolean(claude) && claude.known !== false && !claude.error && Boolean(claude.ids);
   for (const id of [...markers.keys()]) {
     const archived = boardIds.has(id) || (claudeKnown && claude.ids.has(id));
     if (!archived && (liveIds.has(id) || (index && index.has(id)) || !transcriptGone(id))) continue;
@@ -1597,9 +1599,10 @@ function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
  * a record for the very process being ended. Without a start of the aimed process (no row any
  * more, or an older CLI) `since` stands in for it: a process started after the end was asked
  * for is a later one in any case, one started before it may be the one that was ended. A record
- * without a start time goes. Returns null, or why the record could not be removed. Its window's
- * tracker then drops it after its wait, as for a session that ended by itself, so the caller
- * reports the reason and goes on.
+ * without a start time goes. A record that cannot be read at this moment stays: nothing says
+ * whose it is (readMarkers leaves such a file too). Returns null, or why the record could not be
+ * read or removed. Its window's tracker then drops it after its wait, as for a session that
+ * ended by itself, so the caller reports the reason and goes on.
  *
  * No lock between windows here either: a record another window writes between this read and
  * the removal goes too. Like every record taken from a session that runs on, its window's
@@ -1607,8 +1610,10 @@ function reconcileKept(kept, rows, liveRuns, liveIds, boardIds, claude, index) {
  */
 function forgetKept(sessionId, aimedStart, since) {
   const file = keptFile(sessionId);
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }
   let rec = null;
-  try { rec = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (e && e.code === 'ENOENT') return null; }
+  try { rec = JSON.parse(text); } catch (_) { rec = null; }   // holds no record: it goes
   const aimed = Number(aimedStart) > 0 ? Number(aimedStart) : Number(since);
   if (rec && Number(rec.startedAt) > aimed) return null;
   try { fs.unlinkSync(file); return null; } catch (e) { return e && e.code === 'ENOENT' ? null : String((e && e.message) || e); }

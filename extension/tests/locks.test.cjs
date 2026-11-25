@@ -129,6 +129,9 @@ test('reconcile: an archived session loses its lock, on the board at once, in Cl
   map = locks();
   core.reconcileLocks(map, live, new Set(), { known: false, ids: new Set([A, B]) });
   assert.deepEqual([map.has(A), map.has(B)], [true, true], 'Claude Code\'s archive not read yet: nothing is dropped on its word');
+  core.reconcileLocks(map, live, new Set(), { known: true, error: 'database is locked', ids: new Set([A, B]) });
+  assert.deepEqual([map.has(A), map.has(B), fs.existsSync(lock(A)), fs.existsSync(lock(B))], [true, true, true, true],
+    'the last read failed, so the ids are those of an earlier read: a session unarchived since then must not lose its lock on their word');
   core.setLocks({ clear: [A, B] });
 });
 
